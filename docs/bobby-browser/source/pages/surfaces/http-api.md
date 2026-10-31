@@ -40,10 +40,10 @@ documentedVersion: {{PRODUCT_VERSION}}
 **Create a session.** `POST /v1/sessions` takes `{profile, proxy, executionPolicy?, zigzagzig?}`. All `executionPolicy` flags default to off:
 
 ```json
-{"profile": "default", "proxy": null, "executionPolicy": {"javascriptEvaluation": false, "visionAssist": false, "fingerprint": false, "humanize": false}}
+{"profile": "default", "proxy": null, "executionPolicy": {"javascriptEvaluation": false, "visionAssist": false, "fingerprint": false, "humanize": false, "passwordManager": false}}
 ```
 
-`fingerprint` applies fingerprint spoofing and `humanize` adds human-like input timing. `zigzagzig: true` turns every flag on and recovers stuck commands automatically; see [Bobby skills](../guides/skills.md).
+`fingerprint` applies fingerprint spoofing and `humanize` adds human-like input timing. `passwordManager` lets the `passwordManagerFill` control action accept the browser password manager's suggestion. `zigzagzig: true` turns on `javascriptEvaluation`, `visionAssist`, `fingerprint` and `humanize` and recovers stuck commands automatically; see [Bobby skills](../guides/skills.md).
 
 **Open a page.** `POST /v1/pages` takes `{session_id}`. This body is snake_case; session and page state also use `id`, `session_id` and `page_ids`.
 

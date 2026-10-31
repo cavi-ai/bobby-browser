@@ -13,6 +13,7 @@ bobby drives real browsers on behalf of authenticated callers, so it denies by d
 - **Bounded issuance.** Only `authority:admin` can mint tokens. Issued tokens are a subset of the issuer's capabilities and expire. The runtime stores digests, never bearers.
 - **No secrets in URLs, logs or committed configuration.** Credentials travel in the `Authorization` header only.
 - **Opt-in JavaScript and vision.** Each needs a capability, a session `executionPolicy` flag, and for vision a configured provider. Vision tokens live in environment variables named by `token_env`.
+- **Opt-in password manager fill.** `passwordManagerFill` needs the session's `executionPolicy.passwordManager`. The filled value is never returned.
 - **Per-principal isolation.** Sessions, pages, idempotency keys and quotas belong to one principal. Request, frame and result sizes are bounded.
 - **Egress control.** Outbound requests from the runtime deny private and loopback addresses unless `[http]` allows them.
 

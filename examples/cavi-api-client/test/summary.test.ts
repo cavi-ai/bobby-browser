@@ -98,7 +98,7 @@ test("CLI creates and deletes its session on success and provider failure", asyn
       if (request.url === "/v1/sessions") {
         response.end(JSON.stringify({ id: sessionId, profile: "default", proxy: null, page_ids: [],
           created_at: new Date().toISOString(), last_used_at: new Date().toISOString(),
-          execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }));
+          execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false, passwordManager: false } }));
       } else if (request.url === "/v1/pages") {
         response.end(JSON.stringify({ id: pageId, session_id: sessionId,
           url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }));

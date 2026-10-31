@@ -17,6 +17,7 @@ An agent using bobby reads text it does not control: page content, accessibility
 - **Grant a capability.** Capabilities are checked against the caller's authenticated token on every dispatch, before any page content is read. No path lets page text change a token's grant or a session's `executionPolicy`.
 - **Select a tool.** The runtime never parses result text into a tool call. A host that treats tool output as new instructions makes that choice itself.
 - **Turn on `evaluate_javascript` or vision extraction.** The session must already hold `javascript:evaluate` or `vision:assist` and the matching `executionPolicy` flag.
+- **Turn on password manager fill.** `passwordManagerFill` runs only in a session started with `executionPolicy.passwordManager`.
 - **Trigger an outbound request.** Navigation, downloads and vision calls happen only when the caller issues them.
 
 ## The `pageDerived` marker

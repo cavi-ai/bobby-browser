@@ -178,8 +178,8 @@ precise repair for their failure modes and win over this table.
 - Blind-retrying after `verificationFailed` or any `needsReconciliation`.
 - Inventing CSS/XPath selectors instead of snapshot targets.
 - One `intent_fill` per field where `intent_complete_form` would do.
-- Re-logging into sites every session instead of using the operator's paired
-  Firefox profile (disposable Chromium profiles keep no cookies — see below).
+- Re-logging into sites every session instead of using the operator's durable
+  profile (disposable Chromium profiles keep no cookies — see below).
 - Hand-authoring `evidenceRefs` or forging artifact digests.
 - Retrying the same tool with the same token after `missingCapability`.
 
@@ -187,13 +187,17 @@ precise repair for their failure modes and win over this table.
 
 The gateway resolves the browser engine at startup: an explicit
 `AUTOMATION_RUNTIME_BROWSER_SELECTION`, else the operator's paired enrollment
-(`browser-selection.json`), else fail-closed. Two engines result:
+(`browser-selection.json`), else fail-closed. The selection picks one of:
 
 - **Firefox companion:** real headed Firefox, persistent profile — cookies
   and logins survive sessions. Sign in once in that window.
-- **Managed Chromium:** disposable per-session profile. Nothing persists. If
-  logins vanish between sessions, ask the operator to Pair the Firefox
-  companion instead of re-authenticating every run.
+- **Managed Chromium with a `profileId`:** durable profile shared by every
+  session. Cookies, logins and installed extensions, such as a password
+  manager, persist.
+- **Managed Chromium without a `profileId`:** disposable per-session profile.
+  Nothing persists. If logins vanish between sessions, ask the operator to
+  pair the Firefox companion or select a Chromium `profileId` instead of
+  re-authenticating every run.
 
 Setup, pairing, and credential minting are operator tasks (`bobby install`,
 `bobby doctor`); if the runtime is unreachable, say `bobby doctor` names the

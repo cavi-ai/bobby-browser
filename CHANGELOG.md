@@ -6,6 +6,10 @@
 
 - `passwordManagerFill` control action on Firefox and Chromium accepts the browser password manager's inline suggestion for a credential field without returning its value; sessions opt in with `executionPolicy.passwordManager`.
 
+### Changed
+
+- `Formula/bobby-browser.rb` carries the v0.21.1 asset digests.
+
 ### Fixed
 
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
