@@ -61,12 +61,14 @@ Facts that drive the plan:
 agent purpose ─► T0 exact DOM/AX match (exists)            ~0 ms, 0 MB
                  │ miss / ambiguous
                  ▼
-                 T1 semantic text matcher (NEW)             ms, <1 GB, no screenshot
-                 │ purpose ↔ (role, name, label, near text); same ≥0.75 floor, margin, verify
+                 T1 decision model, text only (NEW)         ms, ~1–4 GB, no screenshot
+                 │ Kev `choice` or BOBBY-VISION/1: purpose ↔ ≤5 (role, name) + none
+                 │ calibrated probability ≥0.75, margin, runtime verifies
                  │ miss / unnamed controls / low margin
                  ▼
-                 T2 perception (NEW small model)            one screenshot, many queries
-                 │ OCR + UI-element grounding → facts written INTO the page graph
+                 T2 perception (NEW small models)           one screenshot, many queries
+                 │ PP-OCRv6 / Apple Vision + 2B grounder (point → runtime hit-test)
+                 │ → facts written INTO the page graph
                  │ (visual labels for unnamed controls, text-in-box, challenge class)
                  ▼
                  T3 heavy VLM (today's 27B, opt-in)         solveChallenge loop / last resort
@@ -89,8 +91,9 @@ Rules every tier keeps (they already exist and stay non-negotiable):
 | T2 perception writes graph facts | fewer repeat escalations (remembered visual labels) | +small model | **−** fewer `a11y_snapshot` after `context_ask` misses | next visit resolves at T0/T1 | **Do** after T1 |
 | Semantic `context_ask` | − snapshot calls | +embedding index per page (bounded) | **large −** (snapshot avoided) | hit-rate ↑, same floor | **Do**, uses T1 model |
 | Keep 27B as default | — | ~15+ GB | — | best on solveChallenge | **Demote** to opt-in T3 |
-| CUA vendoring | see §CUA | | | | pending review |
-| kev / laya classifiers | see §Classifiers | | | | slot defined, needs API |
+| Kev decision model for T1 | N field picks → 1 call | 16 GB → 3.8 GB (0.8B) | 0 | calibrated probabilities; must hold the freshness floors | **Do**, competes with the v1 adapter |
+| Vendor CUA | — | +sidecar | — | duplicates CDP core; AGPL/FSL parts; pre-release churn | **Don't** |
+| `cua-driver` sidecar for browser-chrome prompts | −1 VLM call per password-manager fill | small native binary | 0 | deterministic AX click (if reachable) | **Spike only** |
 
 ## Model candidates
 
@@ -161,28 +164,93 @@ Sources: Qwen3.5 cards ([2B](https://huggingface.co/Qwen/Qwen3.5-2B),
 [GUI-Primitives](https://arxiv.org/abs/2608.21832),
 [Ollama qwen3.5 tags](https://ollama.com/library/qwen3.5/tags).
 
-## Classifiers (kev local, laya local, jev subscription)
+## Decision models: Kev (local), Laya (local), Jev (hosted)
 
-They are only worth wiring where a *classification* is the whole answer, and where they beat the
-baseline on our suites:
+These are *decision models*, not LLMs. They take a `state` plus named, bounded questions and return
+typed answers (`choice`, `score`, `noul`) with calibrated probabilities. They are the decision half
+that this plan pulls *out* of the vision node.
 
-1. **T1 candidate pick:** purpose against ≤5 labels → index or abstain. This is a classification
-   task already, and the v1 contract (bare index or −1) maps onto it directly.
-2. **Page-state class:** `detectChallenge` (6 classes + none) and obstruction or login-wall
-   detection. Today a 27B VLM produces one enum.
-3. **Prompt-injection screen** on page text before it reaches the agent
-   (`docs/.../security/prompt-injection.md` and the `prompt_injection_canary` tests exist).
+- **Kev** ([jaredpalmer/kev](https://github.com/jaredpalmer/kev))
+  - Apache-2.0. Sizes 0.8B / 4B / 9B / 27B on Qwen3.5/3.8 bases.
+  - Local HTTP `POST /v1/systemone`; uses MLX automatically on Apple Silicon.
+  - Up to 255 options per `choice`; each checkpoint ships a fitted temperature.
+  - Peak on Apple Silicon: 0.8B **3.8 GB**, 4B **13.0 GB**.
+  - Model time for 6 questions: 16–23 ms (0.8B, L4 GPU). Apple Silicon latency is UNVERIFIED.
+  - Fine-tunes from labelled JSONL (`kev.train`, CUDA in the docs).
+- **Laya** (ConvAI): open-weight, built for >50-class classification. License to be verified
+  before bundling.
+- **Jev** (TypeSafe): hosted subscription. **Excluded from the default path**: per-call cost, and
+  page structure would leave the machine. Opt-in only, like the OpenAI upstream.
 
-`jev` (subscription API) is **excluded from the default local path**: per-call cost, and page
-text would leave the machine. It stays opt-in only, like the OpenAI upstream.
-**Needed from the owner:** each model's input/output contract (labels, max input, image or
-text), latency, RAM, license, and how bobby reaches it (HTTP endpoint or in-process).
+Where they add real value, ranked:
 
-## CUA (trycua/cua, MIT)
+1. **T1 candidate pick (primary).**
+   - Request: one `choice` question per stuck field. `state` carries purpose, url and recent command
+     kinds; `criteria` carries the ≤5 candidate `(role, name)` labels plus `none`.
+   - Value 1, calibration: calibrated probabilities replace the VLM's self-reported "confidence",
+     so the existing 0.75 floor finally means a probability. Abstain is `none` winning or a low
+     margin.
+   - Value 2, batching: `questions` is a map, so **a 10-field prefill is one call**. That is P2 for
+     free on the text path.
+   - Contract: maps 1:1 onto `BOBBY-VISION/1` (bare index or −1). Integration is a `kev` upstream in
+     `vision-proxy` (HTTP, like `ollama.rs`), declared `needs_image = false`.
+2. **Page-state classification.** `detectChallenge` (6 classes + none), obstruction and login-wall,
+   read from DOM/AX structure plus T2 OCR text. Today a 27B VLM produces this single enum.
+3. **Prompt-injection screen** (`noul`) on page text before it reaches the driver agent. See
+   `security/prompt-injection.md` and the `prompt_injection_canary` tests.
 
-_Filled from the CUA review._
+Costs and cautions:
 
-<!-- cua-results -->
+- Kev-0.8B (3.8 GB) still cuts resident memory ~4× vs the 27B (16 GB).
+- Kev's own general benchmark puts 0.8B at 0.65–0.70 on *new* sources vs 0.82–0.84 for 4B. We
+  fine-tune on our window corpus and gate on the existing freshness floors (98% / 100% / 95%),
+  plus the out-of-sample split (`training/oos_split.py`).
+- Precedent: CUA-S1-forms reported 99.7% in-distribution but **29.3%** on out-of-catalogue forms
+  in an independent eval. In-distribution numbers alone do not count.
+- Privacy is unchanged: `state` carries sanitized labels only (the corpus sanitizers), never typed
+  values or page text.
+
+## CUA (trycua/cua)
+
+**Verdict: do not vendor any of it.** The value is narrow, and it is worth one measured spike, as
+a sidecar.
+
+Reasons, with sources in the review notes:
+
+- **Overlap.** `cua-driver` ships CDP click/type/select/dialogs/`set_input_files`/downloads, which
+  duplicates bobby's core ([tools](https://cua.ai/docs/cua-driver/reference/mcp-tools)).
+- **Churn.**
+  - The whole Python stack (computer, computer-server, agent, som) is deprecated in favour of a
+    Rust core ([README](https://github.com/trycua/cua)).
+  - Every `cua-driver` release is pre-release: 0.33.4 → 0.38.0 in 16 days.
+  - The SDK broke at 0.5.0, and it is not on crates.io.
+  - Vendoring it the way we vendor chromiumoxide would mean owning a fast-moving codebase. That is
+    technical debt, not leverage.
+- **License traps.**
+  - `cua-perception` bundles the OmniParser `icon_detect` ONNX, which is **AGPL-3.0**, with
+    network-use obligations.
+  - `cua-som` is AGPL.
+  - `spacesd` and Spaces are **FSL-1.1** with a competing-use clause; bobby is arguably a
+    competing product
+    ([LICENSING.md](https://raw.githubusercontent.com/trycua/cua/main/legal/LICENSING.md)).
+
+The one real value case:
+
+- **Native surfaces CDP cannot reach.** `cua-driver` (MIT, `cua-driver mcp` over stdio) drives the
+  platform accessibility tree: OS file pickers, print/save sheets and, *probably*, browser-chrome
+  popups (UNVERIFIED).
+- Today `passwordManagerFill` (#830) sends a full screenshot to the 27B VLM to find the password
+  manager's prompt, then makes a trusted click. If `cua-driver` can address that prompt through
+  the AX tree, a 16 GB VLM call becomes a deterministic, verifiable AX click.
+
+**Spike (P5, optional):**
+
+- Run `cua-driver` as an opt-in sidecar process behind a new capability, with a pinned version and
+  no perception extension.
+- Compare it with the current vision path on the password-manager prompt: success rate, latency
+  and RAM.
+- Adopt only if it wins. Otherwise drop it.
+- Lume (MIT) is relevant only if we later want macOS VM isolation for untrusted sessions.
 
 ## Shared contract: schema, skill, refs
 
@@ -240,9 +308,11 @@ Each phase ships on its own, behind config, with its eval numbers in the PR.
 - [ ] Default stack becomes T1 plus T2. The 27B stays as opt-in T3 for `solveChallenge`.
   `bobby doctor` reports which tiers are active and their RAM.
 
+**P5 (optional): `cua-driver` spike** for the password-manager prompt (see §CUA).
+
 ## Open questions for the owner
 
-1. kev / laya contracts (see §Classifiers).
+1. Which Kev size is running now, on which host and port, and does Laya's license allow bundling?
 2. Target floor hardware for the default stack (8 GB / 16 GB / Apple Silicon only?). This decides
    2B vs 0.8B for the grounder.
 3. Can the corpus collected so far (`scripts/vision-mlx/data/`, local only) be used to train T1,
