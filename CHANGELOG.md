@@ -13,6 +13,7 @@
 ### Fixed
 
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
+- A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
 
 ## 0.21.1 - 2026-10-22
 

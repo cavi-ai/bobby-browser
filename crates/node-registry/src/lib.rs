@@ -200,11 +200,23 @@ impl NodeRegistry {
         })
     }
 
+    /// Vision provider for a session that names no node: the primary HTTP
+    /// vision node, only when its address is loopback, so page material from
+    /// an unnamed choice never leaves this machine. A remote node is reached
+    /// only by name.
+    pub fn local_vision_assist(&self) -> Option<Arc<dyn VisionAssist>> {
+        let (name, _) = self.primary_http_vision_node()?;
+        if !self.resolve(name, NodeKind::Vision).ok()?.is_local() {
+            return None;
+        }
+        self.vision(name).ok()
+    }
+
     /// Builds a vision provider for the named node.
     ///
-    /// There is deliberately no default-provider branch: a session that names
-    /// no node has no vision provider, which the intent engine's
-    /// deny-by-default double gate turns into a declined escalation.
+    /// No name resolves to another node: an unknown or wrong-kind name is an
+    /// error, which the intent engine's deny-by-default double gate turns into
+    /// a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
         if let Some(profile) = self.acp_profiles.get(name) {
             let assist =

@@ -1,7 +1,8 @@
 //! A session names the node it escalates to, and gets that node or nothing.
 //!
-//! Selection is per session, and every negative path (no name, unknown name, wrong
-//! kind) declines rather than substituting a different node.
+//! Selection is per session, and every negative path (unknown name, wrong kind)
+//! declines rather than substituting a different node. A session that names no node
+//! gets the runtime's installed provider.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

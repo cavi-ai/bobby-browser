@@ -405,6 +405,8 @@ impl RuntimeService {
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());
+        // A session that names no node escalates to this host's own vision node.
+        let vision_assist = vision_assist.or_else(|| nodes.local_vision_assist());
         let vision_assist_present = vision_assist.is_some();
         let provider_present = vision_assist_present || provider.is_some() || !nodes.is_empty();
         if let Some(assist) = vision_assist {

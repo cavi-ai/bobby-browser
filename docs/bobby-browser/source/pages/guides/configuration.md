@@ -293,4 +293,4 @@ kind = "vision"
 endpoint_url = "http://127.0.0.1:8080/propose"
 ```
 
-A session that names no node escalates to none. A session that names an unknown node is declined; bobby never substitutes another or falls back to a remote default. A session bound to a loopback node cannot send screenshots or page text off the machine. When `[nodes]` and `[vision]` are both set, `[nodes]` wins with a startup warning. With only `[vision]`, its endpoint is a node named `vision`.
+A session that names no node escalates to the primary vision node (`vision`, else the first) when its address is loopback, and to none otherwise. A session that names an unknown node is declined; bobby never substitutes another or falls back to a remote default. A session bound to a loopback node cannot send screenshots or page text off the machine. When `[nodes]` and `[vision]` are both set, `[nodes]` wins with a startup warning. With only `[vision]`, its endpoint is a node named `vision`.
