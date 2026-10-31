@@ -34,7 +34,18 @@ cases::every_case!(
 #[ignore = "requires installed Chrome or Chromium"]
 async fn password_manager_fill_clicks_the_managers_prompt() {
     let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
-    let endpoint = runtime_tests::clicking_vision_node(x, y, Default::default()).await;
+    let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
+    let rig = Rig::chromium_with_vision_node(&endpoint).await;
+    cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
+}
+
+/// Local models report modest confidence even on a correct point; the click is
+/// still refused on page controls and verified by the fill.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn password_manager_fill_accepts_a_modest_confidence_prompt_click() {
+    let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
+    let endpoint = runtime_tests::clicking_vision_node(x, y, 0.7, Default::default()).await;
     let rig = Rig::chromium_with_vision_node(&endpoint).await;
     cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
 }
