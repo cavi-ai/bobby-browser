@@ -9,6 +9,7 @@
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.21.1 asset digests.
+- `scripts/vision-mlx/eval_provider.py` scores candidate picks as the runtime acts on them: it sends the page URL and candidates, counts a pick below the 0.75 confidence floor as an abstention, and reports pick accuracy, abstain recall and precision, p50/p95 latency and peak memory.
 
 ### Fixed
 
