@@ -1642,6 +1642,11 @@ const PAGE_CONTROL_ROLES: &[&str] = &[
     "tab",
 ];
 
+/// Lower than [`VISION_CONFIDENCE_FLOOR`]: a password-manager click is refused
+/// on any page control and verified by the field's fill or the page moving on,
+/// so a modest self-reported confidence cannot press the wrong control.
+const PASSWORD_MANAGER_CONFIDENCE_FLOOR: f32 = 0.5;
+
 struct PasswordManagerFill<'a> {
     candidate: &'a Candidate,
     target: &'a TargetSpec,
@@ -1767,11 +1772,11 @@ async fn fill_with_password_manager(
         vision_proposal_sha256: Some(proposal_sha256(&proposal)),
         artifact_ids,
     };
-    if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+    if proposal.confidence < PASSWORD_MANAGER_CONFIDENCE_FLOOR {
         return failed(
             ErrorCode::VisionAssistFailed,
             format!(
-                "vision proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
+                "vision proposal confidence {:.2} below floor {PASSWORD_MANAGER_CONFIDENCE_FLOOR}",
                 proposal.confidence
             ),
             evidence,
