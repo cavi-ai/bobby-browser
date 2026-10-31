@@ -5,7 +5,14 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from providers.base import ProposeRequest, ProposeResponse, VisionProvider
+from providers.base import (
+    ProposeRequest,
+    ProposeResponse,
+    VisionContext,
+    VisionContextCandidate,
+    VisionProvider,
+)
+from providers.mlx_vlm_provider import MlxVlmProvider
 
 
 class VisionProviderNormalizationTests(unittest.TestCase):
@@ -170,6 +177,26 @@ class VisionProviderNormalizationTests(unittest.TestCase):
             VisionProvider.normalize_response(
                 {"confidence": 0.9, "action": {"kind": "challengeSolved", "x": 1}}
             )
+
+    def test_a_request_without_candidates_names_the_action_to_answer_with(self):
+        def prompt(intent_kind, candidates=()):
+            return MlxVlmProvider().build_propose_prompt(ProposeRequest(
+                purpose="p",
+                intent_kind=intent_kind,
+                stuck="targetMissing",
+                screenshot_b64="",
+                context=VisionContext(candidates=list(candidates)),
+            ))
+
+        self.assertIn("\ncandidates: none; answer with click, not clickCandidate", prompt("locate"))
+        self.assertIn("\ncandidates: none; answer with typeText, not typeIntoCandidate", prompt("fill"))
+        self.assertIn(
+            "\ncandidates: none; answer with extractValue, not extractFromCandidate", prompt("extract")
+        )
+        self.assertNotIn("candidates: none", prompt("detectChallenge"))
+        listed = prompt("locate", [VisionContextCandidate(role="button", name="Save")])
+        self.assertIn('\ncandidates:\n- button "Save"', listed)
+        self.assertNotIn("candidates: none", listed)
 
     def test_propose_prompt_covers_candidates_and_solve_challenge(self):
         for required in (

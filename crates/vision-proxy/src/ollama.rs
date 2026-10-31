@@ -168,38 +168,13 @@ impl Upstream for OllamaUpstream {
 
 impl OllamaUpstream {
     async fn do_propose(&self, input: &ProposeInput) -> Result<ProposeResponse, UpstreamError> {
-        let mut user_text = format!(
-            "purpose: {}\nintentKind: {}\nstuck: {}",
-            input.purpose, input.intent_kind, input.stuck
-        );
-        if let Some(context) = &input.context {
-            if let Some(url) = &context.url {
-                user_text.push_str(&format!("\nurl: {url}"));
-            }
-            if !context.candidates.is_empty() {
-                user_text.push_str("\ncandidates:");
-                for candidate in &context.candidates {
-                    user_text.push_str(&format!(
-                        "\n- {} \"{}\"{}",
-                        candidate.role,
-                        candidate.name,
-                        candidate
-                            .ordinal
-                            .map(|ordinal| format!(" (#{ordinal})"))
-                            .unwrap_or_default()
-                    ));
-                }
-            }
-            if !context.recent_command_kinds.is_empty() {
-                user_text.push_str(&format!(
-                    "\nrecentCommands: {}",
-                    context.recent_command_kinds.join(", ")
-                ));
-            }
-        }
         let system = propose_system();
         let value = self
-            .chat_json(&system, &user_text, Some(&input.screenshot_png_b64))
+            .chat_json(
+                &system,
+                &input.prompt_text(),
+                Some(&input.screenshot_png_b64),
+            )
             .await?;
         let mut proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
             UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))

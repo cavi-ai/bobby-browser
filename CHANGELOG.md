@@ -18,6 +18,7 @@
 - A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
 - The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.
 - Vision training-data rows record the model the proxy serves, including MLX `--model` overrides, instead of a redacted or default name; a local model path keeps only its last component.
+- A vision request without candidates tells the model to answer with `click`, `typeText` or `extractValue` instead of a candidate index that points at nothing.
 
 ## 0.21.1 - 2026-10-22
 

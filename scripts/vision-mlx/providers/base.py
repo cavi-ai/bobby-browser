@@ -28,8 +28,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from candidate_action_contract import (
+    CANDIDATE_ACTION_BY_INTENT,
     CANDIDATE_ACTION_KINDS,
     CANDIDATE_PROMPT_RULES,
+    LEGACY_ACTION_BY_CANDIDATE,
     SNAKE_CASE_CANDIDATE_KINDS,
 )
 
@@ -212,17 +214,20 @@ class VisionProvider(ABC):
             f"stuck: {request.stuck}"
         )
         ctx = request.context
-        if ctx:
-            if ctx.url:
-                text += f"\nurl: {ctx.url}"
-            if ctx.candidates:
-                text += "\ncandidates:"
-                for c in ctx.candidates:
-                    text += f'\n- {c.role} "{c.name}"'
-                    if c.ordinal is not None:
-                        text += f" (#{c.ordinal})"
-            if ctx.recent_command_kinds:
-                text += f"\nrecentCommands: {', '.join(ctx.recent_command_kinds)}"
+        if ctx and ctx.url:
+            text += f"\nurl: {ctx.url}"
+        if ctx and ctx.candidates:
+            text += "\ncandidates:"
+            for c in ctx.candidates:
+                text += f'\n- {c.role} "{c.name}"'
+                if c.ordinal is not None:
+                    text += f" (#{c.ordinal})"
+        elif candidate_kind := CANDIDATE_ACTION_BY_INTENT.get(request.intent_kind):
+            # Without a list, a candidate index points at nothing.
+            legacy_kind = LEGACY_ACTION_BY_CANDIDATE[candidate_kind]
+            text += f"\ncandidates: none; answer with {legacy_kind}, not {candidate_kind}"
+        if ctx and ctx.recent_command_kinds:
+            text += f"\nrecentCommands: {', '.join(ctx.recent_command_kinds)}"
         return text
 
     @staticmethod

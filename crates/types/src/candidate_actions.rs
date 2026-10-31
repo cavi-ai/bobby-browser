@@ -7,8 +7,7 @@ use serde::Deserialize;
 struct CandidateActionSpec {
     kind: String,
     acp_kind: String,
-    #[serde(rename = "legacyKind")]
-    _legacy_kind: String,
+    legacy_kind: String,
     legacy_acp_kind: String,
     intents: Vec<String>,
 }
@@ -38,6 +37,17 @@ pub fn candidate_action_acp_kinds_for_intent(
         .iter()
         .find(|spec| spec.intents.iter().any(|intent| intent == intent_kind))
         .map(|spec| (spec.acp_kind.as_str(), spec.legacy_acp_kind.as_str()))
+}
+
+/// The candidate action an intent answers with, and the action it answers
+/// with when no candidates are listed.
+pub fn candidate_action_kinds_for_intent(
+    intent_kind: &str,
+) -> Option<(&'static str, &'static str)> {
+    candidate_action_specs()
+        .iter()
+        .find(|spec| spec.intents.iter().any(|intent| intent == intent_kind))
+        .map(|spec| (spec.kind.as_str(), spec.legacy_kind.as_str()))
 }
 
 pub fn candidate_action_is_compatible(action_kind: &str, intent_kind: &str) -> bool {
