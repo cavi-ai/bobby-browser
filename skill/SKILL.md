@@ -104,6 +104,12 @@ calls. Rules that govern every call:
   proving authentication. Each call already verifies its own effect before
   returning `completed`; a `workflow_observe` between them re-checks
   nothing new.
+- **A sign-in form the browser's password manager can fill:** start the
+  session with `executionPolicy: {passwordManager: true}`, run
+  `control_action` `{kind: "passwordManagerFill"}` on the credential field,
+  then `intent_submit_and_verify` on the sign-in control. The runtime focuses
+  the field with native input and accepts the manager's inline suggestion;
+  the filled value never comes back. Without the opt-in it is `policyDenied`.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.

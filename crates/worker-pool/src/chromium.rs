@@ -975,6 +975,29 @@ impl ChromiumWorker {
         Ok((count, synthesized_ms, replaced))
     }
 
+    /// Accept the password manager's inline suggestion for the focused field.
+    /// Its menu answers only trusted keys: ArrowDown selects, Enter fills.
+    async fn accept_password_manager_suggestion(&self, page: &Page) -> Result<(), CommandError> {
+        const SETTLE_MS: u64 = 400;
+        tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
+        for key in ["ArrowDown", "Enter"] {
+            let press = [
+                TypingAction::KeyDown {
+                    character: key.into(),
+                    delay_ms: 0,
+                },
+                TypingAction::KeyUp {
+                    character: key.into(),
+                    delay_ms: SETTLE_MS,
+                },
+            ];
+            for action in &press {
+                self.replay_typing_action(page, action).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn replay_typing_action(
         &self,
         page: &Page,
@@ -2827,10 +2850,8 @@ impl crate::InputEngine for ChromiumWorker {
             },
             ControlAction::Activate => resolved.click(&page).await?,
             ControlAction::PasswordManagerFill => {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "passwordManagerFill is supported on Firefox only",
-                ));
+                resolved.click(&page).await?;
+                self.accept_password_manager_suggestion(&page).await?;
             }
         }
 

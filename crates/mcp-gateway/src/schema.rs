@@ -1129,7 +1129,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "ControlActionKind".to_owned(),
         json!({
             "type":"object",
-            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:activate}, or {kind:passwordManagerFill} (Firefox, executionPolicy.passwordManager)."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:activate}, or {kind:passwordManagerFill} (executionPolicy.passwordManager)."
         }),
     );
     patched.insert(
@@ -1143,7 +1143,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "FillValue".to_owned(),
         json!({
             "type":"object",
-            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, or {kind:clear}."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, or {kind:passwordManagerFill} (executionPolicy.passwordManager)."
         }),
     );
     patched.insert(

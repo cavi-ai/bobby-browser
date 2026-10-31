@@ -4,7 +4,7 @@
 
 ### Added
 
-- `passwordManagerFill` control action on Firefox accepts the browser password manager's inline suggestion for a credential field without returning its value; sessions opt in with `executionPolicy.passwordManager`.
+- `passwordManagerFill` control action on Firefox and Chromium accepts the browser password manager's inline suggestion for a credential field without returning its value; sessions opt in with `executionPolicy.passwordManager`.
 
 ### Fixed
 
