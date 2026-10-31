@@ -18,19 +18,22 @@ pub const DEFAULT_MODEL: &str = "mlx-community/Qwen3.5-27B-4bit";
 /// backend which translates chat-completions payloads.
 pub struct MlxUpstream {
     client: reqwest::Client,
+    /// Model the server was started with; corpus rows are attributed to it.
+    model: String,
     base_url: String,
     timeout: std::time::Duration,
     data_collector: Option<Arc<VisionDataCollector>>,
 }
 
 impl MlxUpstream {
-    pub fn new(base_url: String) -> Self {
-        Self::with_timeout(base_url, std::time::Duration::from_secs(60))
+    pub fn new(model: String, base_url: String) -> Self {
+        Self::with_timeout(model, base_url, std::time::Duration::from_secs(60))
     }
 
-    pub fn with_timeout(base_url: String, timeout: std::time::Duration) -> Self {
+    pub fn with_timeout(model: String, base_url: String, timeout: std::time::Duration) -> Self {
         Self {
             client: reqwest::Client::new(),
+            model,
             base_url: base_url.trim_end_matches('/').to_string(),
             timeout,
             data_collector: None,
@@ -79,7 +82,7 @@ impl Upstream for MlxUpstream {
                     None,
                     None,
                     None,
-                    Some(DEFAULT_MODEL.to_string()),
+                    Some(self.model.clone()),
                 ),
                 Err(_) => collector.log_proposal(
                     &input,
@@ -89,7 +92,7 @@ impl Upstream for MlxUpstream {
                     None,
                     Some("upstream error".into()),
                     None,
-                    Some(DEFAULT_MODEL.to_string()),
+                    Some(self.model.clone()),
                 ),
             }
         }
@@ -140,7 +143,7 @@ pub fn mlx_upstream_from_env() -> Result<MlxUpstream, MlxConfigError> {
     if base_url.is_empty() {
         return Err(MlxConfigError::MissingBaseUrl);
     }
-    Ok(MlxUpstream::new(base_url))
+    Ok(MlxUpstream::new(DEFAULT_MODEL.to_string(), base_url))
 }
 
 #[cfg(test)]
@@ -164,7 +167,7 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let upstream = MlxUpstream::new(format!("http://{address}"));
+        let upstream = MlxUpstream::new(DEFAULT_MODEL.into(), format!("http://{address}"));
         let proposal = upstream
             .propose(ProposeInput {
                 purpose: "Continue".into(),
@@ -200,7 +203,7 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let upstream = MlxUpstream::new(format!("http://{address}"));
+        let upstream = MlxUpstream::new(DEFAULT_MODEL.into(), format!("http://{address}"));
         let response = upstream
             .extract(ExtractInput {
                 schema: serde_json::json!({"type": "object"}),
@@ -210,6 +213,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.value["title"], serde_json::json!("Example"));
+    }
+
+    #[tokio::test]
+    async fn corpus_rows_name_the_served_model() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = br#"{"confidence":0.9,"action":{"kind":"clickCandidate","index":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let output_dir = std::env::temp_dir().join(format!(
+            "bobby-mlx-corpus-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let collector = Arc::new(VisionDataCollector::new(
+            crate::data_collector::DataCollectorConfig {
+                output_dir: output_dir.clone(),
+                enabled: true,
+                flush_interval_ms: 0,
+            },
+        ));
+        let served = "mlx-community/Qwen3.5-2B-4bit";
+        let upstream = MlxUpstream::new(served.into(), format!("http://{address}"))
+            .with_data_collector(collector);
+
+        upstream
+            .propose(ProposeInput {
+                purpose: "Continue".into(),
+                intent_kind: "locate".into(),
+                stuck: "targetAmbiguous".into(),
+                screenshot_png_b64: "cmF3".into(),
+                corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
+                context: None,
+            })
+            .await
+            .unwrap();
+
+        let rows = std::fs::read_to_string(output_dir.join("training_data.jsonl")).unwrap();
+        let row: Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
+        assert_eq!(row["model_name"], served);
+        std::fs::remove_dir_all(output_dir).unwrap();
     }
 
     #[test]

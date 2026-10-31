@@ -358,11 +358,7 @@ pub fn sanitize_corpus_label(raw: &str) -> String {
         .filter(|ch| !ch.is_control())
         .take(512)
         .collect::<String>();
-    let lower = text.to_ascii_lowercase();
-    let credential_prefix = ["bearer ", "basic ", "sk-", "ghp_", "github_pat_", "akia"]
-        .into_iter()
-        .any(|marker| lower.contains(marker));
-    if credential_prefix {
+    if has_credential_marker(&text) {
         return "[redacted]".into();
     }
     text.split_whitespace()
@@ -391,6 +387,35 @@ pub fn sanitize_corpus_label(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Model ids are operator configuration, not page data: kept verbatim so
+/// rows stay attributable; a filesystem path keeps only its last component.
+pub fn sanitize_corpus_model(raw: &str) -> String {
+    let text = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(256)
+        .collect::<String>();
+    if has_credential_marker(&text) {
+        return "[redacted]".into();
+    }
+    let path_like = text.starts_with(['/', '~', '.']) || text.contains('\\');
+    if !path_like {
+        return text;
+    }
+    text.rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn has_credential_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["bearer ", "basic ", "sk-", "ghp_", "github_pat_", "akia"]
+        .into_iter()
+        .any(|marker| lower.contains(marker))
 }
 
 /// Match a resolved (role, name) onto the candidates the model saw. Exact
@@ -478,6 +503,25 @@ mod tests {
             role: role.into(),
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn model_ids_survive_and_paths_keep_their_last_component() {
+        for id in [
+            "mlx-community/Qwen3.5-27B-4bit",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "llava:7b",
+            "gpt-4.1-mini",
+        ] {
+            assert_eq!(sanitize_corpus_model(id), id);
+        }
+        assert_eq!(
+            sanitize_corpus_model("/Users/someone/adapters/bobby-vision-v1/"),
+            "bobby-vision-v1"
+        );
+        assert_eq!(sanitize_corpus_model("~/models/local-ft"), "local-ft");
+        assert_eq!(sanitize_corpus_model(r"C:\models\qwen-ft"), "qwen-ft");
+        assert_eq!(sanitize_corpus_model("Bearer abc"), "[redacted]");
     }
 
     #[test]
