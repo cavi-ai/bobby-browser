@@ -137,7 +137,7 @@ impl VisionTrainingExample {
             error_message: error_message.map(|_| "[redacted]".into()),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
             run_id: run_id.map(|value| intent_engine::sanitize_corpus_label(&value)),
-            model_name: model_name.map(|value| intent_engine::sanitize_corpus_label(&value)),
+            model_name: model_name.map(|value| intent_engine::sanitize_corpus_model(&value)),
             image_hash,
         })
     }

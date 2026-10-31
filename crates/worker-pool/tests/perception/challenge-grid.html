@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Checkout</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><span class="brand">Fernway Supply</span><nav><a href="/shop">Shop</a><a class="active" href="/checkout">Checkout</a></nav></header>
+<main>
+  <div class="card" style="max-width:520px">
+    <h1 style="margin-top:0">Shipping details</h1>
+    <label for="s-name">Full name</label><input id="s-name" type="text">
+    <label for="s-zip">Postal code</label><input id="s-zip" type="text">
+    <p><button>Continue to payment</button></p>
+  </div>
+</main>
+<div class="backdrop" style="background:rgba(255,255,255,.6)"></div>
+<iframe src="/recaptcha/api2/bframe?k=fixture" title="image challenge" width="400" height="580" style="border:1px solid #ccc;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;box-shadow:0 4px 18px rgba(0,0,0,.25)"></iframe>
+</body></html>

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>challenge widget</title>
+<style>
+body { margin: 0; font: 14px Roboto, Helvetica, Arial, sans-serif; color: #222; }
+.box { width: 300px; height: 74px; border: 1px solid #d3d3d3; border-radius: 3px; background: #f9f9f9; box-shadow: 0 0 4px 1px rgba(0,0,0,.08); display: flex; align-items: center; }
+.check { width: 24px; height: 24px; margin: 0 12px 0 14px; border: 2px solid #c1c1c1; border-radius: 2px; background: #fff; }
+.label { flex: 1; font-size: 14px; }
+.logo { width: 64px; text-align: center; font-size: 9px; color: #555; line-height: 1.3; }
+.logo .mark { width: 32px; height: 32px; margin: 0 auto 2px; border-radius: 50%; background: conic-gradient(#1c3aa9 0 33%, #4a90e2 0 66%, #ababab 0); }
+.badge { width: 256px; height: 60px; display: flex; align-items: center; background: #f9f9f9; box-shadow: 0 0 5px gray; border-radius: 2px; }
+.badge .mark { width: 40px; height: 40px; margin: 0 10px; border-radius: 50%; background: conic-gradient(#1c3aa9 0 33%, #4a90e2 0 66%, #ababab 0); }
+.badge .text { font-size: 10px; color: #555; }
+</style></head>
+<body>
+<div id="widget"></div>
+<script>
+const invisible = new URLSearchParams(location.search).get("size") === "invisible";
+document.getElementById("widget").innerHTML = invisible
+  ? '<div class="badge"><div class="mark"></div><div class="text"><b>protected by challenge</b><br>Privacy - Terms</div></div>'
+  : '<div class="box"><div class="check" role="checkbox" aria-checked="false" tabindex="0" aria-label="I am not a robot"></div><div class="label">I\'m not a robot</div><div class="logo"><div class="mark"></div>challenge<br>Privacy - Terms</div></div>';
+</script>
+</body></html>

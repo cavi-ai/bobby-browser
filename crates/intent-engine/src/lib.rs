@@ -8,8 +8,8 @@ mod vision;
 
 pub use compiler::{compile_intent, CompileError, ExtractFieldPlan, IntentPlan};
 pub use corpus::{
-    sanitize_corpus_action, sanitize_corpus_label, sanitize_corpus_url, CorpusCandidate,
-    CorpusHealth, CorpusRecord, ResolvedElement, VisionCorpus,
+    sanitize_corpus_action, sanitize_corpus_label, sanitize_corpus_model, sanitize_corpus_url,
+    CorpusCandidate, CorpusHealth, CorpusRecord, ResolvedElement, VisionCorpus,
 };
 pub use engine::{
     vision_gate_closed, IntentBrowser, IntentEngine, IntentOutcome, VisionContext,

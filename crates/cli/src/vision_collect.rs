@@ -133,7 +133,7 @@ impl JourneyTrainingExample {
             error_message: error_message.map(|_| "[redacted]".into()),
             timestamp: chrono::Utc::now().to_rfc3339(),
             run_id: intent_engine::sanitize_corpus_label(&run_id),
-            model_name: intent_engine::sanitize_corpus_label(&model_name),
+            model_name: intent_engine::sanitize_corpus_model(&model_name),
             image_hash,
         }
     }

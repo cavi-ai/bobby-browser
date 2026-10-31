@@ -21,7 +21,7 @@ impl Provider {
         match self {
             Self::OpenAi => Box::new(OpenAiUpstream::new(String::new(), "model".into(), base)),
             Self::Ollama => Box::new(OllamaUpstream::new("model".into(), base)),
-            Self::Mlx => Box::new(MlxUpstream::new(base)),
+            Self::Mlx => Box::new(MlxUpstream::new("model".into(), base)),
         }
     }
 

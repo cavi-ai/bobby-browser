@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Customers</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><span class="brand">Ledgerline</span><nav><a href="/overview">Overview</a><a class="active" href="/customers">Customers</a><a href="/invoices">Invoices</a></nav></header>
+<main>
+  <div class="row" style="justify-content:space-between;margin-bottom:12px"><h1 style="margin:0">Customers</h1>
+    <span class="row"><input type="search" aria-label="Filter customers" placeholder="Filter by name" style="width:220px"><button>Add customer</button></span></div>
+  <table>
+    <thead><tr><th><input type="checkbox" aria-label="Select all rows"></th><th>Name</th><th>Plan</th><th>Status</th><th>Balance</th><th></th></tr></thead>
+    <tbody>
+      <tr><td><input type="checkbox" aria-label="Select Corvid Labs"></td><td>Corvid Labs</td><td>Growth</td><td>Active</td><td>$1,240.00</td><td><a href="/customers/1">Edit</a></td></tr>
+      <tr><td><input type="checkbox" aria-label="Select Tamsin Okafor"></td><td>Tamsin Okafor</td><td>Starter</td><td>Trial</td><td>$0.00</td><td><a href="/customers/2">Edit</a></td></tr>
+      <tr><td><input type="checkbox" aria-label="Select Brightwater Co"></td><td>Brightwater Co</td><td>Scale</td><td>Past due</td><td>$3,918.27</td><td><a href="/customers/3">Edit</a></td></tr>
+      <tr><td><input type="checkbox" aria-label="Select Imre Halvorsen"></td><td>Imre Halvorsen</td><td>Growth</td><td>Active</td><td>$88.10</td><td><a href="/customers/4">Edit</a></td></tr>
+    </tbody>
+  </table>
+  <div class="row" style="justify-content:space-between;margin-top:12px"><span class="muted">Showing 1 to 4 of 212</span><span class="row"><button class="secondary">Previous page</button><button class="secondary">Next page</button></span></div>
+</main>
+</body></html>
