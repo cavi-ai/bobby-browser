@@ -14,6 +14,9 @@ Usage:
 import argparse
 import json
 import logging
+import os
+import sys
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from providers import create_provider
@@ -72,13 +75,28 @@ class VisionHandler(BaseHTTPRequestHandler):
         log.debug(fmt % args)
 
 
+def exit_when_stdin_closes():
+    def watch():
+        sys.stdin.buffer.read()
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Bobby canonical vision server")
     parser.add_argument("--bind", default="127.0.0.1:9101", help="bind address")
     parser.add_argument("--provider", default=None, help="mlx-vlm | ollama | lmstudio")
     parser.add_argument("--model", default=None, help="model override")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--exit-with-stdin",
+        action="store_true",
+        help="exit when stdin closes (a managed child dies with its parent)",
+    )
     args = parser.parse_args()
+    if args.exit_with_stdin:
+        exit_when_stdin_closes()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

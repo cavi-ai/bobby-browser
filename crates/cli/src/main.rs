@@ -406,6 +406,13 @@ enum CliCommand {
         /// Model the text tier serves, recorded with its training data
         #[arg(long, requires = "text_base_url")]
         text_model: Option<String>,
+        /// Spawn the text-tier vision server as a managed child, bound to the
+        /// --text-base-url address
+        #[arg(long, requires = "text_base_url")]
+        spawn_text_server: bool,
+        /// Adapter directory the spawned text-tier model loads
+        #[arg(long, requires = "spawn_text_server")]
+        text_adapter: Option<PathBuf>,
         /// Run as a runtime's sidecar: print `listening <addr>` once bound and
         /// exit when the parent closes stdin
         #[arg(long)]
@@ -451,6 +458,15 @@ struct VisionConnectArgs {
     /// Allow activation to download the already-selected MLX model
     #[arg(long, requires = "activate")]
     download_model: bool,
+    /// Text-tier model that answers candidate windows without a screenshot
+    #[arg(long)]
+    text_model: Option<String>,
+    /// Adapter directory the text-tier model loads
+    #[arg(long, requires = "text_model")]
+    text_adapter: Option<PathBuf>,
+    /// Text-tier server address (default http://127.0.0.1:9102)
+    #[arg(long, requires = "text_model")]
+    text_base_url: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -477,6 +493,9 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
             yes: args.yes,
             activate: args.activate,
             download_model: args.download_model,
+            text_model: args.text_model,
+            text_adapter: args.text_adapter,
+            text_base_url: args.text_base_url,
         }
     }
 }
@@ -976,6 +995,8 @@ pub async fn run() -> Result<()> {
             api_key_env,
             text_base_url,
             text_model,
+            spawn_text_server,
+            text_adapter,
             managed,
         } => {
             run_vision_proxy(VisionProxyRunArgs {
@@ -991,6 +1012,8 @@ pub async fn run() -> Result<()> {
                 api_key_env,
                 text_base_url,
                 text_model,
+                spawn_text_server,
+                text_adapter,
                 endpoint_url: None,
                 managed,
             })
@@ -1160,6 +1183,7 @@ fn prepare_vision_child(
             token_env,
             config.vision.collect_training_data,
             &config.vision.training_data_dir,
+            config.vision.text_tier.as_ref(),
         )?;
         vision_child::point_vision_nodes_at(&mut config, &decision, proxy.endpoint());
         Some(proxy)
@@ -1210,6 +1234,8 @@ struct VisionProxyRunArgs {
     api_key_env: Option<String>,
     text_base_url: Option<String>,
     text_model: Option<String>,
+    spawn_text_server: bool,
+    text_adapter: Option<PathBuf>,
     endpoint_url: Option<String>,
     managed: bool,
 }
@@ -1234,6 +1260,7 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
     let port = url
         .port_or_known_default()
         .context("configured vision endpoint has no port")?;
+    let text_tier = config.vision.text_tier.as_ref();
     Ok(VisionProxyRunArgs {
         bind: format!("{host}:{port}"),
         path: if url.path().is_empty() {
@@ -1249,8 +1276,10 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         collect_training_data: config.vision.collect_training_data,
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
-        text_base_url: None,
-        text_model: None,
+        text_base_url: text_tier.map(|tier| tier.base_url.clone()),
+        text_model: text_tier.map(|tier| tier.model.clone()),
+        spawn_text_server: text_tier.is_some_and(vision_child::text_tier_is_local),
+        text_adapter: text_tier.and_then(|tier| tier.adapter.clone()),
         endpoint_url: Some(url.to_string()),
         managed: false,
     })
@@ -1335,6 +1364,8 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         api_key_env,
         text_base_url,
         text_model,
+        spawn_text_server,
+        text_adapter,
         endpoint_url: _,
         managed,
     } = args;
@@ -1385,7 +1416,13 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                 let base_url = vision_base_url
                     .unwrap_or_else(|| vision_proxy::MLX_DEFAULT_BASE_URL.to_string());
                 if spawn_server {
-                    _python_child = Some(spawn_mlx_server(&base_url, &model, server_script)?);
+                    _python_child = Some(spawn_vision_server(
+                        &base_url,
+                        "mlx-vlm",
+                        &model,
+                        None,
+                        server_script.clone(),
+                    )?);
                 }
                 let mut upstream = MlxUpstream::new(model, base_url);
                 if let Some(collector) = &collector {
@@ -1399,8 +1436,18 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         };
 
     // A text-tier server speaks the same wire as the canonical vision server.
+    let mut _text_child: Option<ManagedPythonServer> = None;
     let text_upstream = match (text_base_url, text_model) {
         (Some(base_url), Some(model)) => {
+            if spawn_text_server {
+                _text_child = Some(spawn_vision_server(
+                    &base_url,
+                    "v1",
+                    &model,
+                    text_adapter.as_deref(),
+                    server_script,
+                )?);
+            }
             let mut upstream = MlxUpstream::new(model, base_url);
             if let Some(collector) = &collector {
                 upstream = upstream.with_data_collector(collector.clone());
@@ -1440,11 +1487,13 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the canonical Python vision server as a managed child and wait for
-/// it to accept connections. The child is killed when it goes out of scope.
-fn spawn_mlx_server(
+/// Spawn the canonical Python vision server for `provider` as a managed child.
+/// The child is killed when it goes out of scope.
+fn spawn_vision_server(
     base_url: &str,
+    provider: &str,
     model: &str,
+    adapter: Option<&Path>,
     server_script: Option<PathBuf>,
 ) -> Result<ManagedPythonServer> {
     let script = server_script
@@ -1469,25 +1518,34 @@ fn spawn_mlx_server(
         .arg("--bind")
         .arg(&bind)
         .arg("--provider")
-        .arg("mlx-vlm")
+        .arg(provider)
         .arg("--model")
         .arg(model);
+    if let Some(adapter) = adapter {
+        cmd.env("VISION_V1_ADAPTER", adapter);
+    }
     // Homebrew Python + MLX both link libomp; without this the child dies
     // on startup with a duplicate-runtime abort.
     cmd.env("KMP_DUPLICATE_LIB_OK", "TRUE");
-    cmd.stdin(std::process::Stdio::null())
+    // The server exits when its stdin closes, which happens however this
+    // process ends, signals included.
+    cmd.arg("--exit-with-stdin");
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
 
     let mut child = cmd.spawn().context("failed to spawn vision_server.py")?;
+    let lifeline = child.stdin.take().context("vision_server.py stdin")?;
 
     // Do not wait for readiness here: the caller (bobby serve) probes the
     // proxy's own bind on a deadline, and blocking on Python startup (inter-
     // preter + mlx imports) can exceed it. The proxy binds immediately; a
     // request that lands before the server is up gets a 502, which the
     // intent engine treats as a retryable provider failure.
-    let _ = &mut child;
-    Ok(ManagedPythonServer { child })
+    Ok(ManagedPythonServer {
+        child,
+        _lifeline: lifeline,
+    })
 }
 
 /// Locate vision_server.py from the repo layout relative to the bobby
@@ -1514,6 +1572,7 @@ fn find_vision_server_script() -> Result<PathBuf> {
 /// Kill-on-drop guard for the spawned Python vision server.
 struct ManagedPythonServer {
     child: std::process::Child,
+    _lifeline: std::process::ChildStdin,
 }
 
 impl Drop for ManagedPythonServer {

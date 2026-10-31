@@ -2,7 +2,9 @@ use std::path::Path;
 
 use toml_edit::{value, DocumentMut, Item, Table};
 
-use crate::{VisionAcpProfile, VisionAuthKind, VisionConfig, VisionProviderConfig};
+use crate::{
+    VisionAcpProfile, VisionAuthKind, VisionConfig, VisionProviderConfig, VisionTextTierConfig,
+};
 
 /// Error returned when surgically writing vision settings to a TOML file fails.
 #[derive(Debug)]
@@ -180,6 +182,32 @@ pub fn upsert_vision_acp_profile(
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
+/// Upsert `[vision.text_tier]`, preserving every other table.
+pub fn upsert_vision_text_tier(
+    path: &Path,
+    tier: &VisionTextTierConfig,
+) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
+    let text_tier = ensure_table(vision, "text_tier")?;
+    text_tier["base_url"] = value(&tier.base_url);
+    text_tier["model"] = value(&tier.model);
+    match &tier.adapter {
+        Some(adapter) => text_tier["adapter"] = value(adapter.to_string_lossy().as_ref()),
+        None => {
+            text_tier.remove("adapter");
+        }
+    }
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
+}
+
 fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {
     if parent.contains_key(key) && !parent[key].is_table() {
         return Err(ConfigWriteError::Invalid(format!(
@@ -197,6 +225,40 @@ fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, C
 mod tests {
     use super::*;
     use crate::AppConfig;
+
+    #[test]
+    fn the_text_tier_round_trips_and_leaves_the_provider_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let provider = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "image-model".into(),
+            api_key_env: None,
+        };
+        upsert_vision_platform(&path, DEFAULT_LOOPBACK_ENDPOINT, "TOKEN", "mlx", &provider)
+            .unwrap();
+        let tier = VisionTextTierConfig {
+            base_url: "http://127.0.0.1:9102".into(),
+            model: "text-model".into(),
+            adapter: Some("adapters/v1".into()),
+        };
+        upsert_vision_text_tier(&path, &tier).unwrap();
+
+        let loaded = AppConfig::load(&path).unwrap();
+        assert_eq!(loaded.vision.text_tier.as_ref(), Some(&tier));
+        assert_eq!(loaded.vision.selected_provider(), Some(("mlx", &provider)));
+
+        upsert_vision_text_tier(
+            &path,
+            &VisionTextTierConfig {
+                adapter: None,
+                ..tier
+            },
+        )
+        .unwrap();
+        let loaded = AppConfig::load(&path).unwrap();
+        assert_eq!(loaded.vision.text_tier.unwrap().adapter, None);
+    }
 
     #[test]
     fn upsert_vision_platform_preserves_unrelated_tables() {

@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use config::{AppConfig, NodeKind, VisionProviderConfig};
+use config::{AppConfig, NodeKind, VisionProviderConfig, VisionTextTierConfig};
 use node_registry::{NodeRegistry, LEGACY_VISION_NODE};
 use url::Url;
 
@@ -177,6 +177,7 @@ impl ManagedVisionProxy {
         token_env: &str,
         collect_training_data: bool,
         training_data_dir: &Path,
+        text_tier: Option<&VisionTextTierConfig>,
     ) -> Result<Self> {
         if !decision.should_spawn {
             anyhow::bail!("vision child spawn not requested: {}", decision.reason);
@@ -220,6 +221,7 @@ impl ManagedVisionProxy {
             profile,
             collect_training_data,
             training_data_dir,
+            text_tier,
         );
         cmd.arg("--managed");
         // stdin is the child's lifeline and stdout carries its one
@@ -282,6 +284,12 @@ pub(crate) fn point_vision_nodes_at(
     }
 }
 
+/// Whether this runtime starts the text-tier server itself: only for a
+/// loopback address.
+pub(crate) fn text_tier_is_local(tier: &VisionTextTierConfig) -> bool {
+    parse_loopback_endpoint(&tier.base_url).is_some()
+}
+
 pub(crate) fn configure_vision_proxy_command(
     cmd: &mut Command,
     decision: &VisionChildDecision,
@@ -289,6 +297,7 @@ pub(crate) fn configure_vision_proxy_command(
     profile: &VisionProviderConfig,
     collect_training_data: bool,
     training_data_dir: &Path,
+    text_tier: Option<&VisionTextTierConfig>,
 ) {
     cmd.arg("vision-proxy")
         .arg("--bind")
@@ -317,6 +326,18 @@ pub(crate) fn configure_vision_proxy_command(
             .arg("--training-data-dir")
             .arg(training_data_dir);
     }
+    if let Some(tier) = text_tier {
+        cmd.arg("--text-base-url")
+            .arg(&tier.base_url)
+            .arg("--text-model")
+            .arg(&tier.model);
+        if text_tier_is_local(tier) {
+            cmd.arg("--spawn-text-server");
+            if let Some(adapter) = &tier.adapter {
+                cmd.arg("--text-adapter").arg(adapter);
+            }
+        }
+    }
 }
 
 impl Drop for ManagedVisionProxy {
@@ -330,7 +351,7 @@ impl Drop for ManagedVisionProxy {
 mod tests {
     use super::*;
     use config::NodeConfig;
-    use config::{VisionConfig, VisionProviderConfig};
+    use config::{VisionConfig, VisionProviderConfig, VisionTextTierConfig};
     use std::collections::BTreeMap;
 
     fn sample_provider() -> VisionProviderConfig {
@@ -362,6 +383,7 @@ mod tests {
             &profile,
             true,
             Path::new("training"),
+            None,
         );
         let args: Vec<String> = command
             .get_args()
@@ -399,6 +421,7 @@ mod tests {
             &profile,
             false,
             Path::new("training"),
+            None,
         );
         let args = command
             .get_args()
@@ -406,6 +429,68 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["--upstream", "mlx"]));
         assert!(args.contains(&"--spawn-server".to_owned()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--text")));
+    }
+
+    fn proxy_args(text_tier: &VisionTextTierConfig) -> Vec<String> {
+        let decision = VisionChildDecision {
+            should_spawn: true,
+            bind: "127.0.0.1:9100".parse().unwrap(),
+            path: "/vision".into(),
+            reason: "test".into(),
+        };
+        let mut command = Command::new("bobby");
+        configure_vision_proxy_command(
+            &mut command,
+            &decision,
+            "ollama",
+            &VisionProviderConfig {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "image-model".into(),
+                api_key_env: None,
+            },
+            false,
+            Path::new("training"),
+            Some(text_tier),
+        );
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_loopback_text_tier_is_spawned_and_routed_beside_the_image_provider() {
+        let args = proxy_args(&VisionTextTierConfig {
+            base_url: "http://127.0.0.1:9102".into(),
+            model: "text-model".into(),
+            adapter: Some("adapters/v1".into()),
+        });
+        assert!(args.windows(2).any(|pair| pair == ["--upstream", "ollama"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--text-base-url", "http://127.0.0.1:9102"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--text-model", "text-model"]));
+        assert!(args.contains(&"--spawn-text-server".to_owned()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--text-adapter", "adapters/v1"]));
+    }
+
+    #[test]
+    fn a_remote_text_tier_is_routed_but_never_spawned() {
+        let args = proxy_args(&VisionTextTierConfig {
+            base_url: "https://text.example/vision".into(),
+            model: "text-model".into(),
+            adapter: Some("adapters/v1".into()),
+        });
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--text-base-url", "https://text.example/vision"]));
+        assert!(!args.contains(&"--spawn-text-server".to_owned()));
+        assert!(!args.contains(&"--text-adapter".to_owned()));
     }
 
     fn loopback_config(endpoint: &str, with_provider: bool) -> AppConfig {

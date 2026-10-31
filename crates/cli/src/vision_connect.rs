@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use config::{
-    upsert_vision_acp_profile, upsert_vision_platform, VisionAcpProfile, VisionAuthKind,
-    VisionProviderConfig,
+    upsert_vision_acp_profile, upsert_vision_platform, upsert_vision_text_tier, VisionAcpProfile,
+    VisionAuthKind, VisionProviderConfig, VisionTextTierConfig,
 };
 
 pub const LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:9100/vision";
 pub const VISION_TOKEN_ENV: &str = "BOBBY_VISION_TOKEN";
+pub const TEXT_TIER_ENDPOINT: &str = "http://127.0.0.1:9102";
 
 /// CLI flags for `bobby vision connect`.
 #[derive(Debug, Clone)]
@@ -29,6 +30,9 @@ pub struct ConnectOpts {
     pub yes: bool,
     pub activate: bool,
     pub download_model: bool,
+    pub text_model: Option<String>,
+    pub text_adapter: Option<PathBuf>,
+    pub text_base_url: Option<String>,
 }
 
 impl Default for ConnectOpts {
@@ -46,6 +50,9 @@ impl Default for ConnectOpts {
             yes: false,
             activate: false,
             download_model: false,
+            text_model: None,
+            text_adapter: None,
+            text_base_url: None,
         }
     }
 }
@@ -68,6 +75,9 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
     if opts.backend.eq_ignore_ascii_case("acp") {
         if opts.activate || opts.download_model {
             anyhow::bail!("--activate is available only for direct vision providers");
+        }
+        if opts.text_model.is_some() {
+            anyhow::bail!("--text-model is available only for direct vision providers");
         }
         let name = opts
             .provider
@@ -145,6 +155,26 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
         "Wrote vision provider settings and [nodes.vision] to {}",
         config_path.display()
     );
+    if let Some(model) = opts
+        .text_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        upsert_vision_text_tier(
+            &config_path,
+            &VisionTextTierConfig {
+                base_url: opts
+                    .text_base_url
+                    .clone()
+                    .unwrap_or_else(|| TEXT_TIER_ENDPOINT.to_owned()),
+                model: model.to_owned(),
+                adapter: opts.text_adapter.clone(),
+            },
+        )
+        .map_err(|error| anyhow!("{error}"))?;
+        println!("Wrote [vision.text_tier] to {}", config_path.display());
+    }
     print_env_hints(&resolved)?;
 
     if opts.activate {
@@ -500,6 +530,37 @@ mod tests {
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("api_key ="));
+    }
+
+    #[test]
+    fn connect_writes_the_text_tier_beside_the_image_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        connect(ConnectOpts {
+            config: Some(config_path.clone()),
+            provider: Some("ollama".into()),
+            model: Some("image-model".into()),
+            text_model: Some("text-model".into()),
+            text_adapter: Some("adapters/v1".into()),
+            yes: true,
+            ..ConnectOpts::default()
+        })
+        .unwrap();
+
+        let loaded = AppConfig::load(&config_path).unwrap();
+        let (provider, profile) = loaded.vision.selected_provider().unwrap();
+        assert_eq!(
+            (provider, profile.model.as_str()),
+            ("ollama", "image-model")
+        );
+        assert_eq!(
+            loaded.vision.text_tier,
+            Some(VisionTextTierConfig {
+                base_url: TEXT_TIER_ENDPOINT.into(),
+                model: "text-model".into(),
+                adapter: Some("adapters/v1".into()),
+            })
+        );
     }
 
     #[test]
