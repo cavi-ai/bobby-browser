@@ -25,8 +25,8 @@ pub use verify::{
 pub use vision::{
     collect_vision_training_data, compile_vision_packet, instrument_vision_assist, proposal_sha256,
     text_tier_answers, validate_backend_result, CachedProposal, CachedProposalAction,
-    ProposalGeneration, ProposalLookup, VisionAction, VisionAssist, VisionBackendResult,
-    VisionContextBudget, VisionImageRegion, VisionPacketError, VisionPacketInput,
-    VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
-    VisionTaskPacket, MAX_CACHED_PROPOSALS, VISION_CONFIDENCE_FLOOR,
+    ProposalGeneration, ProposalLookup, ScreenControl, VisionAction, VisionAssist,
+    VisionBackendResult, VisionContextBudget, VisionImageRegion, VisionPacketError,
+    VisionPacketInput, VisionPromptCandidate, VisionPromptContext, VisionProposal,
+    VisionProposeRequest, VisionTaskPacket, MAX_CACHED_PROPOSALS, VISION_CONFIDENCE_FLOOR,
 };

@@ -118,6 +118,15 @@ impl VisionAssist for TrainingDataVisionAssist {
     }
 }
 
+/// A control seen on screen: the text drawn inside it and its center in
+/// viewport coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenControl {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Requests a text tier answers: a candidate window for an intent that picks
 /// candidates. Everything else needs the screenshot.
 pub fn text_tier_answers(intent_kind: &str, candidate_count: usize) -> bool {

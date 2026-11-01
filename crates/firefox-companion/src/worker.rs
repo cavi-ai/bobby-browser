@@ -4413,6 +4413,33 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             .map(str::to_owned))
     }
 
+    async fn viewport_size(&self, page_id: &PageId) -> Result<(f64, f64), CommandError> {
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": "JSON.stringify([window.innerWidth, window.innerHeight])",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox viewport size was unavailable",
+                    false,
+                )
+            })
+    }
+
     async fn collect_candidates(
         &self,
         page_id: &PageId,

@@ -427,6 +427,18 @@ impl RuntimeService {
                 }
             }
         }
+        if let Some(model) = &config.vision.detector_model {
+            match page_runtime::perception::ControlDetector::load(model) {
+                Ok(detector) => adaptive = adaptive.with_control_detector(Arc::new(detector)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        model = %model.display(),
+                        "control detector unavailable; vision windows offer no on-screen controls"
+                    );
+                }
+            }
+        }
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         pages = pages.with_context_graph_attached();
