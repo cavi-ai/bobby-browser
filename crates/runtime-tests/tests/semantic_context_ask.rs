@@ -261,4 +261,9 @@ async fn a_described_control_is_answered_from_labels_without_a_screenshot() {
         received[0]
     );
     assert_eq!(received[0]["purpose"], "Locate the sign in button");
+    assert!(
+        received[0]["context"].get("url").is_none(),
+        "{}",
+        received[0]
+    );
 }

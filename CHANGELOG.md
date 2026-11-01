@@ -18,6 +18,7 @@
 ### Fixed
 
 - `context_ask` answers from every control in the page's last snapshot, not only the snapshot's top-level node.
+- Semantic `context_ask` sends the vision provider the controls' labels without the page URL, so the text tier's pick no longer changes with the page's port.
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
 - A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
 - The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.
