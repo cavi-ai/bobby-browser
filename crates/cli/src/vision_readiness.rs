@@ -70,6 +70,38 @@ fn cached_hugging_face_model_at(hf_home: &Path, model: &str) -> Result<bool> {
     }))
 }
 
+/// Bytes of the weights a cached Hugging Face model loads: the
+/// `.safetensors` files of its largest cached snapshot. `None` when no
+/// snapshot holds weights.
+pub(crate) fn hugging_face_weight_bytes(model: &str) -> Option<u64> {
+    hugging_face_weight_bytes_at(&hugging_face_cache_root().ok()?, model)
+}
+
+fn hugging_face_weight_bytes_at(hub: &Path, model: &str) -> Option<u64> {
+    let snapshots = hub
+        .join(format!("models--{}", model.replace('/', "--")))
+        .join("snapshots");
+    std::fs::read_dir(snapshots)
+        .ok()?
+        .flatten()
+        .filter_map(|snapshot| {
+            let bytes = std::fs::read_dir(snapshot.path())
+                .ok()?
+                .flatten()
+                .map(|file| file.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "safetensors")
+                })
+                // Snapshot files link into the blob store; metadata follows the link.
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .sum::<u64>();
+            (bytes > 0).then_some(bytes)
+        })
+        .max()
+}
+
 fn hugging_face_download_command(model: &str) -> Result<Command> {
     for binary in ["hf", "huggingface-cli"] {
         if let Some(path) = crate::onboarding::find_sidecar_binary(binary) {
@@ -313,6 +345,59 @@ pub(crate) fn installed_ollama_tag(profile: &VisionProviderConfig) -> Option<Str
         } => installed_tag_for_untagged(&profile.model, &listed),
         _ => None,
     }
+}
+
+/// Memory an Ollama model costs: resident bytes while it is loaded, else its
+/// size on disk, which is what loading it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OllamaModelMemory {
+    Loaded(u64),
+    OnDisk(u64),
+}
+
+/// Reads the profile's model from a running Ollama's `/api/ps`, then
+/// `/api/tags`; never starts Ollama. `None` when neither lists it.
+pub(crate) fn ollama_model_memory(
+    profile: &VisionProviderConfig,
+    timeout: Duration,
+) -> Option<OllamaModelMemory> {
+    let base = profile.base_url.trim().trim_end_matches('/');
+    let base = base
+        .strip_suffix("/v1/chat/completions")
+        .or_else(|| base.strip_suffix("/chat/completions"))
+        .unwrap_or(base);
+    let base = base.strip_suffix("/v1").unwrap_or(base).to_owned();
+    let local =
+        endpoint_socket(&profile.base_url).is_some_and(|address| address.ip().is_loopback());
+    let wanted = ollama_tagged(&profile.model);
+    std::thread::spawn(move || {
+        let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+        if local {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().ok()?;
+        let size_of = |path: &str| -> Option<u64> {
+            let body: serde_json::Value = client
+                .get(format!("{base}{path}"))
+                .send()
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .json()
+                .ok()?;
+            body.get("models")?.as_array()?.iter().find_map(|model| {
+                (ollama_tagged(model.get("name")?.as_str()?) == wanted)
+                    .then(|| model.get("size")?.as_u64())
+                    .flatten()
+            })
+        };
+        size_of("/api/ps")
+            .map(OllamaModelMemory::Loaded)
+            .or_else(|| size_of("/api/tags").map(OllamaModelMemory::OnDisk))
+    })
+    .join()
+    .ok()
+    .flatten()
 }
 
 fn listed_models(body: &str) -> Option<Vec<String>> {
@@ -770,6 +855,123 @@ mod tests {
         };
         assert!(detail.contains("not llava:latest"), "{detail}");
         assert!(detail.contains("--model llava:7b"), "{detail}");
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn weight_bytes_sum_the_largest_snapshots_linked_safetensors() {
+        let hub = tempfile::tempdir().unwrap();
+        let model = hub.path().join("models--org--text-model");
+        let blobs = model.join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        for (name, bytes) in [("a", 300), ("b", 200), ("c", 50), ("config", 7)] {
+            std::fs::write(blobs.join(name), vec![0_u8; bytes]).unwrap();
+        }
+        let link = |snapshot: &str, file: &str, blob: &str| {
+            let directory = model.join("snapshots").join(snapshot);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::os::unix::fs::symlink(blobs.join(blob), directory.join(file)).unwrap();
+        };
+        link("new", "model-1.safetensors", "a");
+        link("new", "model-2.safetensors", "b");
+        link("new", "config.json", "config");
+        link("old", "model.safetensors", "c");
+
+        assert_eq!(
+            hugging_face_weight_bytes_at(hub.path(), "org/text-model"),
+            Some(500)
+        );
+        assert_eq!(
+            hugging_face_weight_bytes_at(hub.path(), "org/other-model"),
+            None
+        );
+    }
+
+    /// Answers each request with the body for its path, `{"models":[]}` for
+    /// any other, until `requests` have been served.
+    fn serve_ollama(
+        routes: &'static [(&'static str, &'static str)],
+        requests: usize,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0_u8; 256];
+                    let read = stream.read(&mut chunk).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let body = routes
+                    .iter()
+                    .find(|(path, _)| request.starts_with(&format!("GET {path} ")))
+                    .map_or(r#"{"models":[]}"#, |(_, body)| body);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (address, server)
+    }
+
+    fn memory_of(address: std::net::SocketAddr, model: &str) -> Option<OllamaModelMemory> {
+        ollama_model_memory(
+            &VisionProviderConfig {
+                base_url: format!("http://{address}/v1"),
+                model: model.into(),
+                api_key_env: None,
+            },
+            Duration::from_secs(2),
+        )
+    }
+
+    #[test]
+    fn a_loaded_ollama_model_reports_its_resident_bytes() {
+        let (address, server) = serve_ollama(
+            &[(
+                "/api/ps",
+                r#"{"models":[{"name":"other:7b","size":1},{"name":"qwen:27b","size":18200000000}]}"#,
+            )],
+            1,
+        );
+        assert_eq!(
+            memory_of(address, "qwen:27b"),
+            Some(OllamaModelMemory::Loaded(18_200_000_000))
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_unloaded_ollama_model_reports_its_size_on_disk() {
+        let (address, server) = serve_ollama(
+            &[(
+                "/api/tags",
+                r#"{"models":[{"name":"llava:latest","size":4700000000}]}"#,
+            )],
+            2,
+        );
+        assert_eq!(
+            memory_of(address, "llava"),
+            Some(OllamaModelMemory::OnDisk(4_700_000_000))
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_model_ollama_does_not_list_has_no_memory() {
+        let (address, server) = serve_ollama(&[], 2);
+        assert_eq!(memory_of(address, "missing:1b"), None);
         server.join().unwrap();
     }
 }
