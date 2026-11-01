@@ -14,9 +14,11 @@
 //!    authority on whether the action happened.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use intent_engine::{CachedProposal, CachedProposalAction, ProposalGeneration, ProposalLookup};
+
+use crate::perception::TextBox;
 use types::{
     AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
     RuntimeCommand,
@@ -98,6 +100,9 @@ struct PageContext {
     proposals: Vec<CandidateProposal>,
     /// The generation `proposals` was recorded under.
     proposals_at: u64,
+    /// Text read from a screenshot: the generation it was taken under, the
+    /// screenshot's SHA-256 and the boxes.
+    page_text: Option<(u64, [u8; 32], Arc<Vec<TextBox>>)>,
 }
 
 impl ContextGraph {
@@ -132,6 +137,7 @@ impl ContextGraph {
             nodes: Vec::new(),
             proposals: Vec::new(),
             proposals_at: 0,
+            page_text: None,
         });
         entry.observed_at = entry.generation;
         entry.recorded_seq = seq;
@@ -161,6 +167,7 @@ impl ContextGraph {
             nodes: Vec::new(),
             proposals: Vec::new(),
             proposals_at: 0,
+            page_text: None,
         });
         if entry.commands.contains(&command) {
             return;
@@ -381,6 +388,31 @@ impl ContextGraph {
             },
             source: None,
         })
+    }
+
+    /// Text read from the screenshot with this SHA-256, while the page has
+    /// not changed since it was read.
+    pub fn page_text(&self, page: &PageId, sha256: &[u8; 32]) -> Option<Arc<Vec<TextBox>>> {
+        let pages = self.lock();
+        let entry = pages.get(page)?;
+        let (generation, hash, boxes) = entry.page_text.as_ref()?;
+        (*generation == entry.generation && hash == sha256).then(|| Arc::clone(boxes))
+    }
+
+    /// Keeps `boxes` read from the screenshot with this SHA-256 under the
+    /// generation it was taken at; a page that changed since keeps nothing.
+    pub fn record_page_text(
+        &self,
+        page: &PageId,
+        generation: u64,
+        sha256: [u8; 32],
+        boxes: Arc<Vec<TextBox>>,
+    ) {
+        if let Some(entry) = self.lock().get_mut(page) {
+            if entry.generation == generation {
+                entry.page_text = Some((generation, sha256, boxes));
+            }
+        }
     }
 
     /// The observed controls a provider may choose among for `description`:
@@ -1049,6 +1081,29 @@ mod tests {
             children,
             ..AccessibilityNode::default()
         }
+    }
+
+    #[test]
+    fn page_text_is_kept_per_screenshot_until_the_page_changes() {
+        let (graph, page) = graph_with(vec![node("button", "Log in", Some(0))]);
+        let boxes = Arc::new(vec![TextBox {
+            text: "Log in".into(),
+            x: 10.0,
+            y: 20.0,
+            width: 40.0,
+            height: 12.0,
+            confidence: 1.0,
+        }]);
+        let generation = graph.generation(&page).unwrap();
+
+        graph.record_page_text(&page, generation, [1; 32], Arc::clone(&boxes));
+        assert_eq!(graph.page_text(&page, &[1; 32]), Some(Arc::clone(&boxes)));
+        assert_eq!(graph.page_text(&page, &[2; 32]), None);
+
+        graph.invalidate(&page);
+        assert_eq!(graph.page_text(&page, &[1; 32]), None);
+        graph.record_page_text(&page, generation, [1; 32], boxes);
+        assert_eq!(graph.page_text(&page, &[1; 32]), None);
     }
 
     #[test]
