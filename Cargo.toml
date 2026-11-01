@@ -72,6 +72,9 @@ rustix = { version = "1.1.4", features = ["fs"] }
 same-file = "1.0.6"
 scraper = "0.29"
 sha2 = "0.11.0"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSString"] }
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNTypes"] }
 subtle = "2"
 cookie = "0.18"
 dialoguer = "0.12.0"
