@@ -177,7 +177,6 @@ impl PageRuntime {
         if assist.needs_image("locate", &candidates).await {
             return None;
         }
-        let url = self.get(page).await.ok().and_then(|page| page.url);
         let proposal = assist
             .propose(intent_engine::VisionProposeRequest {
                 purpose: locate_instruction(description),
@@ -185,8 +184,10 @@ impl PageRuntime {
                 screenshot_png: None,
                 corpus_screenshot_png: None,
                 stuck: intent_engine::StuckKind::TargetMissing,
+                // Labels only: the page URL does not help match a label, and
+                // the text tier's pick changes with the port in it.
                 context: Some(intent_engine::VisionPromptContext {
-                    url,
+                    url: None,
                     candidates,
                     recent_command_kinds: Vec::new(),
                 }),
