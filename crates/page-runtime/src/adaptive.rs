@@ -1144,6 +1144,17 @@ impl AdaptivePageEngine {
         self
     }
 
+    /// The provider a session's node selection resolves to, counted in the
+    /// operational metrics like an intent escalation.
+    pub fn vision_provider(&self, selection: &NodeSelection) -> Option<Arc<dyn VisionAssist>> {
+        selection
+            .provider(self.vision_assist.clone())
+            .map(|assist| match &self.operational_metrics {
+                Some(metrics) => intent_engine::instrument_vision_assist(assist, metrics.clone()),
+                None => assist,
+            })
+    }
+
     /// Attaches the durable context store so `solveChallenge` can read the
     /// site-level challenge prior. Shares the promotion sink's handle.
     pub fn with_context_store(mut self, store: Arc<context_store::ContextStore>) -> Self {

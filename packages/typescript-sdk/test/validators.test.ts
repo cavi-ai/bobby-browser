@@ -287,6 +287,7 @@ test("accessibility evidence accepts native input metadata and rejects malformed
 
 test("context response validators accept hits and misses and reject malformed nested data", () => {
   assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: true }), true);
+  assert.equal(isContextAskResponse({ answer: { ...CONTEXT_ANSWER, source: "semantic" }, hit: true }), true);
   assert.equal(isContextAskResponse({ answer: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" }), true);
   assert.equal(isContextNeighborsResponse({ neighbors: { answer: CONTEXT_ANSWER, form: "signup", pagePattern: "/join", controls: [CONTEXT_CONTROL] }, hit: true }), true);
   assert.equal(isContextNeighborsResponse({ neighbors: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" }), true);
@@ -295,6 +296,7 @@ test("context response validators accept hits and misses and reject malformed ne
 
   assert.equal(isContextAskResponse({ answer: { ...CONTEXT_ANSWER, confidence: 2 }, hit: true }), false);
   assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: false }), false);
+  assert.equal(isContextAskResponse({ answer: { ...CONTEXT_ANSWER, source: "guessed" }, hit: true }), false);
   assert.equal(isContextNeighborsResponse({ neighbors: { answer: CONTEXT_ANSWER, form: "signup", pagePattern: "/join", controls: [{ ...CONTEXT_CONTROL, unexpected: true }] }, hit: true }), false);
   assert.equal(isContextSiteResponse({ site: { siteKey: "https://example.test", pages: { "/join": { signup: [{ ...CONTEXT_CONTROL, intents: { click: { successCount: -1, failureCount: 0 } } }] } } } }), false);
 });

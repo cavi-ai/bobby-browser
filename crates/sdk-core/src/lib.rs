@@ -651,6 +651,23 @@ impl RuntimeService {
         outcome
     }
 
+    /// The vision node a session's policy names, resolved. Fails closed on
+    /// every negative path: no name, an unknown name, or a name of the wrong
+    /// kind all leave no provider. No branch substitutes a different node for
+    /// the one the session asked for.
+    pub(crate) fn vision_node_selection(&self, policy: &types::ExecutionPolicy) -> NodeSelection {
+        match policy.vision_node.as_deref() {
+            None => NodeSelection::NotRequested,
+            Some(name) => match self.nodes.vision(name) {
+                Ok(provider) => NodeSelection::Resolved(provider),
+                Err(error) => {
+                    tracing::warn!(node = %name, %error, "node.vision.unresolved");
+                    NodeSelection::Unresolved
+                }
+            },
+        }
+    }
+
     async fn submit_with_vision_grant_inner(
         &self,
         envelope: CommandEnvelope,
@@ -739,20 +756,7 @@ impl RuntimeService {
             },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
         };
-        // Fail closed on every negative path: no name, an unknown name, or a
-        // name of the wrong kind all make the intent engine decline the
-        // escalation. No branch substitutes a different node for the one the
-        // session asked for.
-        let vision_node = match policy.vision_node.as_deref() {
-            None => NodeSelection::NotRequested,
-            Some(name) => match self.nodes.vision(name) {
-                Ok(provider) => NodeSelection::Resolved(provider),
-                Err(error) => {
-                    tracing::warn!(node = %name, %error, "node.vision.unresolved");
-                    NodeSelection::Unresolved
-                }
-            },
-        };
+        let vision_node = self.vision_node_selection(&policy);
         let gate = SessionGate {
             vision,
             fingerprint: policy.fingerprint,

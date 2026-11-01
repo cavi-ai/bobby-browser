@@ -5,6 +5,7 @@
 ### Added
 
 - A text tier answers candidate windows with a text-only vision server, and the runtime sends those requests without a screenshot while every other request keeps the screenshot and the image upstream: `bobby vision connect --text-model <id> [--text-adapter <dir>]` configures it, the runtime's managed proxy and `bobby vision start` run it, and `bobby vision-proxy` takes `--text-base-url`, `--text-model` and `--spawn-text-server`.
+- `context_ask` answers a description that matches no control's words by offering up to 5 observed controls to the session's vision provider by label, without a screenshot, when the session has `visionAssist`, the caller `vision:assist` and the provider a text tier; the answer carries `source: "semantic"`.
 - A purpose that vision resolved and the runtime verified is stored as a label on the resolved control in the context store, and the next visit fills or clicks it from that label without a screenshot or a vision call, reported as `resolutionPath: "context"`; a failed act falls back to vision and a newer verified answer replaces the label.
 - The ignored `perception_ground_truth` worker test writes fixture-page screenshots with ground truth read from the DOM: visible control boxes with role and name, single-line text boxes, and the challenge class named by structural markers.
 - `passwordManagerFill` signs in through the browser password manager: the `fill` and `completeForm` intents find the manager's own prompt with vision and click it, and the credential field is only watched, never clicked, focused or typed into, nor its value returned; sessions opt in with `executionPolicy.passwordManager` and `visionAssist`.
@@ -16,6 +17,7 @@
 
 ### Fixed
 
+- `context_ask` answers from every control in the page's last snapshot, not only the snapshot's top-level node.
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
 - A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
 - The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.

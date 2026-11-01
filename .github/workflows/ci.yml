@@ -217,6 +217,7 @@ jobs:
           --test prompt_injection_canary
           --test recovery_demo
           --test remembered_site_calls
+          --test semantic_context_ask
           --test site_regressions_chromium
           --test vision_label_memory
           --test journeys_chromium

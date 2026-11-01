@@ -420,7 +420,7 @@ export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflo
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
 export type ContextObservedAt = { kind: "generation"; generation: number } | { kind: "persisted" };
-export type ContextAnswerSource = "observed" | "vision-promoted";
+export type ContextAnswerSource = "observed" | "vision-promoted" | "semantic";
 export interface ContextAnswer { target: AccessibilityTarget; confidence: number; observedAt: ContextObservedAt; source?: ContextAnswerSource; pageDerived?: true; }
 export interface ContextNeighborStats { successCount: number; failureCount: number; lastVerifiedDay?: number; source?: ContextAnswerSource; }
 export interface ContextNeighborControl { role: string; accessibleName: string; ordinal?: number; intents: Record<string, ContextNeighborStats>; }

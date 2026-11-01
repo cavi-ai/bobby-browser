@@ -38,6 +38,8 @@ A completed form or extraction records every field it resolved. A failed one cou
 
 A hit returns the target. A miss returns `hit: false` with `nextStep: "a11y_snapshot"`. Every answer says where it came from: `observedAt` is a live page generation or `persisted`, and remembered answers carry their `source`. A remembered answer never claims to be a live observation.
 
+When neither the page's last snapshot nor memory matches the description's words, and the session has `visionAssist` and the caller `vision:assist`, bobby offers up to 5 observed controls to the vision provider by label, ranked by shared words. It asks only a provider that answers labels without a screenshot, and never captures one. A pick at or above the 0.75 confidence floor is returned with `source: "semantic"`. It is a proposal like any other answer; the action that uses it is still verified.
+
 `workflow_observe` with a `goal` does this for you. When memory answers, it returns the remembered target with `source: "retained"` and takes no snapshot.
 
 ## Vision ranking
