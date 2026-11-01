@@ -18,6 +18,7 @@ use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
 mod context;
+pub mod perception;
 
 pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate};
 pub use context::{ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
@@ -149,6 +150,30 @@ impl PageRuntime {
     /// The durable promotion sink, if this runtime has one.
     pub fn context_promotion(&self) -> Option<&Arc<ContextPromotion>> {
         self.promotion.as_ref()
+    }
+
+    /// Text on the page's screenshot `png`, read once per screenshot while
+    /// the page is unchanged; a screenshot of a page that changed is read again.
+    pub async fn read_page_text(
+        &self,
+        page: &PageId,
+        png: Vec<u8>,
+    ) -> Result<Arc<Vec<perception::TextBox>>, perception::PerceptionError> {
+        use sha2::Digest;
+        let sha256: [u8; 32] = sha2::Sha256::digest(&png).into();
+        if let Some(boxes) = self.context.page_text(page, &sha256) {
+            return Ok(boxes);
+        }
+        let generation = self.context.generation(page);
+        let boxes = tokio::task::spawn_blocking(move || perception::read_text(&png))
+            .await
+            .map_err(|error| perception::PerceptionError::Reader(error.to_string()))??;
+        let boxes = Arc::new(boxes);
+        if let Some(generation) = generation {
+            self.context
+                .record_page_text(page, generation, sha256, Arc::clone(&boxes));
+        }
+        Ok(boxes)
     }
 
     /// The vision provider a session's node selection resolves to.

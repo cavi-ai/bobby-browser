@@ -4,6 +4,7 @@
 
 ### Added
 
+- The page runtime reads on-screen text lines from a page screenshot with Apple Vision on macOS, with boxes in screenshot pixels, and keeps one read per screenshot until the page changes.
 - `bobby doctor` reports each vision tier with its model and memory: `vision-tier-text` for the text tier and `vision-tier-image` for the image provider, as cached weight size for MLX models and resident or on-disk size for Ollama models.
 - A text tier answers candidate windows with a text-only vision server, and the runtime sends those requests without a screenshot while every other request keeps the screenshot and the image upstream: `bobby vision connect --text-model <id> [--text-adapter <dir>]` configures it, the runtime's managed proxy and `bobby vision start` run it, and `bobby vision-proxy` takes `--text-base-url`, `--text-model` and `--spawn-text-server`.
 - `context_ask` answers a description that matches no control's words by offering up to 5 observed controls to the session's vision provider by label, without a screenshot, when the session has `visionAssist`, the caller `vision:assist` and the provider a text tier; the answer carries `source: "semantic"`.
