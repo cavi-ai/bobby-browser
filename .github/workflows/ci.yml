@@ -218,6 +218,7 @@ jobs:
           --test recovery_demo
           --test remembered_site_calls
           --test site_regressions_chromium
+          --test vision_label_memory
           --test journeys_chromium
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal

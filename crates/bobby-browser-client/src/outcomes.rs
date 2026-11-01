@@ -634,6 +634,9 @@ pub enum IntentResolutionPath {
     VisionFallback,
     /// Resolved from a cached proactive vision proposal.
     VisionPrefill,
+    /// Resolved from a label a verified vision answer stored on an earlier
+    /// visit, without a vision call.
+    Context,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

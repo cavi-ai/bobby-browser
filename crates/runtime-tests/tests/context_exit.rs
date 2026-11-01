@@ -398,7 +398,13 @@ async fn fuzzy_match_latency_across_100_sites() {
         let mut forms = std::collections::BTreeMap::new();
         forms.insert("page".to_string(), context_store::FormContext { controls });
         let mut pages = std::collections::BTreeMap::new();
-        pages.insert("/form".to_string(), context_store::PageContext { forms });
+        pages.insert(
+            "/form".to_string(),
+            context_store::PageContext {
+                forms,
+                ..Default::default()
+            },
+        );
         store
             .upsert_site(
                 &format!("https://site-{index}.example"),

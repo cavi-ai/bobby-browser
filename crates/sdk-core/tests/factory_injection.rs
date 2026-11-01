@@ -213,6 +213,7 @@ async fn context_ttl_is_applied_during_runtime_build() {
                         }],
                     },
                 )]),
+                ..Default::default()
             },
         )]),
         ..SiteContext::default()

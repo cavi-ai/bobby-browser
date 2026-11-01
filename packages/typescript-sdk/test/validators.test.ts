@@ -269,6 +269,14 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
 });
 
+test("execution records and extractions accept every resolution path", () => {
+  for (const resolutionPath of ["deterministic", "visionFallback", "visionPrefill", "context"]) {
+    assert.equal(isEvidence({ kind: "intentExecution", record: { intentKind: "fill", purpose: "Contact email", resolutionPath, planSummary: "role=textbox", candidates: [], waitElapsedMs: null, verification: "resolved", artifactIds: [], visionProposalSha256: null } }), true, resolutionPath);
+    assert.equal(isEvidence({ kind: "extraction", field: "title", value: "Example", resolutionPath }), true, resolutionPath);
+  }
+  assert.equal(isEvidence({ kind: "extraction", field: "title", resolutionPath: "remembered" }), false);
+});
+
 test("accessibility evidence accepts native input metadata and rejects malformed types", () => {
   for (const [inputType, expected] of [["file", true], [undefined, true], [true, false]] as const) {
     assert.equal(isEvidence({ kind: "accessibilitySnapshot", pageId: ID,

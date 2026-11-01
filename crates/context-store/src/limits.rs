@@ -39,7 +39,16 @@ impl ContextLimits {
     pub(crate) fn check_site(&self, site: &SiteContext) -> Result<(), &'static str> {
         let mut records = site.pages.len().saturating_add(site.challenges.len());
         for page in site.pages.values() {
-            records = records.saturating_add(page.forms.len());
+            if page
+                .labels
+                .keys()
+                .any(|key| key.len() > crate::MAX_LABEL_BYTES)
+            {
+                return Err("context label exceeds byte limit");
+            }
+            records = records
+                .saturating_add(page.forms.len())
+                .saturating_add(page.labels.len());
             for form in page.forms.values() {
                 records = records.saturating_add(form.controls.len());
                 for control in &form.controls {
@@ -94,7 +103,14 @@ pub(crate) fn site_bytes(site: &SiteContext) -> usize {
     for (key, page) in &site.pages {
         bytes = bytes
             .saturating_add(key.capacity())
-            .saturating_add(map_bytes(&page.forms));
+            .saturating_add(map_bytes(&page.forms))
+            .saturating_add(map_bytes(&page.labels));
+        for (key, label) in &page.labels {
+            bytes = bytes
+                .saturating_add(key.capacity())
+                .saturating_add(label.role.capacity())
+                .saturating_add(label.accessible_name.capacity());
+        }
         for (key, form) in &page.forms {
             bytes = bytes.saturating_add(key.capacity()).saturating_add(
                 form.controls

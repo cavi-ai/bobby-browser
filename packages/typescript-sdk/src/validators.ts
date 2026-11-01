@@ -501,7 +501,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "harArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256", "entries"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256) && isSafeUnsigned(value.entries, 4_294_967_295);
     case "extraction": return hasExactKeys(value, ["kind", "field", "resolutionPath"], ["value", "errorCode"])
       && isString(value.field)
-      && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill")
+      && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill" || value.resolutionPath === "context")
       && optional(value, "value", isString)
       && optional(value, "errorCode", isCommandErrorCode);
     default: return false;
@@ -561,7 +561,7 @@ function isExecutionRecord(value: unknown): value is ExecutionRecord {
   return hasExactKeys(value, ["intentKind", "purpose", "resolutionPath", "planSummary", "candidates", "waitElapsedMs", "verification", "artifactIds", "visionProposalSha256"])
     && isString(value.intentKind)
     && isNullableString(value.purpose)
-    && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill")
+    && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill" || value.resolutionPath === "context")
     && isString(value.planSummary)
     && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence)
     && (value.waitElapsedMs === null || isSafeUnsigned(value.waitElapsedMs))

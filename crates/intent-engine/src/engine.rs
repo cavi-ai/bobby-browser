@@ -662,6 +662,13 @@ async fn collect_prefill_batch(
         if retained_keys.contains(&field.purpose.trim().to_lowercase()) {
             continue;
         }
+        // A remembered label answers this field when it executes.
+        if remembered_label(vision, Some(&field.purpose))
+            .await
+            .is_some()
+        {
+            continue;
+        }
         let Some((stuck, candidates)) = prefill_candidates(page_id, browser, field).await else {
             continue;
         };
@@ -1354,6 +1361,7 @@ mod context_candidate_ranking_tests {
                     }],
                 },
             )]),
+            ..Default::default()
         }
     }
 
@@ -4259,6 +4267,59 @@ async fn stuck_outcome_with_prior_evidence(
         }
     }
 
+    // Label consult, before any screenshot: a purpose a verified vision
+    // answer resolved on an earlier visit acts without a provider call. A
+    // failed act falls through to live escalation.
+    let (action, action_kind) = if report.fill_payload.is_some() {
+        (
+            VisionAction::TypeIntoCandidate { index: 0 },
+            "typeIntoCandidate",
+        )
+    } else {
+        (VisionAction::ClickCandidate { index: 0 }, "clickCandidate")
+    };
+    if types::candidate_action_is_compatible(action_kind, intent_kind) {
+        if let Some(label) = remembered_label(vision, report.purpose.as_deref()).await {
+            let candidates = [types::CandidateEvidence {
+                role: Some(label.role),
+                name: Some(label.accessible_name),
+                score: 0,
+                reasons: vec!["context".into()],
+            }];
+            match execute_vision_action(
+                page_id,
+                browser,
+                &action,
+                &candidates,
+                report.fill_payload.as_ref(),
+            )
+            .await
+            {
+                Ok(mut act_evidence) => {
+                    tracing::info!(intent = intent_kind, "context.label_hit");
+                    let mut evidence = prior_evidence;
+                    evidence.append(&mut act_evidence);
+                    let artifact_ids = artifact_ids_from(&evidence);
+                    evidence.push(intent_evidence(execution_record_with_path(
+                        report.intent_kind,
+                        report.purpose.clone(),
+                        report.plan_summary.clone(),
+                        report.candidates.clone(),
+                        None,
+                        "context",
+                        ResolutionDetails {
+                            path: IntentResolutionPath::Context,
+                            vision_proposal_sha256: None,
+                            artifact_ids,
+                        },
+                    )));
+                    return IntentOutcome::Completed { evidence };
+                }
+                Err(_) => tracing::info!(intent = intent_kind, "context.label_failed"),
+            }
+        }
+    }
+
     escalate_with_vision(
         report,
         stuck_evidence,
@@ -4269,6 +4330,22 @@ async fn stuck_outcome_with_prior_evidence(
         vision,
     )
     .await
+}
+
+/// The trusted label for `purpose` on the current page, from the durable
+/// context store. Only a first-of-its-name control: the act addresses
+/// ordinal 0.
+async fn remembered_label(
+    vision: &VisionContext,
+    purpose: Option<&str>,
+) -> Option<context_store::LabelContext> {
+    let store = vision.context_store.as_ref()?;
+    let url = vision.prompt_context.as_ref()?.url.as_deref()?;
+    let key = context_store::label_key(purpose?)?;
+    let mut site = store.site(&context_store::site_key(url)?).await?;
+    let mut page = site.pages.remove(&context_store::page_pattern(url)?)?;
+    let label = page.labels.remove(&key)?;
+    (label.trusted() && label.ordinal.unwrap_or(0) == 0).then_some(label)
 }
 
 fn cached_candidate_evidence(

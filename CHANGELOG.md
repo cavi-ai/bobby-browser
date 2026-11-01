@@ -5,6 +5,7 @@
 ### Added
 
 - A text tier answers candidate windows with a text-only vision server, and the runtime sends those requests without a screenshot while every other request keeps the screenshot and the image upstream: `bobby vision connect --text-model <id> [--text-adapter <dir>]` configures it, the runtime's managed proxy and `bobby vision start` run it, and `bobby vision-proxy` takes `--text-base-url`, `--text-model` and `--spawn-text-server`.
+- A purpose that vision resolved and the runtime verified is stored as a label on the resolved control in the context store, and the next visit fills or clicks it from that label without a screenshot or a vision call, reported as `resolutionPath: "context"`; a failed act falls back to vision and a newer verified answer replaces the label.
 - The ignored `perception_ground_truth` worker test writes fixture-page screenshots with ground truth read from the DOM: visible control boxes with role and name, single-line text boxes, and the challenge class named by structural markers.
 - `passwordManagerFill` signs in through the browser password manager: the `fill` and `completeForm` intents find the manager's own prompt with vision and click it, and the credential field is only watched, never clicked, focused or typed into, nor its value returned; sessions opt in with `executionPolicy.passwordManager` and `visionAssist`.
 

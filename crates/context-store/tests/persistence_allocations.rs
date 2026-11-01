@@ -67,6 +67,7 @@ fn fixture() -> SiteContext {
             "/form".into(),
             PageContext {
                 forms: BTreeMap::from([("form".into(), FormContext { controls })]),
+                ..Default::default()
             },
         )]),
         ..Default::default()

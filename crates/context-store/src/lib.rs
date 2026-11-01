@@ -3,8 +3,10 @@
 //! `page-runtime` context layer on verified success.
 //!
 //! What persists (schema v1), and only this: site key, page patterns, form
-//! keys, control `{role, accessible_name, ordinal, form_membership}`, and
-//! per-intent counters with a coarse day-precision `last_verified_day`.
+//! keys, control `{role, accessible_name, ordinal, form_membership}`,
+//! per-intent counters with a coarse day-precision `last_verified_day`, and
+//! labels: a caller's normalized field purpose bound to the control a
+//! verified vision answer resolved, with the same counters.
 //! Never: typed values, credentials, page text, screenshots, journal ids,
 //! or exact timestamps.
 //!
@@ -98,10 +100,42 @@ pub struct FormContext {
     pub controls: Vec<ControlContext>,
 }
 
+/// Longest label kept, in bytes after normalization.
+pub const MAX_LABEL_BYTES: usize = 128;
+
+/// The label key for a purpose: trimmed and lowercased. `None` when empty or
+/// longer than [`MAX_LABEL_BYTES`]; such purposes are never remembered.
+pub fn label_key(purpose: &str) -> Option<String> {
+    let key = purpose.trim().to_lowercase();
+    (!key.is_empty() && key.len() <= MAX_LABEL_BYTES).then_some(key)
+}
+
+/// The control a verified vision answer resolved for one purpose on a page.
+/// A purpose binds one control; a newer verified answer replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelContext {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
+    pub stats: IntentStats,
+}
+
+impl LabelContext {
+    /// Verified more often than it failed, so it may act without vision.
+    pub fn trusted(&self) -> bool {
+        self.stats.last_verified_day.is_some()
+            && self.stats.success_count > self.stats.failure_count
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageContext {
     #[serde(default)]
     pub forms: BTreeMap<String, FormContext>,
+    /// Keyed by [`label_key`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, LabelContext>,
 }
 
 /// Counters for one challenge kind (e.g. `recaptchaV2Checkbox`) seen on a
@@ -819,40 +853,43 @@ impl ContextStore {
 }
 
 /// Whether pruning would leave any visible context. Challenges are preserved
-/// by the existing retention policy; controls need a verified retained intent.
+/// by the existing retention policy; controls and labels need a verified
+/// retained record.
 fn has_retained_context(site: &SiteContext, cutoff: u32) -> bool {
+    let retained = |stats: &IntentStats| stats.last_verified_day.is_some_and(|day| day >= cutoff);
     !site.challenges.is_empty()
         || site.pages.values().any(|page| {
-            page.forms.values().any(|form| {
-                form.controls.iter().any(|control| {
-                    control
-                        .intents
-                        .values()
-                        .any(|stats| stats.last_verified_day.is_some_and(|day| day >= cutoff))
+            page.labels.values().any(|label| retained(&label.stats))
+                || page.forms.values().any(|form| {
+                    form.controls
+                        .iter()
+                        .any(|control| control.intents.values().any(retained))
                 })
-            })
         })
 }
 
 fn prune_site(site: &mut SiteContext, cutoff: u32) -> (u64, bool) {
     let before_pages = site.pages.len();
     let mut dropped = 0;
+    let mut keep = |stats: &IntentStats| {
+        let keep = stats.last_verified_day.is_some_and(|day| day >= cutoff);
+        if !keep {
+            dropped += 1;
+        }
+        keep
+    };
     for page in site.pages.values_mut() {
         for form in page.forms.values_mut() {
             for control in &mut form.controls {
-                control.intents.retain(|_, stats| {
-                    let keep = stats.last_verified_day.is_some_and(|day| day >= cutoff);
-                    if !keep {
-                        dropped += 1;
-                    }
-                    keep
-                });
+                control.intents.retain(|_, stats| keep(stats));
             }
             form.controls.retain(|control| !control.intents.is_empty());
         }
         page.forms.retain(|_, form| !form.controls.is_empty());
+        page.labels.retain(|_, label| keep(&label.stats));
     }
-    site.pages.retain(|_, page| !page.forms.is_empty());
+    site.pages
+        .retain(|_, page| !page.forms.is_empty() || !page.labels.is_empty());
     (dropped, dropped != 0 || before_pages != site.pages.len())
 }
 

@@ -622,6 +622,7 @@ async fn persisted_controls(
                             "page".into(),
                             context_store::FormContext { controls },
                         )]),
+                        ..Default::default()
                     },
                 )]),
                 ..Default::default()
