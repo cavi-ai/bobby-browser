@@ -209,3 +209,116 @@ async fn collect_perception_ground_truth() {
     }
     worker.close().await.unwrap();
 }
+
+/// Renders every `*.html` file in BOBBY_PERCEPTION_PAGES (for example from
+/// `scripts/perception/generate_pages.py`) and appends one row per page to
+/// BOBBY_PERCEPTION_OUT, labeled from the DOM like the fixture rows.
+#[tokio::test]
+#[ignore = "requires installed Chrome, BOBBY_PERCEPTION_PAGES and BOBBY_PERCEPTION_OUT"]
+async fn collect_generated_perception_rows() {
+    let pages_dir = PathBuf::from(
+        std::env::var_os("BOBBY_PERCEPTION_PAGES").expect("set BOBBY_PERCEPTION_PAGES"),
+    );
+    let out =
+        PathBuf::from(std::env::var_os("BOBBY_PERCEPTION_OUT").expect("set BOBBY_PERCEPTION_OUT"));
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&pages_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "html")
+        })
+        .collect();
+    files.sort();
+    let pages: Vec<(String, String)> = files
+        .iter()
+        .map(|path| {
+            (
+                format!("/{}", path.file_stem().unwrap().to_string_lossy()),
+                std::fs::read_to_string(path).unwrap(),
+            )
+        })
+        .collect();
+    let site = FixtureSite::spawn(
+        pages
+            .iter()
+            .map(|(path, html)| (path.as_str(), Route::Html(html.clone())))
+            .collect(),
+    )
+    .await;
+
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 4 * 1024 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let mut rows = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&out)
+        .unwrap();
+    for (path, _) in &pages {
+        worker_pool::navigation_or_default(worker.navigation())
+            .navigate(
+                &page,
+                &NavigateCommand {
+                    url: site.url(path),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 15_000,
+                },
+            )
+            .await
+            .unwrap();
+        let png = worker_pool::capture_or_default(worker.capture())
+            .screenshot_bytes(&page)
+            .await
+            .unwrap();
+        let evidence = worker_pool::javascript_or_default(worker.javascript())
+            .evaluate_javascript(
+                &page,
+                &EvaluateJavaScriptCommand {
+                    expression: PROBE.into(),
+                    timeout_ms: 10_000,
+                    await_promise: false,
+                },
+            )
+            .await
+            .unwrap();
+        let [Evidence::JavaScriptResult {
+            value: truth,
+            truncated: false,
+        }] = evidence.as_slice()
+        else {
+            panic!("{path}: expected one complete probe result, got {evidence:?}");
+        };
+        let row = serde_json::json!({
+            "schema": "bobby-perception/1",
+            "page": path,
+            "imageB64": base64::engine::general_purpose::STANDARD.encode(&png),
+            "viewport": truth["viewport"],
+            "elements": truth["elements"],
+            "textRuns": truth["textRuns"],
+            "challenge": truth["challenge"],
+        });
+        writeln!(rows, "{row}").unwrap();
+    }
+    worker.close().await.unwrap();
+}
