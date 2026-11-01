@@ -1209,7 +1209,7 @@ components:
                 kind: { type: string, const: persisted }
         source:
           type: string
-          enum: [observed, vision-promoted]
+          enum: [observed, vision-promoted, semantic]
     ContextAskResponse:
       oneOf:
         - type: object

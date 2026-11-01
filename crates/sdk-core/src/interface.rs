@@ -106,6 +106,49 @@ impl AuthenticatedRuntime {
         self.authorization.capability_handle()
     }
 
+    /// Whether both this runtime's handle and the request carry `vision:assist`,
+    /// the capability half of the vision double gate.
+    fn holds_vision_assist(&self, ctx: &RequestContext) -> bool {
+        self.authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist)
+    }
+
+    /// The vision provider's pick among the observed controls, behind the same
+    /// double gate as vision escalation: the session's `visionAssist` policy
+    /// and the caller's `vision:assist` capability.
+    async fn semantic_answer(
+        &self,
+        ctx: &RequestContext,
+        session: &SessionId,
+        page: &types::PageId,
+        description: &str,
+    ) -> Option<types::ContextAnswer> {
+        if !self.holds_vision_assist(ctx) {
+            return None;
+        }
+        let policy = self
+            .inner
+            .sessions
+            .get(session)
+            .await
+            .ok()?
+            .execution_policy;
+        if !policy.vision_assist {
+            return None;
+        }
+        let assist = self
+            .inner
+            .pages
+            .vision_provider(&self.inner.vision_node_selection(&policy))?;
+        self.inner
+            .pages
+            .semantic_ask(page, description, assist.as_ref())
+            .await
+    }
+
     fn require_owned_session(
         &self,
         ctx: &RequestContext,
@@ -223,12 +266,7 @@ impl AuthenticatedRuntime {
         // Vision assist is gated at escalation time inside IntentEngine, not upfront.
         // Thread whether this principal holds `vision:assist` so stuck intents can
         // enforce the capability half of the deny-by-default double gate.
-        let vision_capability_ok = self
-            .authorization
-            .capability_handle()
-            .capabilities()
-            .contains(Capability::VisionAssist)
-            && ctx.capabilities.contains(Capability::VisionAssist);
+        let vision_capability_ok = self.holds_vision_assist(&ctx);
         let Some(key) = ctx.idempotency_key.clone() else {
             trace.runtime_invoked();
             self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
@@ -308,12 +346,7 @@ impl AuthenticatedRuntime {
             .ensure_writable(&ctx.correlation_id)?;
         self.authorize_submit(&ctx, &envelope.command, false)?;
         self.require_owned_session(&ctx, &envelope.session_id)?;
-        let vision_capability_ok = self
-            .authorization
-            .capability_handle()
-            .capabilities()
-            .contains(Capability::VisionAssist)
-            && ctx.capabilities.contains(Capability::VisionAssist);
+        let vision_capability_ok = self.holds_vision_assist(&ctx);
         let Some(key) = ctx.idempotency_key.clone() else {
             trace.runtime_invoked();
             self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
@@ -596,21 +629,24 @@ impl RuntimeInterface for AuthenticatedRuntime {
             return Ok(Some(answer));
         }
         // Hot miss: a durable-profile runtime answers from the persisted
-        // context graph (cold start); any other runtime behaves as before.
-        let Some(promotion) = self.inner.pages.context_promotion() else {
-            self.inner
-                .operational_metrics()
-                .record_context_lookup(observability::ContextLookupOutcome::Miss);
-            return Ok(None);
-        };
-        let url = self
-            .inner
-            .pages
-            .get(&page)
-            .await
-            .ok()
-            .and_then(|page| page.url);
-        let answer = promotion.ask(url.as_deref(), &description).await;
+        // context graph (cold start), then the vision provider may pick among
+        // the observed controls by meaning.
+        let mut answer = None;
+        if let Some(promotion) = self.inner.pages.context_promotion() {
+            let url = self
+                .inner
+                .pages
+                .get(&page)
+                .await
+                .ok()
+                .and_then(|page| page.url);
+            answer = promotion.ask(url.as_deref(), &description).await;
+        }
+        if answer.is_none() {
+            answer = self
+                .semantic_answer(&ctx, &session, &page, &description)
+                .await;
+        }
         self.inner
             .operational_metrics()
             .record_context_lookup(if answer.is_some() {

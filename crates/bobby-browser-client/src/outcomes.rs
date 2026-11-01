@@ -83,13 +83,17 @@ pub enum ContextObservedAt {
     Persisted,
 }
 
-/// How a remembered control record entered the graph.
+/// How a remembered control record entered the graph, or that a provider
+/// picked the answer among the observed controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum ContextAnswerSource {
     Observed,
     VisionPromoted,
+    /// Chosen by the vision provider's text tier from the observed controls'
+    /// labels, without a screenshot.
+    Semantic,
 }
 
 /// The remembered form structure around a located control (`context_neighbors`).

@@ -339,7 +339,7 @@ export function isContextAnswer(value: unknown): value is ContextAnswer {
   const validObservedAt = observedAt.kind === "generation"
     ? hasExactKeys(observedAt, ["kind", "generation"]) && isSafeUnsigned(observedAt.generation)
     : observedAt.kind === "persisted" && hasExactKeys(observedAt, ["kind"]);
-  return validObservedAt && (value.source === undefined || value.source === "observed" || value.source === "vision-promoted");
+  return validObservedAt && (value.source === undefined || value.source === "observed" || value.source === "vision-promoted" || value.source === "semantic");
 }
 
 function isContextNeighborControl(value: unknown): value is ContextNeighborControl {

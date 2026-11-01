@@ -42,6 +42,10 @@ pub const MAX_RETAINED_COMMANDS: usize = 64;
 /// entry without bound.
 pub const MAX_RETAINED_PROPOSALS: usize = intent_engine::MAX_CACHED_PROPOSALS;
 
+/// Observed controls offered for one semantic answer: the vision prompt's
+/// window size.
+pub const SEMANTIC_WINDOW: usize = 5;
+
 /// A vision-proposed click target for a field purpose, cached under the
 /// page's generation discipline. Structurally incapable of carrying a typed
 /// value: only coordinate actions are cacheable — a `TypeText` or
@@ -345,7 +349,7 @@ impl ContextGraph {
         let query = ContextQuery::new(&needle);
         let mut best: Option<(f32, &AccessibilityTarget)> = None;
         let mut best_is_tied = false;
-        for node in &entry.nodes {
+        for node in document_order(&entry.nodes) {
             let Some(target) = node.target.as_ref() else {
                 continue;
             };
@@ -377,6 +381,41 @@ impl ContextGraph {
             },
             source: None,
         })
+    }
+
+    /// The observed controls a provider may choose among for `description`:
+    /// up to [`SEMANTIC_WINDOW`] named targets in near-miss order, with the
+    /// generation they were observed under. `None` when nothing current was
+    /// observed or no control qualifies.
+    pub fn semantic_window(
+        &self,
+        page: &PageId,
+        description: &str,
+    ) -> Option<(u64, Vec<AccessibilityTarget>)> {
+        let pages = self.lock();
+        let entry = pages.get(page)?;
+        if entry.observed_at != entry.generation {
+            return None;
+        }
+        let targets = document_order(&entry.nodes)
+            .filter_map(|node| node.target.as_ref())
+            .filter(|target| !target.accessible_name.trim().is_empty())
+            .collect::<Vec<_>>();
+        let rows = targets
+            .iter()
+            .map(|target| {
+                (
+                    Some(target.role.as_str()),
+                    Some(target.accessible_name.as_str()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let window = intent_engine::near_miss_order(Some(description), &rows)
+            .into_iter()
+            .take(SEMANTIC_WINDOW)
+            .map(|index| targets[index].clone())
+            .collect::<Vec<_>>();
+        (!window.is_empty()).then_some((entry.generation, window))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PageId, PageContext>> {
@@ -485,6 +524,16 @@ fn candidate_proposals(proposals: Vec<(String, CachedProposal)>) -> Vec<Candidat
             source: ProposalSource::Vision,
         })
         .collect()
+}
+
+/// Every node of a snapshot tree, parents before children, in document order.
+fn document_order(nodes: &[AccessibilityNode]) -> impl Iterator<Item = &AccessibilityNode> {
+    let mut stack = nodes.iter().rev().collect::<Vec<_>>();
+    std::iter::from_fn(move || {
+        let node = stack.pop()?;
+        stack.extend(node.children.iter().rev());
+        Some(node)
+    })
 }
 
 /// A normalized query shared by every candidate in a live or persisted lookup.
@@ -991,5 +1040,53 @@ mod tests {
             .find(|target| target.accessible_name == "Postal code")
             .expect("the snapshot carries the target");
         assert_eq!(answer.target, from_snapshot);
+    }
+
+    fn tree(children: Vec<AccessibilityNode>) -> AccessibilityNode {
+        AccessibilityNode {
+            role: Some("RootWebArea".to_owned()),
+            name: Some("Account".to_owned()),
+            children,
+            ..AccessibilityNode::default()
+        }
+    }
+
+    #[test]
+    fn controls_nested_in_the_snapshot_tree_answer() {
+        let form = AccessibilityNode {
+            role: Some("form".to_owned()),
+            children: vec![node("button", "Log in", Some(0))],
+            ..AccessibilityNode::default()
+        };
+        let (graph, page) = graph_with(vec![tree(vec![form])]);
+
+        let answer = graph
+            .ask(&page, "Log in")
+            .expect("a nested control answers");
+        assert_eq!(answer.target.accessible_name, "Log in");
+    }
+
+    #[test]
+    fn the_semantic_window_ranks_shared_words_first_and_keeps_document_order() {
+        let (graph, page) = graph_with(vec![tree(vec![
+            node("link", "Help center", Some(0)),
+            node("heading", "Sign in", Some(0)),
+            node("textbox", "Username", Some(0)),
+            node("button", "", Some(0)),
+            node("button", "Log in", Some(0)),
+        ])]);
+
+        let (generation, window) = graph
+            .semantic_window(&page, "sign in button")
+            .expect("observed controls");
+        let names = window
+            .iter()
+            .map(|target| target.accessible_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Log in", "Help center", "Username"]);
+        assert_eq!(Some(generation), graph.generation(&page));
+
+        graph.invalidate(&page);
+        assert_eq!(graph.semantic_window(&page, "sign in button"), None);
     }
 }

@@ -960,16 +960,15 @@ fn vision_window_eligible(role: Option<&str>, name: Option<&str>) -> bool {
     name.is_some() && role.is_some_and(|role| VISION_WINDOW_ROLES.contains(&role))
 }
 
-/// Purpose-token overlap ranking for the near-miss window. The runtime does
-/// not know the target on a stuck step; ranking by lexical plausibility
-/// floats rows that share a token with the purpose (role text included, so
-/// "…the button…" lifts button rows) above unrelated chrome, and keeps DOM
-/// order on ties. The training corpus's windows always contain the target;
-/// this approximates that distribution without pretending to know it.
-fn ranked_near_miss_window(
-    candidates: &[Candidate],
-    purpose: Option<&str>,
-) -> Vec<types::CandidateEvidence> {
+/// Purpose-token overlap ranking for the near-miss window, as indices into
+/// `rows` of `(role, name)`. The runtime does not know the target on a stuck
+/// step; ranking by lexical plausibility floats rows that share a token with
+/// the purpose (role text included, so "…the button…" lifts button rows)
+/// above unrelated chrome, and keeps DOM order on ties. Rows outside the
+/// window's roles are dropped. The training corpus's windows always contain
+/// the target; this approximates that distribution without pretending to
+/// know it.
+pub fn near_miss_order(purpose: Option<&str>, rows: &[(Option<&str>, Option<&str>)]) -> Vec<usize> {
     const STOPWORDS: [&str; 12] = [
         "the", "and", "for", "with", "that", "this", "into", "your", "now", "off", "out", "put",
     ];
@@ -982,31 +981,38 @@ fn ranked_near_miss_window(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut scored = candidates
+    let mut scored = rows
         .iter()
-        .filter(|candidate| {
-            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
-        })
-        .map(|candidate| {
-            let haystack = format!(
-                "{} {}",
-                candidate.role.as_deref().unwrap_or_default(),
-                candidate.name.as_deref().unwrap_or_default()
-            )
-            .to_lowercase();
+        .enumerate()
+        .filter(|(_, (role, name))| vision_window_eligible(*role, *name))
+        .map(|(index, (role, name))| {
+            let haystack =
+                format!("{} {}", role.unwrap_or_default(), name.unwrap_or_default()).to_lowercase();
             let score = tokens
                 .iter()
                 .filter(|token| haystack.contains(token.as_str()))
                 .count();
-            (score, candidate)
+            (score, index)
         })
         .collect::<Vec<_>>();
     // Stable sort: equal scores keep DOM order.
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    scored
+    scored.into_iter().map(|(_, index)| index).collect()
+}
+
+fn ranked_near_miss_window(
+    candidates: &[Candidate],
+    purpose: Option<&str>,
+) -> Vec<types::CandidateEvidence> {
+    let rows = candidates
+        .iter()
+        .map(|candidate| (candidate.role.as_deref(), candidate.name.as_deref()))
+        .collect::<Vec<_>>();
+    near_miss_order(purpose, &rows)
         .into_iter()
         .take(CONTEXT_RANK_CANDIDATE_LIMIT)
-        .map(|(_, candidate)| types::CandidateEvidence {
+        .map(|index| &candidates[index])
+        .map(|candidate| types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
             score: 0,

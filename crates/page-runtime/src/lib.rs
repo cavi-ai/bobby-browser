@@ -40,6 +40,18 @@ pub trait ExecutionPhaseObserver: Send + Sync {
     async fn durable_phase_reached(&self, phase: CommandPhase);
 }
 
+/// A description phrased as the instruction a vision provider answers: a
+/// bare noun phrase ("sign in button") draws an abstention where "Locate the
+/// sign in button" draws a pick.
+fn locate_instruction(description: &str) -> String {
+    let description = description.trim();
+    let rest = description
+        .strip_prefix("the ")
+        .or_else(|| description.strip_prefix("The "))
+        .unwrap_or(description);
+    format!("Locate the {rest}")
+}
+
 /// A worker failure folded into the runtime error canon. A browser that is
 /// gone is an unreachable engine with a recovery path, never an opaque
 /// internal failure. The "browser launch failed:" lead is the diagnostic the
@@ -137,6 +149,64 @@ impl PageRuntime {
     /// The durable promotion sink, if this runtime has one.
     pub fn context_promotion(&self) -> Option<&Arc<ContextPromotion>> {
         self.promotion.as_ref()
+    }
+
+    /// The vision provider a session's node selection resolves to.
+    pub fn vision_provider(&self, selection: &NodeSelection) -> Option<Arc<dyn VisionAssist>> {
+        self.adaptive.vision_provider(selection)
+    }
+
+    /// Asks `assist` which observed control `description` means, from the
+    /// controls' labels alone. `None` when the provider needs a screenshot,
+    /// abstains, answers under the floor, or the page changed meanwhile.
+    pub async fn semantic_ask(
+        &self,
+        page: &PageId,
+        description: &str,
+        assist: &dyn VisionAssist,
+    ) -> Option<types::ContextAnswer> {
+        let (generation, window) = self.context.semantic_window(page, description)?;
+        let candidates = window
+            .iter()
+            .map(|target| intent_engine::VisionPromptCandidate {
+                role: target.role.clone(),
+                name: target.accessible_name.clone(),
+                ordinal: None,
+            })
+            .collect::<Vec<_>>();
+        if assist.needs_image("locate", &candidates).await {
+            return None;
+        }
+        let url = self.get(page).await.ok().and_then(|page| page.url);
+        let proposal = assist
+            .propose(intent_engine::VisionProposeRequest {
+                purpose: locate_instruction(description),
+                intent_kind: "locate".into(),
+                screenshot_png: None,
+                corpus_screenshot_png: None,
+                stuck: intent_engine::StuckKind::TargetMissing,
+                context: Some(intent_engine::VisionPromptContext {
+                    url,
+                    candidates,
+                    recent_command_kinds: Vec::new(),
+                }),
+            })
+            .await
+            .ok()?;
+        let intent_engine::VisionAction::ClickCandidate { index } = proposal.action else {
+            return None;
+        };
+        if proposal.confidence < CONTEXT_CONFIDENCE_FLOOR {
+            return None;
+        }
+        let target = window.into_iter().nth(index as usize)?;
+        // The page may have changed while the provider answered.
+        (self.context.generation(page) == Some(generation)).then_some(types::ContextAnswer {
+            target,
+            confidence: proposal.confidence,
+            observed_at: types::ContextObservedAt::Generation { generation },
+            source: Some(types::ContextAnswerSource::Semantic),
+        })
     }
 
     /// Enables proactive vision prefill against this runtime's context graph.

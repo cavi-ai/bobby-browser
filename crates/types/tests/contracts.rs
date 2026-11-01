@@ -1763,3 +1763,19 @@ fn context_answers_have_one_shape_for_hits_and_misses() {
         json!({"neighbors":null,"hit":false,"reason":"notRemembered","nextStep":"a11y_snapshot"})
     );
 }
+
+#[test]
+fn semantic_context_answers_carry_their_source() {
+    let wire = json!({
+        "target":{"role":"button","accessibleName":"Log in"},
+        "confidence":0.9,
+        "observedAt":{"kind":"generation","generation":3},
+        "source":"semantic"
+    });
+    let answer: types::ContextAnswer = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(answer.source, Some(types::ContextAnswerSource::Semantic));
+    assert_eq!(
+        serde_json::to_value(&answer).unwrap()["source"],
+        wire["source"]
+    );
+}
