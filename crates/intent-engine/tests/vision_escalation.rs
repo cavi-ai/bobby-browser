@@ -1829,6 +1829,7 @@ async fn verified_page_context_ranks_the_provider_candidate_window() {
                                 }],
                             },
                         )]),
+                        ..Default::default()
                     },
                 )]),
                 ..SiteContext::default()
@@ -2296,6 +2297,7 @@ async fn complete_form_prefills_ambiguous_fields_before_the_first_action() {
                                 }],
                             },
                         )]),
+                        ..Default::default()
                     },
                 )]),
                 ..SiteContext::default()
@@ -2905,4 +2907,274 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
     );
     assert_eq!(snapshot.prefill.requests_cancelled, 0);
     assert_eq!(metrics.provider_health()[0].failures, 2);
+}
+
+fn label(
+    role: &str,
+    name: &str,
+    ordinal: Option<u32>,
+    failures: u64,
+) -> context_store::LabelContext {
+    context_store::LabelContext {
+        role: role.into(),
+        accessible_name: name.into(),
+        ordinal,
+        stats: IntentStats {
+            success_count: 1,
+            failure_count: failures,
+            last_verified_day: Some(20_000),
+            source: Some(RecordSource::VisionPromoted),
+        },
+    }
+}
+
+/// A store remembering `label` for "Contact email" on the account page.
+async fn labelled_store(dir: &std::path::Path, label: context_store::LabelContext) -> ContextStore {
+    let (store, _) = ContextStore::open(dir, "profile-a").await.unwrap();
+    store
+        .upsert_site(
+            "https://example.test",
+            SiteContext {
+                pages: BTreeMap::from([(
+                    "/account".into(),
+                    StoredPageContext {
+                        labels: BTreeMap::from([("contact email".into(), label)]),
+                        ..StoredPageContext::default()
+                    },
+                )]),
+                ..SiteContext::default()
+            },
+        )
+        .await;
+    store
+}
+
+fn labelled_context(
+    assist: Arc<dyn VisionAssist>,
+    store: ContextStore,
+    session_ok: bool,
+) -> VisionContext {
+    VisionContext {
+        session_ok,
+        capability_ok: true,
+        assist: Some(assist),
+        proposals: None,
+        defer_escalation: false,
+        prompt_context: Some(VisionPromptContext {
+            url: Some("https://example.test/account".into()),
+            ..VisionPromptContext::default()
+        }),
+        corpus: None,
+        context_store: Some(Arc::new(store)),
+    }
+}
+
+fn resolution_paths(outcome: &IntentOutcome) -> Vec<IntentResolutionPath> {
+    let (IntentOutcome::Completed { evidence } | IntentOutcome::Failed { evidence, .. }) = outcome;
+    evidence
+        .iter()
+        .filter_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record.resolution_path),
+            _ => None,
+        })
+        .collect()
+}
+
+fn contact_email_fill() -> IntentCommand {
+    IntentCommand::Fill(FillIntent {
+        purpose: "Contact email".into(),
+        hints: IntentHints::default(),
+        value: ControlAction::SetText {
+            value: "maya@example.test".into(),
+            clear_first: true,
+        },
+    })
+}
+
+fn two_unnamed_fields(type_text_calls: Arc<std::sync::Mutex<Vec<TypeTextCommand>>>) -> FakeBrowser {
+    FakeBrowser {
+        candidates: vec![
+            form_candidate("f17", "textbox", "f17"),
+            form_candidate("f18", "textbox", "f18"),
+        ],
+        type_text_calls,
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#f17".into(),
+            text: Some("maya@example.test".into()),
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    }
+}
+
+#[tokio::test]
+async fn a_trusted_label_fills_without_asking_vision() {
+    let temp = tempfile::tempdir().unwrap();
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 1 },
+        },
+    });
+    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = two_unnamed_fields(type_text_calls.clone());
+    let store = labelled_store(temp.path(), label("textbox", "f17", Some(0), 0)).await;
+
+    let outcome = IntentEngine::execute(
+        &contact_email_fill(),
+        &PageId::new(),
+        &browser,
+        &labelled_context(assist, store, true),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "a trusted label still asked vision"
+    );
+    assert_eq!(
+        resolution_paths(&outcome),
+        vec![IntentResolutionPath::Context]
+    );
+    let calls = type_text_calls.lock().unwrap_or_else(|p| p.into_inner());
+    let target = calls[0].target.as_ref().unwrap();
+    assert_eq!(target.accessible_name.as_deref(), Some("f17"));
+    assert_eq!(calls[0].value, "maya@example.test");
+}
+
+#[tokio::test]
+async fn an_untrusted_or_repeated_name_label_leaves_the_field_to_vision() {
+    for remembered in [
+        label("textbox", "f17", None, 1),
+        label("textbox", "f17", Some(1), 0),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let assist = Arc::new(FakeVision {
+            called: called.clone(),
+            proposal: VisionProposal {
+                confidence: 0.95,
+                action: VisionAction::TypeIntoCandidate { index: 1 },
+            },
+        });
+        let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let browser = two_unnamed_fields(type_text_calls.clone());
+        let store = labelled_store(temp.path(), remembered.clone()).await;
+
+        let outcome = IntentEngine::execute(
+            &contact_email_fill(),
+            &PageId::new(),
+            &browser,
+            &labelled_context(assist, store, true),
+        )
+        .await;
+
+        assert!(
+            called.load(Ordering::SeqCst),
+            "{remembered:?} skipped vision"
+        );
+        assert_eq!(
+            resolution_paths(&outcome).last(),
+            Some(&IntentResolutionPath::VisionFallback),
+            "{remembered:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_label_whose_act_fails_falls_through_to_vision() {
+    let temp = tempfile::tempdir().unwrap();
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 1 },
+        },
+    });
+    let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("f17", "checkbox", "f17"),
+            form_candidate("f18", "checkbox", "f18"),
+        ],
+        control_action_calls: control_action_calls.clone(),
+        rejected_control_target: Some("f17".into()),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let store = labelled_store(temp.path(), label("checkbox", "f17", Some(0), 0)).await;
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::Fill(FillIntent {
+            purpose: "Contact email".into(),
+            hints: IntentHints::default(),
+            value: ControlAction::SetChecked { checked: true },
+        }),
+        &PageId::new(),
+        &browser,
+        &labelled_context(assist, store, true),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        called.load(Ordering::SeqCst),
+        "a failed label act did not escalate"
+    );
+    assert_eq!(
+        resolution_paths(&outcome).last(),
+        Some(&IntentResolutionPath::VisionFallback)
+    );
+    let calls = control_action_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let names: Vec<&str> = calls
+        .iter()
+        .map(|call| call.target.accessible_name.as_str())
+        .collect();
+    assert_eq!(names, ["f17", "f18"]);
+}
+
+#[tokio::test]
+async fn a_closed_vision_gate_never_acts_on_a_label() {
+    let temp = tempfile::tempdir().unwrap();
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+    });
+    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = two_unnamed_fields(type_text_calls.clone());
+    let store = labelled_store(temp.path(), label("textbox", "f17", Some(0), 0)).await;
+
+    let outcome = IntentEngine::execute(
+        &contact_email_fill(),
+        &PageId::new(),
+        &browser,
+        &labelled_context(assist, store, false),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert!(type_text_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_empty());
+    assert!(!called.load(Ordering::SeqCst));
 }

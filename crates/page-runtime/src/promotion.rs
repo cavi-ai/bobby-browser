@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use context_store::{
-    day_since_epoch, page_pattern, site_key, ContextStore, ControlContext, IntentStats,
-    RecordSource,
+    day_since_epoch, label_key, page_pattern, site_key, ContextStore, ControlContext, IntentStats,
+    LabelContext, RecordSource,
 };
 use types::{ContextAnswer, ContextAnswerSource, Evidence, IntentResolutionPath, TargetSpec};
 
@@ -89,6 +89,7 @@ impl ContextPromotion {
         }
 
         let mut controls = Vec::new();
+        let mut labels = Vec::new();
         for (record, targets) in groups {
             // A challenge solve has no resolved control — it acts on pixels
             // inside a widget iframe. Record it at site level as the challenge
@@ -105,11 +106,19 @@ impl ContextPromotion {
                 continue;
             }
             let source = match record.resolution_path {
-                IntentResolutionPath::VisionFallback | IntentResolutionPath::VisionPrefill => {
-                    RecordSource::VisionPromoted
-                }
+                IntentResolutionPath::VisionFallback
+                | IntentResolutionPath::VisionPrefill
+                | IntentResolutionPath::Context => RecordSource::VisionPromoted,
                 IntentResolutionPath::Deterministic => RecordSource::Observed,
             };
+            if let (RecordSource::VisionPromoted, Some(key)) =
+                (source, record.purpose.as_deref().and_then(label_key))
+            {
+                let resolved = targets.last().copied().and_then(control_from_target);
+                if !success || resolved.is_some() {
+                    labels.push((key, resolved.filter(|_| success)));
+                }
+            }
             if targets.is_empty() && !success {
                 if let Some(control) = record.candidates.first().and_then(|candidate| {
                     Some(ControlContext {
@@ -130,10 +139,16 @@ impl ContextPromotion {
             }
         }
 
-        if !controls.is_empty() {
+        if !controls.is_empty() || !labels.is_empty() {
             self.store
                 .update_site(&site, |site_context| {
                     let page = site_context.pages.entry(pattern).or_default();
+                    for (key, resolved) in labels {
+                        apply_label(&mut page.labels, key, resolved);
+                    }
+                    if controls.is_empty() {
+                        return;
+                    }
                     let form = page.forms.entry(PAGE_LEVEL_FORM.to_string()).or_default();
                     for (control, intent_kind, source) in controls {
                         let index = match form.controls.iter().position(|existing| {
@@ -375,6 +390,38 @@ fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {
     } else {
         stats.failure_count = stats.failure_count.saturating_add(1);
     }
+}
+
+/// A verified answer (`Some`) binds `key` to its control, replacing a binding
+/// to any other control; a failure (`None`) counts against the current one.
+fn apply_label(
+    labels: &mut BTreeMap<String, LabelContext>,
+    key: String,
+    resolved: Option<ControlContext>,
+) {
+    let Some(control) = resolved else {
+        if let Some(label) = labels.get_mut(&key) {
+            apply_outcome(&mut label.stats, false, RecordSource::VisionPromoted);
+        }
+        return;
+    };
+    let label = labels.entry(key).or_insert_with(|| LabelContext {
+        role: control.role.clone(),
+        accessible_name: control.accessible_name.clone(),
+        ordinal: control.ordinal,
+        stats: IntentStats::default(),
+    });
+    if (&label.role, &label.accessible_name, label.ordinal)
+        != (&control.role, &control.accessible_name, control.ordinal)
+    {
+        *label = LabelContext {
+            role: control.role,
+            accessible_name: control.accessible_name,
+            ordinal: control.ordinal,
+            stats: IntentStats::default(),
+        };
+    }
+    apply_outcome(&mut label.stats, true, RecordSource::VisionPromoted);
 }
 
 fn control_from_target(target: &TargetSpec) -> Option<ControlContext> {

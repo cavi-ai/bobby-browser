@@ -43,7 +43,13 @@ fn site_with_controls(controls: Vec<ControlContext>) -> SiteContext {
     let mut forms = BTreeMap::new();
     forms.insert("page".to_string(), FormContext { controls });
     let mut pages = BTreeMap::new();
-    pages.insert("/".to_string(), PageContext { forms });
+    pages.insert(
+        "/".to_string(),
+        PageContext {
+            forms,
+            ..Default::default()
+        },
+    );
     SiteContext {
         pages,
         ..SiteContext::default()

@@ -127,7 +127,7 @@ export type NetworkResourceType =
   | "FedCM"
   | "Other";
 
-export type IntentResolutionPath = "deterministic" | "visionFallback" | "visionPrefill";
+export type IntentResolutionPath = "deterministic" | "visionFallback" | "visionPrefill" | "context";
 export interface ExecutionRecord {
   intentKind: string;
   purpose: string | null;

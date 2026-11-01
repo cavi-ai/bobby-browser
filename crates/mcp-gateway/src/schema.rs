@@ -2417,7 +2417,7 @@ fn execution_record() -> Value {
         json!({
             "intentKind":string(1, 128),
             "purpose":nullable(string(0, 256)),
-            "resolutionPath":{"type":"string","enum":["deterministic","visionFallback"]},
+            "resolutionPath":{"type":"string","enum":["deterministic","visionFallback","visionPrefill","context"]},
             "planSummary":string(0, MAX_STRING_BYTES),
             "candidates":array(object(json!({
                 "role":nullable(string(0,256)),
@@ -3047,7 +3047,7 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "field":string(1, 256),
                 "value":nullable(string(0, MAX_STRING_BYTES)),
-                "resolutionPath":{"type":"string","enum":["deterministic","visionFallback"]},
+                "resolutionPath":{"type":"string","enum":["deterministic","visionFallback","visionPrefill","context"]},
                 "errorCode":nullable(error_code())
             }),
             &["field", "value", "resolutionPath", "errorCode"],

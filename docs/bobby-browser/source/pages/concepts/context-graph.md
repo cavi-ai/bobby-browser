@@ -19,6 +19,7 @@ For each site (scheme plus registrable domain, never a full URL), page pattern (
 
 - Role, accessible name, ordinal and form membership.
 - Per intent kind: success and failure counts, the day of the last verified success, and whether the record was `observed` or `vision-promoted`.
+- Per page: labels. A step's purpose (trimmed, lowercased, at most 128 bytes) mapped to the control a verified vision answer resolved for it, with the same counts.
 
 A completed form or extraction records every field it resolved. A failed one counts the failure against the failing step only. It never stores typed values, credentials, page text, screenshots, journal IDs or exact timestamps.
 
@@ -42,6 +43,10 @@ A hit returns the target. A miss returns `hit: false` with `nextStep: "a11y_snap
 ## Vision ranking
 
 When an intent escalates to vision on a page with remembered context, bobby orders the stuck step's near-miss candidates (up to 10) before the first 5 go to the provider. A remembered control counts when it matches by role and name, has the same intent kind and has more verified successes than failures. The one with the best record moves first. Ties leave the order unchanged. A record with no verification day is never used. The provider still chooses, and the action is still verified.
+
+## Vision labels
+
+Before a stuck step goes to the provider, bobby checks the page's labels. A label for the step's purpose with more verified successes than failures acts on its control with no screenshot and no provider call, and evidence marks the path `context`. A label only acts on the first control with its role and name. If the act fails, the step goes to the provider as usual. A verified vision answer for the purpose replaces the label, and a failed step counts against it. Labels sit behind the same gates as vision: a session without `visionAssist` never uses them.
 
 ## Retention and erasure
 

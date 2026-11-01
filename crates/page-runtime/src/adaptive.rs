@@ -1732,8 +1732,14 @@ fn record_intent_metrics(
             {
                 observability::ResolutionSource::VisionPrefill
             }
+            types::IntentResolutionPath::Context
+                if source == observability::ResolutionSource::Deterministic =>
+            {
+                observability::ResolutionSource::Context
+            }
             types::IntentResolutionPath::Deterministic => source,
             types::IntentResolutionPath::VisionPrefill => source,
+            types::IntentResolutionPath::Context => source,
         };
     }
     metrics.record_intent_resolution(kind, source);

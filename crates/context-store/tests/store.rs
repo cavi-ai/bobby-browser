@@ -35,7 +35,13 @@ fn site(names: &[&str], verified_day: u32) -> SiteContext {
         },
     );
     let mut pages = std::collections::BTreeMap::new();
-    pages.insert("/login".to_string(), PageContext { forms });
+    pages.insert(
+        "/login".to_string(),
+        PageContext {
+            forms,
+            ..Default::default()
+        },
+    );
     SiteContext {
         pages,
         ..SiteContext::default()

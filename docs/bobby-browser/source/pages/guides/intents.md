@@ -176,6 +176,6 @@ When deterministic matching is stuck, an intent can ask a vision provider to pic
 2. The session was created with `executionPolicy.visionAssist = true`.
 3. A vision backend is configured. See [Configuration](configuration.md#vision).
 
-The provider chooses among up to five near-miss candidates, and bobby accepts a proposal only above a 0.75 confidence floor and after verifying it. With `[vision].prefill = true` (the default), `intent_complete_form` resolves unresolved fields from one screenshot before it starts. Evidence marks the path as `deterministic`, `visionPrefill` or `visionFallback`.
+The provider chooses among up to five near-miss candidates, and bobby accepts a proposal only above a 0.75 confidence floor and after verifying it. With `[vision].prefill = true` (the default), `intent_complete_form` resolves unresolved fields from one screenshot before it starts. Evidence marks the path as `deterministic`, `visionPrefill`, `visionFallback` or `context`, a label remembered from an earlier visit (see [Context graph](../concepts/context-graph.md#vision-labels)).
 
 `intent_detect_challenge` classifies a captcha and never acts: its `challengeDetection` evidence holds the type, confidence and whether it blocks, or `null` for a clean page. `intent_solve_challenge` runs the solve loop until the challenge clears or `timeoutMs` passes. bobby does not scan pages for challenges on its own.

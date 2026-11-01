@@ -4043,7 +4043,13 @@ model = "mlx-community/example-selected"
             },
         );
         let mut pages = std::collections::BTreeMap::new();
-        pages.insert("/login".to_string(), context_store::PageContext { forms });
+        pages.insert(
+            "/login".to_string(),
+            context_store::PageContext {
+                forms,
+                ..Default::default()
+            },
+        );
         store
             .upsert_site(
                 "https://example.com",

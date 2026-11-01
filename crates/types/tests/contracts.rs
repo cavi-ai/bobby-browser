@@ -1169,6 +1169,7 @@ fn intent_resolution_paths_round_trip_their_wire_strings() {
         (IntentResolutionPath::Deterministic, "deterministic"),
         (IntentResolutionPath::VisionFallback, "visionFallback"),
         (IntentResolutionPath::VisionPrefill, "visionPrefill"),
+        (IntentResolutionPath::Context, "context"),
     ] {
         assert_eq!(serde_json::to_string(&path).unwrap(), format!("\"{wire}\""));
         let parsed: IntentResolutionPath = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
