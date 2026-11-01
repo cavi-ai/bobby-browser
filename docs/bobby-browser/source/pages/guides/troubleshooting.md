@@ -66,7 +66,7 @@ Retention moved past your cursor. Re-read durable state and resume from the earl
 Vision assist needs the `vision:assist` capability, `executionPolicy.visionAssist = true` on the session, and a reachable provider. A capability and an opt-in alone are not enough.
 
 - Set up the provider with `bobby vision connect`, export the variables it prints, and start with `bobby serve --vision`. See [Configuration](configuration.md#vision).
-- Doctor checks: `vision-service` (provider reachable), `vision-provider` (selected profile exists), `vision-upstream-key` (the profile's key variable is set), `vision-routing`, `vision-acp-reachability` and `vision-auth-path` for ACP profiles. The ACP checks make no model call.
+- Doctor checks: `vision-service` (provider reachable), `vision-provider` (selected profile exists), `vision-upstream-key` (the profile's key variable is set), `vision-routing`, `vision-acp-reachability` and `vision-auth-path` for ACP profiles. The ACP checks make no model call. `vision-tier-text` and `vision-tier-image` name the model behind each tier and its memory: cached weight size for MLX models, resident size for a loaded Ollama model, size on disk for an unloaded one.
 - For an ACP harness, log in through the harness first. bobby calls the harness's `authenticate` at run time and fails closed when no advertised method matches. It does not read IDE keychains or store provider tokens.
 - The token lives in the variable named by `token_env`, never in `config.toml`. Endpoints must be `https`, or `http` on loopback.
 - For LM Studio or MLX, use the server URL the app shows. Port 1234 is common but not fixed.

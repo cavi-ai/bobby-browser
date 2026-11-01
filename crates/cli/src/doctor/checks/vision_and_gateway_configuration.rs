@@ -37,6 +37,9 @@ pub(super) fn vision_and_gateway_configuration(
         if let Some(check) = check_vision_readiness(&config.vision) {
             push_doctor_check(report, check);
         }
+        for check in check_vision_tiers(&config.vision) {
+            push_doctor_check(report, check);
+        }
         if let Some(check) = check_vision_upstream_key(&config.vision) {
             push_doctor_check(report, check);
         }
@@ -345,6 +348,71 @@ pub(in crate::doctor) fn check_vision_readiness(vision: &VisionConfig) -> Option
             detail: error.to_string(),
         }),
     }
+}
+
+/// One row per vision tier: the model that serves it and the memory it costs.
+pub(in crate::doctor) fn check_vision_tiers(vision: &VisionConfig) -> Vec<DoctorCheck> {
+    let mut checks = vec![match &vision.text_tier {
+        Some(tier) => {
+            let adapter = tier
+                .adapter
+                .as_deref()
+                .and_then(Path::file_name)
+                .map(|name| format!(" + adapter {}", name.to_string_lossy()))
+                .unwrap_or_default();
+            match crate::vision_readiness::hugging_face_weight_bytes(&tier.model) {
+                Some(bytes) => DoctorCheck {
+                    status: DoctorStatus::Ok,
+                    name: "vision-tier-text".to_string(),
+                    detail: format!("{}{adapter} · {} of weights", tier.model, gigabytes(bytes)),
+                },
+                None => DoctorCheck {
+                    status: DoctorStatus::Warn,
+                    name: "vision-tier-text".to_string(),
+                    detail: format!(
+                        "{}{adapter} · weights are not in the Hugging Face cache",
+                        tier.model
+                    ),
+                },
+            }
+        }
+        None => DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-tier-text".to_string(),
+            detail: "not configured; candidate windows go to the image model with a screenshot"
+                .to_string(),
+        },
+    }];
+    if let Some((provider, profile)) = vision.selected_provider() {
+        let memory = if provider.eq_ignore_ascii_case("mlx") {
+            crate::vision_readiness::hugging_face_weight_bytes(&profile.model).map_or_else(
+                || "weights are not in the Hugging Face cache".to_string(),
+                |bytes| format!("{} of weights", gigabytes(bytes)),
+            )
+        } else if provider.eq_ignore_ascii_case("ollama") {
+            match crate::vision_readiness::ollama_model_memory(profile, Duration::from_secs(2)) {
+                Some(crate::vision_readiness::OllamaModelMemory::Loaded(bytes)) => {
+                    format!("{} loaded", gigabytes(bytes))
+                }
+                Some(crate::vision_readiness::OllamaModelMemory::OnDisk(bytes)) => {
+                    format!("{} on disk, not loaded", gigabytes(bytes))
+                }
+                None => "memory unknown: Ollama does not list the model".to_string(),
+            }
+        } else {
+            format!("memory not reported by {provider}")
+        };
+        checks.push(DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-tier-image".to_string(),
+            detail: format!("{provider} / {} · {memory}", profile.model),
+        });
+    }
+    checks
+}
+
+fn gigabytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
 pub(crate) fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
@@ -823,5 +891,51 @@ mod cdp_port_tests {
         );
         assert_eq!(status, DoctorStatus::Fail, "{detail}");
         assert_eq!(name, "engine-satisfiability");
+    }
+
+    #[test]
+    fn vision_tiers_name_each_model_and_its_memory() {
+        let mut vision = VisionConfig::default();
+        let rows = check_vision_tiers(&vision);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "vision-tier-text");
+        assert_eq!(rows[0].status, DoctorStatus::Ok);
+        assert!(
+            rows[0].detail.starts_with("not configured"),
+            "{}",
+            rows[0].detail
+        );
+
+        vision.text_tier = Some(config::VisionTextTierConfig {
+            base_url: "http://127.0.0.1:9102".into(),
+            model: "org/never-downloaded-text-model".into(),
+            adapter: Some("/adapters/mlx-lora-bobby-v1".into()),
+        });
+        vision.provider = Some("lmstudio".into());
+        vision.providers.insert(
+            "lmstudio".into(),
+            config::VisionProviderConfig {
+                base_url: "http://127.0.0.1:1234/v1".into(),
+                model: "vision-model".into(),
+                api_key_env: None,
+            },
+        );
+        let rows = check_vision_tiers(&vision);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].name.as_str(), rows[0].detail.as_str()),
+            (
+                "vision-tier-text",
+                "org/never-downloaded-text-model + adapter mlx-lora-bobby-v1 · weights are not in the Hugging Face cache"
+            )
+        );
+        assert_eq!(rows[0].status, DoctorStatus::Warn);
+        assert_eq!(
+            (rows[1].name.as_str(), rows[1].detail.as_str()),
+            (
+                "vision-tier-image",
+                "lmstudio / vision-model · memory not reported by lmstudio"
+            )
+        );
     }
 }
