@@ -12,5 +12,5 @@
     "@cavi-ai/api-client": "0.22.0",
     "@cavi-ai/bobby-browser": "workspace:*"
   },
-  "devDependencies": { "@types/node": "26.6.5" }
+  "devDependencies": { "@types/node": "26.6.6" }
 }
