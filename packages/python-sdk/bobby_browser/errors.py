@@ -66,14 +66,28 @@ class RuntimeClientError(Exception):
 
     @classmethod
     def from_interface_error(
-        cls, kind: str, status: int, error: Mapping[str, Any]
+        cls,
+        kind: str,
+        status: int,
+        error: Mapping[str, Any],
+        secret: Optional[str] = None,
     ) -> "RuntimeClientError":
-        """Build from a wire ``InterfaceError`` (``{"error": {...}}`` body)."""
+        """Build from a wire ``InterfaceError`` (``{"error": {...}}`` body).
+
+        The message carries the runtime's reason, so a caller can see what to
+        fix; ``secret`` (the bearer) is removed from it if it ever appears.
+        """
+        message = f"Runtime request failed: {status} {error.get('code')}"
+        reason = error.get("message")
+        if isinstance(reason, str) and reason:
+            if secret:
+                reason = reason.replace(secret, "[redacted]")
+            message = f"{message}: {reason}"
         return cls(
             kind,
             status=status,
             code=error.get("code"),
-            message=f"Runtime request failed: {status} {error.get('code')}",
+            message=message,
             correlation_id=error.get("correlationId"),
             command_id=error.get("commandId"),
             retryable=error.get("retryable"),

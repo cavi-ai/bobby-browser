@@ -178,6 +178,37 @@ class ClientUnitTests(unittest.TestCase):
 
         self.assertIsNone(seen["idempotency_key"])
 
+    # ---- interface error reasons ------------------------------------------
+
+    def test_interface_errors_carry_the_runtime_reason_without_the_bearer(self) -> None:
+        def handler(req: _Handler) -> None:
+            req.read_body()
+            req.reply_json(
+                422,
+                {
+                    "error": {
+                        "code": "invalidRequest",
+                        "layer": "interface",
+                        "message": "command deadline must be live and no later than the request deadline (top-secret-bearer)",
+                        "correlationId": "corr-1",
+                        "commandId": None,
+                        "retryable": False,
+                        "retryAfterMs": None,
+                        "reconciliationRequired": False,
+                        "requiredCapability": None,
+                    }
+                },
+            )
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "top-secret-bearer")
+        with self.assertRaises(RuntimeClientError) as caught:
+            client.create_session({"profile": "default", "proxy": None})
+        text = str(caught.exception)
+        self.assertIn("422 invalidRequest: command deadline must be live", text)
+        self.assertNotIn("top-secret-bearer", text)
+        self.assertNotIn("top-secret-bearer", repr(caught.exception))
+
     # ---- 429 retryAfterMs ------------------------------------------------
 
     def test_429_surfaces_retry_after_ms_from_interface_error(self) -> None:
