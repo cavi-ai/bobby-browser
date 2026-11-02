@@ -952,14 +952,15 @@ fn agents_skill_item_enabled(skill: bool, project_skill: bool, use_defaults: boo
     skill || project_skill || use_defaults
 }
 
-const MLX_MODELS: [(&str, &str); 4] = [
-    // First entry is the interactive default. Qwen3.5-27B grounds precisely
-    // and drives solveChallenge; the 2.5-VL small/balanced options cannot
-    // (see bobby://intents).
+const MLX_MODELS: [(&str, &str); 5] = [
+    // First entry is the interactive default. Qwen3-VL 8B and Qwen3.5-27B
+    // ground and drive solveChallenge; the 2.5-VL small/balanced options
+    // cannot (see bobby://intents).
     (
-        "Recommended (Qwen3.5 27B)",
-        "mlx-community/Qwen3.5-27B-4bit",
+        "Recommended (Qwen3-VL 8B)",
+        "cavi-ai/Qwen3-VL-8B-Instruct-MLX-4bit",
     ),
+    ("Precise (Qwen3.5 27B)", "mlx-community/Qwen3.5-27B-4bit"),
     ("Small (3B)", "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"),
     ("Balanced (7B)", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"),
     ("Large (32B)", "mlx-community/Qwen2.5-VL-32B-Instruct-4bit"),
@@ -2049,6 +2050,7 @@ mod install_tests {
         assert_eq!(
             MLX_MODELS.map(|(_, model)| model),
             [
+                "cavi-ai/Qwen3-VL-8B-Instruct-MLX-4bit",
                 "mlx-community/Qwen3.5-27B-4bit",
                 "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
                 "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
