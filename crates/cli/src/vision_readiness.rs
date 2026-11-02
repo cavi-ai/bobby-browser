@@ -113,6 +113,41 @@ fn hugging_face_download_command(model: &str) -> Result<Command> {
     anyhow::bail!("Hugging Face downloader not found; install huggingface_hub so hf is on PATH")
 }
 
+/// The published interactable-control detector, at the revision the runtime was verified with.
+const DETECTOR_REPO: &str = "cavi-ai/bobby-control-detector";
+const DETECTOR_REVISION: &str = "88eafaf5e235a83d41a3421e235d9d2bbe264119";
+const DETECTOR_FILE: &str = "onnx/model.onnx";
+
+fn cached_detector_model_at(hub: &Path) -> Option<PathBuf> {
+    let path = hub
+        .join(format!("models--{}", DETECTOR_REPO.replace('/', "--")))
+        .join("snapshots")
+        .join(DETECTOR_REVISION)
+        .join(DETECTOR_FILE);
+    path.is_file().then_some(path)
+}
+
+/// Downloads the control detector into the Hugging Face cache, unless it is
+/// there already, and returns the cached ONNX file.
+pub(crate) fn download_detector_model() -> Result<PathBuf> {
+    let hub = hugging_face_cache_root()?;
+    if let Some(path) = cached_detector_model_at(&hub) {
+        return Ok(path);
+    }
+    let status = hugging_face_download_command(DETECTOR_REPO)?
+        .arg(DETECTOR_FILE)
+        .arg("--revision")
+        .arg(DETECTOR_REVISION)
+        .status()
+        .with_context(|| format!("failed to download {DETECTOR_REPO}"))?;
+    if !status.success() {
+        anyhow::bail!("Hugging Face download failed for {DETECTOR_REPO} with {status}");
+    }
+    cached_detector_model_at(&hub).ok_or_else(|| {
+        anyhow::anyhow!("download finished but {DETECTOR_FILE} of {DETECTOR_REPO} is not cached")
+    })
+}
+
 pub(crate) fn download_and_verify_mlx_model(model: &str) -> Result<()> {
     let status = hugging_face_download_command(model)?
         .status()

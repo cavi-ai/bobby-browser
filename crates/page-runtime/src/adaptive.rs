@@ -129,6 +129,8 @@ struct WorkerIntentBrowser<'a> {
     target_waited: std::sync::Mutex<StdDuration>,
     /// Finds on-screen controls for vision windows; `None` finds none.
     control_detector: Option<Arc<crate::perception::ControlDetector>>,
+    /// Keeps each screenshot's controls and text until the page changes.
+    context_graph: Option<Arc<crate::ContextGraph>>,
 }
 
 /// Longest an action waits for its target to appear.
@@ -400,17 +402,43 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             return Vec::new();
         }
         let scale = f64::from(png_width) / viewport_width;
-        let read = tokio::task::spawn_blocking(move || {
-            let controls = detector.detect(&png)?;
-            let text = crate::perception::read_text(&png)?;
-            Ok::<_, crate::perception::PerceptionError>(crate::perception::name_controls(
-                &controls, &text,
-            ))
-        })
-        .await;
+        // One detection and one text read per screenshot while the page is unchanged.
+        use sha2::Digest;
+        let sha256: [u8; 32] = sha2::Sha256::digest(&png).into();
+        let graph = self.context_graph.clone();
+        let cached = graph
+            .as_ref()
+            .and_then(|graph| graph.screen_controls(page_id, &sha256));
+        let read = match cached {
+            Some(named) => Ok(Ok(named)),
+            None => {
+                let generation = graph.as_ref().and_then(|graph| graph.generation(page_id));
+                let text = graph
+                    .as_ref()
+                    .and_then(|graph| graph.page_text(page_id, &sha256));
+                let read = tokio::task::spawn_blocking(move || {
+                    let controls = detector.detect(&png)?;
+                    let text = match text {
+                        Some(text) => text,
+                        None => Arc::new(crate::perception::read_text(&png)?),
+                    };
+                    let named = Arc::new(crate::perception::name_controls(&controls, &text));
+                    Ok::<_, crate::perception::PerceptionError>((named, text))
+                })
+                .await;
+                if let (Ok(Ok((named, text))), Some(graph), Some(generation)) =
+                    (&read, &graph, generation)
+                {
+                    graph.record_page_text(page_id, generation, sha256, Arc::clone(text));
+                    graph.record_screen_controls(page_id, generation, sha256, Arc::clone(named));
+                }
+                read.map(|read| read.map(|(named, _)| named))
+            }
+        };
         match read {
             Ok(Ok(named)) => named
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|named| intent_engine::ScreenControl {
                     name: named.name,
                     x: (named.control.x + named.control.width / 2.0) / scale,
@@ -1724,6 +1752,7 @@ async fn execute_intent(
         deadline: envelope.deadline,
         target_waited: std::sync::Mutex::new(StdDuration::ZERO),
         control_detector,
+        context_graph: context_graph.clone(),
     };
     let gates_open = vision_gate.session_ok && vision_gate.capability_ok;
     let recent_command_kinds = context_graph

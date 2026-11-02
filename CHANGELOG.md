@@ -4,7 +4,7 @@
 
 ### Added
 
-- `[vision].detector_model` runs an ONNX interactable-control detector in the runtime: the vision window of an intent that clicks also offers on-screen controls that no accessibility candidate names, named by the text inside them on macOS, and a picked one is clicked at its center.
+- `[vision].detector_model` runs an ONNX interactable-control detector in the runtime: the vision window of an intent that clicks also offers on-screen controls that no accessibility candidate names, named by the text inside them on macOS, and a picked one is clicked at its center; each screenshot is detected and read once while the page is unchanged, and `bobby vision connect --activate --download-model` downloads the published detector and sets it on macOS.
 - `scripts/perception/` trains an interactable-element detector from pages it generates: `generate_pages.py` writes varied UI pages, the ignored `collect_generated_perception_rows` worker test labels them from the DOM, `train_detector.py` fine-tunes RT-DETRv2-R18 (Apache-2.0), and `eval_detector.py` scores it on perception rows and exports ONNX.
 - The page runtime reads on-screen text lines from a page screenshot with Apple Vision on macOS, with boxes in screenshot pixels, and keeps one read per screenshot until the page changes.
 - `bobby doctor` reports each vision tier with its model and memory: `vision-tier-text` for the text tier and `vision-tier-image` for the image provider, as cached weight size for MLX models and resident or on-disk size for Ollama models.

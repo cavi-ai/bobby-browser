@@ -280,7 +280,7 @@ Before capture, bobby covers editable controls, credential-marked elements and i
 
 | Key | Default | Meaning |
 |---|---|---|
-| `detector_model` | unset | ONNX interactable-control detector: `onnx/model.onnx` from [cavi-ai/bobby-control-detector](https://huggingface.co/cavi-ai/bobby-control-detector), or one `scripts/perception/eval_detector.py --onnx` exports |
+| `detector_model` | unset | ONNX interactable-control detector: `onnx/model.onnx` from [cavi-ai/bobby-control-detector](https://huggingface.co/cavi-ai/bobby-control-detector), which `bobby vision connect --activate --download-model` downloads and sets on macOS, or one `scripts/perception/eval_detector.py --onnx` exports |
 
 With a detector, the vision window of an intent that clicks also offers up to two on-screen controls that no accessibility candidate names and whose text shares a word with the purpose, such as a button drawn on a canvas. Each detected control is named by the text inside it, read with Apple Vision on macOS, and a picked one is clicked at its center. Detection runs locally on the CPU; the screenshot never leaves the machine for it.
 

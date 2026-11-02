@@ -208,6 +208,21 @@ pub fn upsert_vision_text_tier(
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
+/// Sets `[vision].detector_model`, keeping every other setting.
+pub fn upsert_vision_detector_model(path: &Path, model: &Path) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
+    vision["detector_model"] = value(model.to_string_lossy().as_ref());
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
+}
+
 fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {
     if parent.contains_key(key) && !parent[key].is_table() {
         return Err(ConfigWriteError::Invalid(format!(
@@ -258,6 +273,25 @@ mod tests {
         .unwrap();
         let loaded = AppConfig::load(&path).unwrap();
         assert_eq!(loaded.vision.text_tier.unwrap().adapter, None);
+    }
+
+    #[test]
+    fn the_detector_model_round_trips_and_leaves_the_provider_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let provider = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "image-model".into(),
+            api_key_env: None,
+        };
+        upsert_vision_platform(&path, DEFAULT_LOOPBACK_ENDPOINT, "TOKEN", "mlx", &provider)
+            .unwrap();
+        let model = dir.path().join("onnx").join("model.onnx");
+        upsert_vision_detector_model(&path, &model).unwrap();
+
+        let loaded = AppConfig::load(&path).unwrap();
+        assert_eq!(loaded.vision.detector_model, Some(model));
+        assert_eq!(loaded.vision.selected_provider(), Some(("mlx", &provider)));
     }
 
     #[test]
