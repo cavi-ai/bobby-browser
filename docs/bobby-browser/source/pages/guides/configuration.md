@@ -230,7 +230,7 @@ Presets for `bobby vision connect --provider`:
 | Provider | `base_url` | `model` | `api_key_env` |
 |---|---|---|---|
 | `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `ollama` | `http://127.0.0.1:11434` | `llava:7b` | none |
+| `ollama` | `http://127.0.0.1:11434` | `qwen3-vl:8b-instruct` | none |
 | `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | none |
 | `mlx` | local | selected model | none |
 | `custom` | `--base-url` | `--model` | `--api-key-env` |

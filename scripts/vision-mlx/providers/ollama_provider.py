@@ -13,7 +13,7 @@ from .base import ProposeRequest, ProposeResponse, VisionProvider
 log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "llava:7b"
+DEFAULT_MODEL = "qwen3-vl:8b-instruct"
 
 
 class OllamaProvider(VisionProvider):

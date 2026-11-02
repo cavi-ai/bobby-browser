@@ -2045,7 +2045,7 @@ mod install_tests {
         let state = VisionInstallState::default();
         assert!(state.enabled);
         assert_eq!(state.provider, "ollama");
-        assert_eq!(state.profile.model, "llava:7b");
+        assert_eq!(state.profile.model, "qwen3-vl:8b-instruct");
         assert_eq!(
             MLX_MODELS.map(|(_, model)| model),
             [

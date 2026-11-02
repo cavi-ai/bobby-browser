@@ -152,7 +152,7 @@ bobby context forget --profile <profile-id> <site>
 ```bash
 bobby vision connect --provider ollama
 bobby install --vision --vision-provider ollama
-bobby install --yes --vision-provider ollama --vision-model llava:7b
+bobby install --yes --vision-provider ollama --vision-model qwen3-vl:8b-instruct
 bobby vision connect --yes --provider mlx
 bobby vision connect --yes --provider mlx --activate --download-model
 bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised

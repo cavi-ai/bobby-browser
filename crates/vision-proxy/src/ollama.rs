@@ -11,9 +11,9 @@ use crate::wire::{ExtractResponse, ProposeResponse, VisionAction};
 
 /// Default Ollama endpoint.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
-pub const DEFAULT_MODEL: &str = "llava:7b";
+pub const DEFAULT_MODEL: &str = "qwen3-vl:8b-instruct";
 
-const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. Return ONLY valid JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<px>,\"y\":<px>,\"width\":<px>,\"height\":<px>} (optional)} {\"kind\":\"noChallengeDetected\"} When candidates are listed, select only by zero-based index. Candidate actions contain only kind and index; never emit typed or extracted values. Without candidates, click/typeText/extractValue remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates x and y are integers on a 0-1000 grid over the screenshot: (0,0) is the top-left corner and (1000,1000) the bottom-right corner. Do not include markdown fences, comments, or text outside JSON.";
+const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. Return ONLY valid JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<n>,\"y\":<n>,\"width\":<n>,\"height\":<n>} (optional)} {\"kind\":\"noChallengeDetected\"} Every reply, detectChallenge included, is the whole {\"confidence\": ..., \"action\": ...} object, never a bare action. When candidates are listed, select only by zero-based index. Candidate actions contain only kind and index; never emit typed or extracted values. Without candidates, click/typeText/extractValue remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates x and y, and a challenge region's x, y, width and height, are integers on a 0-1000 grid over the screenshot: (0,0) is the top-left corner and (1000,1000) the bottom-right corner. Do not include markdown fences, comments, or text outside JSON.";
 
 fn propose_system() -> String {
     format!(
@@ -179,12 +179,29 @@ impl OllamaUpstream {
         validate_proposal(&proposal).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
         // The model answers on the 0-1000 grid the prompt names; callers take
         // pixels of the screenshot they sent.
-        if let VisionAction::Click { x, y } = &mut proposal.action {
-            let (width, height) = png_dimensions(screenshot).ok_or_else(|| {
-                UpstreamError::Invalid("screenshot is not a PNG; a click cannot be scaled".into())
-            })?;
-            *x = *x / 1000.0 * width;
-            *y = *y / 1000.0 * height;
+        let scale = || {
+            png_dimensions(screenshot).ok_or_else(|| {
+                UpstreamError::Invalid("screenshot is not a PNG; a point cannot be scaled".into())
+            })
+        };
+        match &mut proposal.action {
+            VisionAction::Click { x, y } => {
+                let (width, height) = scale()?;
+                *x = *x / 1000.0 * width;
+                *y = *y / 1000.0 * height;
+            }
+            VisionAction::ChallengeDetected {
+                region: Some(region),
+                ..
+            } => {
+                let (width, height) = scale()?;
+                let (width, height) = (width as f32, height as f32);
+                region.x = region.x / 1000.0 * width;
+                region.y = region.y / 1000.0 * height;
+                region.width = region.width / 1000.0 * width;
+                region.height = region.height / 1000.0 * height;
+            }
+            _ => {}
         }
         Ok(proposal)
     }
@@ -285,7 +302,7 @@ struct ChatChoiceMessage {
 /// Build an Ollama upstream from environment variables.
 ///
 /// Required env vars:
-/// - `VISION_OLLAMA_MODEL` (optional, defaults to `llava:7b`)
+/// - `VISION_OLLAMA_MODEL` (optional, defaults to `qwen3-vl:8b-instruct`)
 /// - `VISION_OLLAMA_BASE_URL` (optional, defaults to `http://127.0.0.1:11434`)
 pub fn ollama_upstream_from_env() -> Result<OllamaUpstream, OllamaConfigError> {
     let model = std::env::var("VISION_OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());

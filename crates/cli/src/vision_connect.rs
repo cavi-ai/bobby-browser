@@ -644,7 +644,7 @@ mod tests {
 
         let (_, ollama) = preset("ollama").unwrap();
         assert_eq!(ollama.base_url, "http://127.0.0.1:11434");
-        assert_eq!(ollama.model, "llava:7b");
+        assert_eq!(ollama.model, "qwen3-vl:8b-instruct");
         assert!(ollama.api_key_env.is_none());
 
         let (_, lmstudio) = preset("lmstudio").unwrap();

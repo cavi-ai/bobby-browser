@@ -31,6 +31,8 @@ async fn mock_chat_completions(
 
     let content = if user_text.contains("MALFORMED") {
         "MODEL_MARKER: I cannot safely do that."
+    } else if user_text.contains("captcha") {
+        r#"{"confidence":0.9,"action":{"kind":"challengeDetected","challengeType":"recaptchaV2Checkbox","blocking":true,"region":{"x":100,"y":200,"width":50,"height":40}}}"#
     } else {
         r#"{"confidence":0.91,"action":{"kind":"click","x":11.0,"y":22.0}}"#
     };
@@ -118,6 +120,40 @@ async fn ollama_composes_url_once_and_requests_structured_json() {
     let body = state.last_body.lock().unwrap().clone().unwrap();
     assert_eq!(body["model"], json!("llava"));
     assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+}
+
+#[tokio::test]
+async fn ollama_reads_a_detected_challenge_and_scales_its_region_to_pixels() {
+    let (base_url, _state) = start_mock_ollama().await;
+    let upstream = OllamaUpstream::new("llava".into(), base_url);
+
+    let proposal = upstream
+        .propose(ProposeInput {
+            purpose: "Check whether this page shows a captcha".into(),
+            intent_kind: "detectChallenge".into(),
+            stuck: "challengePresent".into(),
+            ..propose_input(png_b64(1900, 980))
+        })
+        .await
+        .unwrap();
+
+    match proposal.action {
+        VisionAction::ChallengeDetected {
+            challenge_type,
+            region: Some(region),
+            blocking,
+        } => {
+            assert_eq!(challenge_type, "recaptchaV2Checkbox");
+            assert!(blocking);
+            // {100, 200, 50, 40} on the 0-1000 grid over a 1900x980 screenshot.
+            assert_eq!(
+                [region.x, region.y, region.width, region.height]
+                    .map(|v| (v * 10.0).round() / 10.0),
+                [190.0, 196.0, 95.0, 39.2]
+            );
+        }
+        other => panic!("expected a detected challenge with a region, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@ Model and endpoint overrides via env:
 
     VISION_PROVIDER=mlx-vlm
     VISION_MLX_MODEL=mlx-community/Qwen2.5-VL-7B-Instruct-4bit
-    VISION_OLLAMA_MODEL=llava:7b
+    VISION_OLLAMA_MODEL=qwen3-vl:8b-instruct
     VISION_OLLAMA_BASE_URL=http://127.0.0.1:11434
     VISION_LMSTUDIO_MODEL=local-model
     VISION_LMSTUDIO_BASE_URL=http://127.0.0.1:1234
