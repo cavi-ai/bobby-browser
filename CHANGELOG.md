@@ -17,6 +17,7 @@
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.21.1 asset digests.
+- The Ollama vision default is `qwen3-vl:8b-instruct` instead of `llava:7b`.
 - `scripts/vision-mlx/eval_provider.py` scores candidate picks as the runtime acts on them (page URL and candidates sent, a pick below the 0.75 confidence floor counted as an abstention) and adds `--suite grounding`, `challenge` and `ocr` over perception rows: click points scored by the box they land in, per-class challenge F1, and exact text match for tesseract, Apple Vision or an MLX vision model; every suite reports p50/p95 latency and peak memory.
 
 ### Fixed
@@ -26,7 +27,7 @@
 - Semantic `context_ask` sends the vision provider the controls' labels without the page URL, so the text tier's pick no longer changes with the page's port.
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
 - A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
-- The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.
+- The Ollama vision provider asks for click coordinates and challenge regions on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point, and it accepts the `challengeType` its prompt names, so challenge detection through Ollama no longer fails as an invalid reply.
 - Vision training-data rows record the model the proxy serves, including MLX `--model` overrides, instead of a redacted or default name; a local model path keeps only its last component.
 - A vision request without candidates tells the model to answer with `click`, `typeText` or `extractValue` instead of a candidate index that points at nothing.
 - Vision servers a managed proxy starts exit with that proxy, a signal included, instead of holding their port and model memory.

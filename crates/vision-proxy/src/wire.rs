@@ -87,6 +87,8 @@ pub enum VisionAction {
     /// typed enum and fails the proposal on an unknown one.
     #[serde(alias = "challenge_detected")]
     ChallengeDetected {
+        // Models answer with the camelCase name the prompt shows.
+        #[serde(alias = "challengeType")]
         challenge_type: String,
         #[serde(default)]
         region: Option<ChallengeRegionWire>,
