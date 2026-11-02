@@ -4,9 +4,10 @@ Loads a vision-language model once and runs propose/extract in-process.
 This is the canonical fast path: no HTTP hop, no external server, models
 quantized for Metal.
 
-Default model: Qwen3.5-27B-4bit — grounds precisely and drives
+Default model: Qwen3-VL-8B-Instruct-MLX-4bit — grounds and drives
 solveChallenge end-to-end (its normalized [0,1000) coordinates are
-rescaled by this provider). The old Qwen2.5-VL-3B default could not.
+rescaled by this provider). Qwen3.5-27B-4bit does too at more memory;
+the old Qwen2.5-VL-3B default could not.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from .base import ProposeRequest, ProposeResponse, VisionProvider
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "mlx-community/Qwen3.5-27B-4bit"
+DEFAULT_MODEL = "cavi-ai/Qwen3-VL-8B-Instruct-MLX-4bit"
 
 # Model families that emit click coordinates normalized to [0, 1000) instead
 # of absolute pixels (Qwen3-VL changed the convention; Qwen2.5-VL is

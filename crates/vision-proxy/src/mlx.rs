@@ -9,7 +9,7 @@ use crate::wire::{ExtractResponse, ProposeResponse};
 
 /// Default loopback endpoint of the canonical Python vision server.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:9101";
-pub const DEFAULT_MODEL: &str = "mlx-community/Qwen3.5-27B-4bit";
+pub const DEFAULT_MODEL: &str = "cavi-ai/Qwen3-VL-8B-Instruct-MLX-4bit";
 
 /// Pass-through upstream for the canonical Python vision server
 /// (`scripts/vision-mlx/vision_server.py`). The server already speaks
