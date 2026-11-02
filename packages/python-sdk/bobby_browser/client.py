@@ -564,7 +564,9 @@ class BrowserRuntimeClient:
         if isinstance(payload, dict) and set(payload.keys()) == {"error"} and isinstance(
             payload["error"], dict
         ):
-            return RuntimeClientError.from_interface_error("http", status, payload["error"])
+            return RuntimeClientError.from_interface_error(
+                "http", status, payload["error"], self._bearer_token
+            )
         return self._protocol("response has an unexpected status or shape", status)
 
     def _protocol(self, message: str, status: Optional[int] = None) -> RuntimeClientError:
