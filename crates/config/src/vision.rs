@@ -69,6 +69,11 @@ pub struct VisionConfig {
     /// screenshot. Unset keeps every request on the selected provider.
     #[serde(default, alias = "textTier")]
     pub text_tier: Option<VisionTextTierConfig>,
+    /// ONNX interactable-control detector. When set, a vision window also
+    /// offers on-screen controls the page's accessibility tree does not expose,
+    /// named by the text inside them (macOS). Unset detects nothing.
+    #[serde(default, alias = "detectorModel")]
+    pub detector_model: Option<std::path::PathBuf>,
 }
 
 impl Default for VisionConfig {
@@ -91,6 +96,7 @@ impl Default for VisionConfig {
             collect_training_data: false,
             training_data_dir: default_training_data_dir(),
             text_tier: None,
+            detector_model: None,
         }
     }
 }

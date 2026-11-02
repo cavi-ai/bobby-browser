@@ -127,6 +127,8 @@ struct WorkerIntentBrowser<'a> {
     /// waits (each field of a form) share one [`TARGET_APPEAR_CAP`], so a form
     /// waits for late fields once, not once per field.
     target_waited: std::sync::Mutex<StdDuration>,
+    /// Finds on-screen controls for vision windows; `None` finds none.
+    control_detector: Option<Arc<crate::perception::ControlDetector>>,
 }
 
 /// Longest an action waits for its target to appear.
@@ -369,6 +371,61 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         worker_pool::input_or_default(self.lease.worker().input())
             .click_xy(page_id, x, y)
             .await
+    }
+
+    async fn screen_controls(&self, page_id: &PageId) -> Vec<intent_engine::ScreenControl> {
+        let Some(detector) = self.control_detector.clone() else {
+            return Vec::new();
+        };
+        // Screenshots are in device pixels and clicks in CSS pixels; without
+        // the viewport's CSS size no control can be placed, so none is offered.
+        let Ok((viewport_width, _)) =
+            worker_pool::observation_or_default(self.lease.worker().observation())
+                .viewport_size(page_id)
+                .await
+        else {
+            return Vec::new();
+        };
+        let png = match worker_pool::capture_or_default(self.lease.worker().capture())
+            .screenshot_bytes(page_id)
+            .await
+        {
+            Ok(png) if !png.is_empty() => png,
+            _ => return Vec::new(),
+        };
+        let Some((png_width, _)) = crate::perception::png_size(&png) else {
+            return Vec::new();
+        };
+        if viewport_width <= 0.0 {
+            return Vec::new();
+        }
+        let scale = f64::from(png_width) / viewport_width;
+        let read = tokio::task::spawn_blocking(move || {
+            let controls = detector.detect(&png)?;
+            let text = crate::perception::read_text(&png)?;
+            Ok::<_, crate::perception::PerceptionError>(crate::perception::name_controls(
+                &controls, &text,
+            ))
+        })
+        .await;
+        match read {
+            Ok(Ok(named)) => named
+                .into_iter()
+                .map(|named| intent_engine::ScreenControl {
+                    name: named.name,
+                    x: (named.control.x + named.control.width / 2.0) / scale,
+                    y: (named.control.y + named.control.height / 2.0) / scale,
+                })
+                .collect(),
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "screen controls unavailable");
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "screen control detection panicked");
+                Vec::new()
+            }
+        }
     }
 
     async fn type_text(
@@ -1057,6 +1114,9 @@ pub struct AdaptivePageEngine {
     /// the site-level challenge prior; `None` keeps the byte-identical
     /// default path.
     context_store: Option<Arc<context_store::ContextStore>>,
+    /// Interactable-control detector (`[vision].detector_model`). `None`
+    /// offers no on-screen controls to a vision window.
+    control_detector: Option<Arc<crate::perception::ControlDetector>>,
     operational_metrics: Option<observability::OperationalMetrics>,
 }
 
@@ -1095,6 +1155,7 @@ impl AdaptivePageEngine {
             context_graph: None,
             corpus: None,
             context_store: None,
+            control_detector: None,
             operational_metrics: None,
         }
     }
@@ -1135,6 +1196,15 @@ impl AdaptivePageEngine {
 
     pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
         self.vision_assist = Some(assist);
+        self
+    }
+
+    /// Offers on-screen controls this detector finds to vision windows.
+    pub fn with_control_detector(
+        mut self,
+        detector: Arc<crate::perception::ControlDetector>,
+    ) -> Self {
+        self.control_detector = Some(detector);
         self
     }
 
@@ -1311,6 +1381,7 @@ impl AdaptivePageEngine {
                 self.corpus.clone(),
                 self.context_store.clone(),
                 self.operational_metrics.clone(),
+                self.control_detector.clone(),
             )
             .await;
         }
@@ -1645,12 +1716,14 @@ async fn execute_intent(
     corpus: Option<intent_engine::VisionCorpus>,
     context_store: Option<Arc<context_store::ContextStore>>,
     operational_metrics: Option<observability::OperationalMetrics>,
+    control_detector: Option<Arc<crate::perception::ControlDetector>>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser {
         lease,
         deadline: envelope.deadline,
         target_waited: std::sync::Mutex::new(StdDuration::ZERO),
+        control_detector,
     };
     let gates_open = vision_gate.session_ok && vision_gate.capability_ok;
     let recent_command_kinds = context_graph

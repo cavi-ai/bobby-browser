@@ -138,6 +138,12 @@ pub trait ObservationEngine: Send + Sync {
         Err(unsupported_error())
     }
 
+    /// The viewport's CSS width and height, read on the worker's internal DOM
+    /// channel. Default: unsupported.
+    async fn viewport_size(&self, _page_id: &PageId) -> Result<(f64, f64), CommandError> {
+        Err(unsupported_error())
+    }
+
     /// Best-effort accessible identity of the interactive element at viewport
     /// point (x, y): role + name, matching the shape a11y candidates carry.
     /// Used by the vision corpus collector to ground a verified click back to

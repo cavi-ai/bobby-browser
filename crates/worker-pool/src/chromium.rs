@@ -2348,6 +2348,18 @@ return [role, name.slice(0, 200)];
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         Ok(Some(pair))
     }
+
+    async fn viewport_size(&self, page_id: &PageId) -> Result<(f64, f64), CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let mut params = EvaluateParams::new("[window.innerWidth, window.innerHeight]");
+        params.return_by_value = Some(true);
+        tokio::time::timeout(Duration::from_millis(2_000), page.evaluate(params))
+            .await
+            .map_err(|_| timeout_error(2_000))?
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
+    }
 }
 
 #[async_trait]

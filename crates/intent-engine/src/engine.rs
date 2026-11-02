@@ -104,6 +104,13 @@ pub trait IntentBrowser: Send + Sync {
         })
     }
 
+    /// Controls visible in the viewport with the text drawn inside each and
+    /// its center in viewport coordinates, including controls the
+    /// accessibility tree does not name. Defaults to none.
+    async fn screen_controls(&self, _page_id: &PageId) -> Vec<crate::ScreenControl> {
+        Vec::new()
+    }
+
     async fn type_text(
         &self,
         page_id: &PageId,
@@ -3844,7 +3851,7 @@ async fn execute_solve_challenge(
                     VisionProposalOutcome::Accepted,
                     Some(VerificationMetricResult::Accepted),
                 );
-                match execute_vision_action(page_id, browser, action, &[], None).await {
+                match execute_vision_action(page_id, browser, action, &[], &[], None).await {
                     Ok(mut step_evidence) => {
                         act_evidence.append(&mut step_evidence);
                     }
@@ -4230,6 +4237,7 @@ async fn stuck_outcome_with_prior_evidence(
                 browser,
                 &action,
                 &prompt_candidates,
+                &[],
                 report.fill_payload.as_ref(),
             )
             .await
@@ -4297,6 +4305,7 @@ async fn stuck_outcome_with_prior_evidence(
                 browser,
                 &action,
                 &candidates,
+                &[],
                 report.fill_payload.as_ref(),
             )
             .await
@@ -4474,6 +4483,45 @@ mod vision_gate_closed_tests {
     }
 }
 
+#[cfg(test)]
+mod screen_window_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_offers_screen_controls_the_purpose_names_that_no_candidate_does() {
+        let control = |name: &str| crate::ScreenControl {
+            name: name.into(),
+            x: 1.0,
+            y: 2.0,
+        };
+        let candidate = |name: &str| types::CandidateEvidence {
+            role: Some("button".into()),
+            name: Some(name.into()),
+            score: 0,
+            reasons: Vec::new(),
+        };
+        let kept = screen_window(
+            [
+                "Save draft",
+                "Export CSV",
+                "Help",
+                "export  csv",
+                "Export all",
+                "Export PDF",
+            ]
+            .map(control)
+            .to_vec(),
+            Some("Save and export"),
+            &[candidate("Save draft")],
+        );
+        let names: Vec<&str> = kept.iter().map(|control| control.name.as_str()).collect();
+        assert_eq!(names, ["Export CSV", "Export all"]);
+        assert!(clicks_candidates("follow"));
+        assert!(!clicks_candidates("locate"));
+        assert!(!clicks_candidates("fill"));
+    }
+}
+
 fn vision_denied_or_unavailable(
     vision: &VisionContext,
     prior_evidence: Vec<Evidence>,
@@ -4546,20 +4594,41 @@ async fn escalate_with_vision(
     let mut base_evidence = prior_evidence.clone();
     base_evidence.push(stuck_evidence);
 
+    // The window is the top 5 window-eligible candidates, less the slots
+    // taken by on-screen controls the purpose names that no candidate does;
+    // those follow the candidates, so an index past them clicks a screen control.
+    let screen = if clicks_candidates(intent_kind) {
+        screen_window(
+            browser.screen_controls(page_id).await,
+            purpose.as_deref(),
+            &candidates,
+        )
+    } else {
+        Vec::new()
+    };
+    let prompt_candidates: Vec<types::CandidateEvidence> = candidates
+        .iter()
+        .filter(|candidate| {
+            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+        })
+        .take(5 - screen.len())
+        .cloned()
+        .collect();
     let mut context = prompt_context;
-    if !candidates.is_empty() {
+    if !candidates.is_empty() || !screen.is_empty() {
         let block = context.get_or_insert_with(crate::VisionPromptContext::default);
-        block.candidates = candidates
+        block.candidates = prompt_candidates
             .iter()
-            .filter(|candidate| {
-                vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
-            })
-            .take(5)
             .map(|candidate| crate::VisionPromptCandidate {
                 role: candidate.role.clone().expect("gated role"),
                 name: candidate.name.clone().expect("gated name"),
                 ordinal: None,
             })
+            .chain(screen.iter().map(|control| crate::VisionPromptCandidate {
+                role: "button".into(),
+                name: control.name.clone(),
+                ordinal: None,
+            }))
             .collect();
     }
     let window = context
@@ -4721,21 +4790,14 @@ async fn escalate_with_vision(
         };
     }
 
-    // The model indexes into the exact list the prompt carried: top 5
-    // window-eligible candidates. Resolve against that same view.
-    let prompt_candidates: Vec<types::CandidateEvidence> = candidates
-        .iter()
-        .filter(|candidate| {
-            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
-        })
-        .take(5)
-        .cloned()
-        .collect();
+    // The model indexes into the exact list the prompt carried; resolve
+    // against that same view.
     let mut act_evidence = match execute_vision_action(
         page_id,
         browser,
         &proposal.action,
         &prompt_candidates,
+        &screen,
         fill_payload.as_ref(),
     )
     .await
@@ -4837,6 +4899,52 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// Intents whose vision answer clicks the picked candidate; `locate` only
+/// reports it.
+fn clicks_candidates(intent_kind: &str) -> bool {
+    intent_kind != "locate"
+        && types::candidate_action_kinds_for_intent(intent_kind)
+            .is_some_and(|(kind, _)| kind == "clickCandidate")
+}
+
+/// Most on-screen controls a vision window carries.
+const MAX_SCREEN_CONTROLS: usize = 2;
+
+/// The on-screen controls a vision window offers: those whose text shares a
+/// word with `purpose` and differs from every candidate's name, at most
+/// [`MAX_SCREEN_CONTROLS`], in the order given.
+fn screen_window(
+    controls: Vec<crate::ScreenControl>,
+    purpose: Option<&str>,
+    candidates: &[types::CandidateEvidence],
+) -> Vec<crate::ScreenControl> {
+    fn words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let purpose = words(purpose.unwrap_or_default());
+    let mut taken: Vec<Vec<String>> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.name.as_deref())
+        .map(words)
+        .collect();
+    let mut kept = Vec::new();
+    for control in controls {
+        let name = words(&control.name);
+        if kept.len() == MAX_SCREEN_CONTROLS
+            || !name.iter().any(|word| purpose.contains(word))
+            || taken.contains(&name)
+        {
+            continue;
+        }
+        taken.push(name);
+        kept.push(control);
+    }
+    kept
 }
 
 async fn capture_sanitized_corpus_screenshot(
@@ -4983,10 +5091,20 @@ async fn execute_vision_action(
     browser: &dyn IntentBrowser,
     action: &VisionAction,
     prompt_candidates: &[types::CandidateEvidence],
+    screen: &[crate::ScreenControl],
     fill_payload: Option<&VisionFillPayload>,
 ) -> Result<Vec<Evidence>, CommandError> {
     match action {
         VisionAction::Click { x, y } => browser.click_xy(page_id, *x, *y).await,
+        VisionAction::ClickCandidate { index }
+            if (*index as usize) >= prompt_candidates.len()
+                && (*index as usize) - prompt_candidates.len() < screen.len() =>
+        {
+            // Screen controls follow the candidates in the window and have no
+            // DOM target: click the control's center.
+            let control = &screen[*index as usize - prompt_candidates.len()];
+            browser.click_xy(page_id, control.x, control.y).await
+        }
         VisionAction::ClickCandidate { index } => {
             // The runtime owns spatial grounding: resolve the index against
             // the exact candidate list the model saw, then click the element

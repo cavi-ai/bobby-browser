@@ -276,6 +276,14 @@ auth = "advertised"
 
 Before capture, bobby covers editable controls, credential-marked elements and inaccessible frames, and strips URLs of credentials, query strings and fragments. Records are skipped if masking fails. Directories use mode 0700 and files 0600 on Unix. Other page content can still appear in screenshots, so keep these directories local and access-controlled.
 
+### On-screen controls
+
+| Key | Default | Meaning |
+|---|---|---|
+| `detector_model` | unset | ONNX interactable-control detector: `onnx/model.onnx` from [cavi-ai/bobby-control-detector](https://huggingface.co/cavi-ai/bobby-control-detector), or one `scripts/perception/eval_detector.py --onnx` exports |
+
+With a detector, the vision window of an intent that clicks also offers up to two on-screen controls that no accessibility candidate names and whose text shares a word with the purpose, such as a button drawn on a canvas. Each detected control is named by the text inside it, read with Apple Vision on macOS, and a picked one is clicked at its center. Detection runs locally on the CPU; the screenshot never leaves the machine for it.
+
 ## `[nodes.<name>]`
 
 Named vision nodes. A session picks one with `executionPolicy.visionNode`.
