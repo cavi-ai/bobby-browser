@@ -749,6 +749,31 @@ test("sanitizes artifact body and digest failures into typed protocol errors", a
   });
 });
 
+test("interface errors carry the runtime's reason with the bearer redacted", async () => {
+  await withServer((request, response) => {
+    request.resume();
+    writeJson(response, 422, { error: {
+      code: "invalidRequest",
+      layer: "interface",
+      message: `command deadline must be live and no later than the request deadline (${TOKEN})`,
+      correlationId: CORRELATION_ID,
+      commandId: null,
+      retryable: false,
+      retryAfterMs: null,
+      reconciliationRequired: false,
+      requiredCapability: null,
+    } });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    await assert.rejects(client.createSession({ profile: "default", proxy: null }), (error: unknown) => {
+      assert.ok(error instanceof RuntimeClientError);
+      assert.match(error.message, /422 invalidRequest: command deadline must be live/);
+      assert.doesNotMatch(error.message, new RegExp(TOKEN));
+      return true;
+    });
+  });
+});
+
 test("preserves the structured InterfaceError metadata matrix for recover and artifact", async () => {
   const cases = [
     { status: 401, code: "authenticationFailed", retryable: false, retryAfterMs: null, reconciliationRequired: false },

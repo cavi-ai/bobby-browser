@@ -30,7 +30,10 @@ export class RuntimeClientError extends Error {
     const safeCapability = remote?.requiredCapability === null
       ? null
       : remote?.requiredCapability !== undefined && redact(remote.requiredCapability) === remote.requiredCapability ? remote.requiredCapability : undefined;
-    const rawMessage = options.message ?? (remote ? `Runtime request failed: ${options.status ?? "unknown"} ${safeCode ?? "[redacted]"}` : `Runtime client ${options.kind} failure`);
+    // A remote error carries the runtime's reason so a caller can see what to
+    // fix; it passes through the same redactor as everything else.
+    const reason = remote && typeof remote.message === "string" && remote.message.length > 0 ? `: ${remote.message}` : "";
+    const rawMessage = options.message ?? (remote ? `Runtime request failed: ${options.status ?? "unknown"} ${safeCode ?? "[redacted]"}${reason}` : `Runtime client ${options.kind} failure`);
     super(redact(rawMessage));
     this.#redact = redact;
     this.name = redact("RuntimeClientError");
