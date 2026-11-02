@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use intent_engine::{CachedProposal, CachedProposalAction, ProposalGeneration, ProposalLookup};
 
-use crate::perception::TextBox;
+use crate::perception::{NamedControl, TextBox};
 use types::{
     AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
     RuntimeCommand,
@@ -103,6 +103,8 @@ struct PageContext {
     /// Text read from a screenshot: the generation it was taken under, the
     /// screenshot's SHA-256 and the boxes.
     page_text: Option<(u64, [u8; 32], Arc<Vec<TextBox>>)>,
+    /// Detected controls named by their text, for the same screenshot and generation rule.
+    screen_controls: Option<(u64, [u8; 32], Arc<Vec<NamedControl>>)>,
 }
 
 impl ContextGraph {
@@ -138,6 +140,7 @@ impl ContextGraph {
             proposals: Vec::new(),
             proposals_at: 0,
             page_text: None,
+            screen_controls: None,
         });
         entry.observed_at = entry.generation;
         entry.recorded_seq = seq;
@@ -168,6 +171,7 @@ impl ContextGraph {
             proposals: Vec::new(),
             proposals_at: 0,
             page_text: None,
+            screen_controls: None,
         });
         if entry.commands.contains(&command) {
             return;
@@ -411,6 +415,35 @@ impl ContextGraph {
         if let Some(entry) = self.lock().get_mut(page) {
             if entry.generation == generation {
                 entry.page_text = Some((generation, sha256, boxes));
+            }
+        }
+    }
+
+    /// Controls detected on the screenshot with this SHA-256, while the page
+    /// has not changed since they were detected.
+    pub fn screen_controls(
+        &self,
+        page: &PageId,
+        sha256: &[u8; 32],
+    ) -> Option<Arc<Vec<NamedControl>>> {
+        let pages = self.lock();
+        let entry = pages.get(page)?;
+        let (generation, hash, controls) = entry.screen_controls.as_ref()?;
+        (*generation == entry.generation && hash == sha256).then(|| Arc::clone(controls))
+    }
+
+    /// Keeps `controls` detected on the screenshot with this SHA-256 under the
+    /// generation it was taken at; a page that changed since keeps nothing.
+    pub fn record_screen_controls(
+        &self,
+        page: &PageId,
+        generation: u64,
+        sha256: [u8; 32],
+        controls: Arc<Vec<NamedControl>>,
+    ) {
+        if let Some(entry) = self.lock().get_mut(page) {
+            if entry.generation == generation {
+                entry.screen_controls = Some((generation, sha256, controls));
             }
         }
     }
@@ -1104,6 +1137,34 @@ mod tests {
         assert_eq!(graph.page_text(&page, &[1; 32]), None);
         graph.record_page_text(&page, generation, [1; 32], boxes);
         assert_eq!(graph.page_text(&page, &[1; 32]), None);
+    }
+
+    #[test]
+    fn screen_controls_are_kept_per_screenshot_until_the_page_changes() {
+        let (graph, page) = graph_with(vec![node("button", "Log in", Some(0))]);
+        let controls = Arc::new(vec![crate::perception::NamedControl {
+            name: "Export".into(),
+            control: crate::perception::DetectedControl {
+                x: 10.0,
+                y: 20.0,
+                width: 80.0,
+                height: 30.0,
+                score: 0.9,
+            },
+        }]);
+        let generation = graph.generation(&page).unwrap();
+
+        graph.record_screen_controls(&page, generation, [1; 32], Arc::clone(&controls));
+        assert_eq!(
+            graph.screen_controls(&page, &[1; 32]),
+            Some(Arc::clone(&controls))
+        );
+        assert_eq!(graph.screen_controls(&page, &[2; 32]), None);
+
+        graph.invalidate(&page);
+        assert_eq!(graph.screen_controls(&page, &[1; 32]), None);
+        graph.record_screen_controls(&page, generation, [1; 32], controls);
+        assert_eq!(graph.screen_controls(&page, &[1; 32]), None);
     }
 
     #[test]

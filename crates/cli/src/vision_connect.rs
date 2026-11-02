@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use config::{
-    upsert_vision_acp_profile, upsert_vision_platform, upsert_vision_text_tier, VisionAcpProfile,
-    VisionAuthKind, VisionProviderConfig, VisionTextTierConfig,
+    upsert_vision_acp_profile, upsert_vision_detector_model, upsert_vision_platform,
+    upsert_vision_text_tier, VisionAcpProfile, VisionAuthKind, VisionProviderConfig,
+    VisionTextTierConfig,
 };
 
 pub const LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:9100/vision";
@@ -174,6 +175,17 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
         )
         .map_err(|error| anyhow!("{error}"))?;
         println!("Wrote [vision.text_tier] to {}", config_path.display());
+    }
+    // Detected controls are named by Apple Vision text, so the detector serves macOS only.
+    if opts.download_model && cfg!(target_os = "macos") {
+        let detector = crate::vision_readiness::download_detector_model()?;
+        upsert_vision_detector_model(&config_path, &detector)
+            .map_err(|error| anyhow!("{error}"))?;
+        println!(
+            "Wrote [vision].detector_model {} to {}",
+            detector.display(),
+            config_path.display()
+        );
     }
     print_env_hints(&resolved)?;
 
