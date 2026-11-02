@@ -94,7 +94,7 @@ impl ControlDetector {
         let resized = resize_bilinear(&rgb, width, height, INPUT_WIDTH, INPUT_HEIGHT);
         let plane = INPUT_WIDTH * INPUT_HEIGHT;
         let mut values = vec![0f32; 3 * plane];
-        for (pixel, chunk) in resized.chunks_exact(3).enumerate() {
+        for (pixel, chunk) in resized.as_chunks::<3>().0.iter().enumerate() {
             for (channel, value) in chunk.iter().enumerate() {
                 values[channel * plane + pixel] = f32::from(*value) / 255.0;
             }
@@ -122,10 +122,10 @@ fn decode_detections(
     let (width, height) = (f64::from(width), f64::from(height));
     let mut found: Vec<DetectedControl> = logits
         .iter()
-        .zip(boxes.chunks_exact(4))
+        .zip(boxes.as_chunks::<4>().0)
         .filter_map(|(logit, cxcywh)| {
             let score = 1.0 / (1.0 + (-logit).exp());
-            let [cx, cy, w, h] = [cxcywh[0], cxcywh[1], cxcywh[2], cxcywh[3]].map(f64::from);
+            let [cx, cy, w, h] = cxcywh.map(f64::from);
             (score >= SCORE_FLOOR).then_some(DetectedControl {
                 x: (cx - w / 2.0) * width,
                 y: (cy - h / 2.0) * height,
