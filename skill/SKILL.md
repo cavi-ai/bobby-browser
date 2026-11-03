@@ -61,9 +61,11 @@ calls. Rules that govern every call:
   `false` skips only that read, preserving checkpoint and execution behavior.
   Page state does not replace an expected-state check when verification matters.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
-  first — a remembered answer (marked `persisted`) beats a snapshot.
-  Otherwise `a11y_snapshot`, and pass its targets straight into intent or
-  primitive calls — never guess selectors.
+  first — a remembered answer (marked `persisted`) beats a snapshot. A
+  description that matches no control's words is answered by meaning
+  (`source: "semantic"`) when the session has `visionAssist` and the provider
+  a text tier. Otherwise `a11y_snapshot`, and pass its targets straight into
+  intent or primitive calls — never guess selectors.
 - A snapshot node's `target` `{role, accessibleName, ordinal}` goes verbatim
   into any `intent_*` `hints` or a primitive's `target`. Keep `ordinal`; it
   is what separates duplicate role/name pairs.
@@ -114,6 +116,12 @@ calls. Rules that govern every call:
   dialog. A `passwordManagerSubmitted` record means the manager also submitted
   the form: `workflow_observe` before any `intent_submit_and_verify`. Without
   the opt-in it is `policyDenied`.
+- **A control the accessibility tree does not name** (a button drawn on a
+  canvas): with `visionAssist` and a detector configured, the vision window of
+  an intent that clicks also offers detected on-screen controls, and a picked
+  one is clicked at its center. A purpose vision resolved and the runtime
+  verified is remembered on that control: the next visit resolves it without
+  vision, reported as `resolutionPath: "context"`.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.

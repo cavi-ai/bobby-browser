@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.22.0 - 2026-11-03
+
 ### Added
 
 - `[vision].detector_model` runs an ONNX interactable-control detector in the runtime: the vision window of an intent that clicks also offers on-screen controls that no accessibility candidate names, named by the text inside them on macOS, and a picked one is clicked at its center; each screenshot is detected and read once while the page is unchanged, and `bobby vision connect --activate --download-model` downloads the published detector and sets it on macOS.
@@ -16,6 +18,7 @@
 
 ### Changed
 
+- The skills `bobby install` writes describe semantic `context_ask` answers, detected on-screen controls and remembered vision labels; the Hermes skill notes that `RuntimeClientError` carries the runtime's reason.
 - `Formula/bobby-browser.rb` carries the v0.21.1 asset digests.
 - The vision node defaults to Qwen3-VL 8B: `qwen3-vl:8b-instruct` on Ollama instead of `llava:7b`, and `cavi-ai/Qwen3-VL-8B-Instruct-MLX-4bit` on MLX instead of `mlx-community/Qwen3.5-27B-4bit`, which stays available with `--model`.
 - `scripts/vision-mlx/eval_provider.py` scores candidate picks as the runtime acts on them (page URL and candidates sent, a pick below the 0.75 confidence floor counted as an abstention) and adds `--suite grounding`, `challenge` and `ocr` over perception rows: click points scored by the box they land in, per-class challenge F1, and exact text match for tesseract, Apple Vision or an MLX vision model; every suite reports p50/p95 latency and peak memory.

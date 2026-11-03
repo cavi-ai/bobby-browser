@@ -241,7 +241,7 @@ Interactive install and `bobby vision connect` list available models after you c
 
 Model lists are cached in memory for 60 seconds, separately for each provider, endpoint and credential. Refresh queries the provider again; a selected list entry is checked again before it is saved. Provider requests time out after 5 seconds. If discovery is unavailable, you can enter an exact model ID manually.
 
-For unattended setup, use `--yes --model <id>` with `vision connect`, or `--yes --vision-model <id>` with `install`. An explicit model is retained. With no explicit model or existing selection, Ollama uses the default only if it is available, or the sole installed image model; multiple alternatives require a selection. When Ollama cannot be reached, setup can write the tagged default `llava:7b`; readiness is checked when activation is requested. Ollama reads an untagged model name as `:latest`; `bobby doctor --fix` can repair an untagged selection to an installed tag.
+For unattended setup, use `--yes --model <id>` with `vision connect`, or `--yes --vision-model <id>` with `install`. An explicit model is retained. With no explicit model or existing selection, Ollama uses the default only if it is available, or the sole installed image model; multiple alternatives require a selection. When Ollama cannot be reached, setup can write the tagged default `qwen3-vl:8b-instruct`; readiness is checked when activation is requested. Ollama reads an untagged model name as `:latest`; `bobby doctor --fix` can repair an untagged selection to an installed tag.
 
 The proxy reads at most 1 MiB from an upstream response, counted after decompression, and rejects larger replies. Extracted values are capped at 64 KiB. Errors report the provider and HTTP status without the upstream body.
 
@@ -283,6 +283,18 @@ Before capture, bobby covers editable controls, credential-marked elements and i
 | `detector_model` | unset | ONNX interactable-control detector: `onnx/model.onnx` from [cavi-ai/bobby-control-detector](https://huggingface.co/cavi-ai/bobby-control-detector), which `bobby vision connect --activate --download-model` downloads and sets on macOS, or one `scripts/perception/eval_detector.py --onnx` exports |
 
 With a detector, the vision window of an intent that clicks also offers up to two on-screen controls that no accessibility candidate names and whose text shares a word with the purpose, such as a button drawn on a canvas. Each detected control is named by the text inside it, read with Apple Vision on macOS, and a picked one is clicked at its center. Detection runs locally on the CPU; the screenshot never leaves the machine for it.
+
+### Text tier
+
+`[vision.text_tier]` sends candidate windows to a text-only vision server without a screenshot; every other request keeps the screenshot and the image provider.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `base_url` | required | Text-tier vision server; `bobby vision connect` writes `http://127.0.0.1:9102` unless `--text-base-url` is given |
+| `model` | required | Model the text tier serves |
+| `adapter` | unset | Adapter directory the text model loads |
+
+`bobby vision connect --text-model <id> [--text-adapter <dir>]` writes this table. The runtime's managed proxy and `bobby vision start` run the text tier; `bobby vision-proxy` takes `--text-base-url`, `--text-model` and `--spawn-text-server`.
 
 ## `[nodes.<name>]`
 

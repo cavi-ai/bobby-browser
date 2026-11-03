@@ -49,9 +49,12 @@ stripped). Default loopback port is `7777`.
    `outcome["status"]` before the next mutating call. Any status other than
    `completed` is a failure (`retryableFailure`, `needsReconciliation`,
    `policyDenied`, `resourceExhausted`, `failed`). Repair from the outcome
-   error; do not guess the next click.
+   error; do not guess the next click. A `RuntimeClientError` message carries
+   the runtime's error reason, with the bearer redacted.
 4. On a site this runtime has seen, `context_ask(session_id, page_id, description)`
-   before a snapshot. A remembered answer beats a live read.
+   before a snapshot. A remembered answer beats a live read. With
+   `visionAssist` and a text tier, a description that matches no control's
+   words is answered by meaning (`source: "semantic"`).
 5. Recovery: `recovery_status(workflow_id)` then `recover_workflow(workflow_id)`.
    `needsReconciliation` is HTTP 409.
 
