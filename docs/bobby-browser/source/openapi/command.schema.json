@@ -1508,6 +1508,12 @@
     "FormControlTarget": {
       "type": "object",
       "properties": {
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "role": {
           "type": "string"
         },
