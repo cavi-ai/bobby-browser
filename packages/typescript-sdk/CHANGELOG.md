@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.22.1
+
+- Form-control targets support structural attributes for unnamed file inputs.
+- Align the client package with the Bobby Browser 0.22.1 runtime release.
+
 ## 0.3.1
 
 - Align package version with the Bobby Browser 0.3.1 runtime / docs release.
