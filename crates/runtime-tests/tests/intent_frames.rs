@@ -1235,6 +1235,7 @@ async fn control_action_reports_revealed_conditional_controls() {
     let outcome = submit(PrimitiveCommand::ControlAction(
         types::ControlActionCommand {
             target: types::FormControlTarget {
+                attributes: Default::default(),
                 role: "combobox".into(),
                 accessible_name: "Plan".into(),
                 ordinal: None,
@@ -1589,6 +1590,7 @@ async fn a11y_snapshot_descends_into_iframes() {
         .as_ref()
         .expect("confirm button has no target");
     let control_target = types::FormControlTarget {
+        attributes: Default::default(),
         role: target.role.clone(),
         accessible_name: target.accessible_name.clone(),
         ordinal: target.ordinal,

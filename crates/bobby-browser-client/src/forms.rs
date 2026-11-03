@@ -34,6 +34,8 @@ pub struct SemanticTargetSegment {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormControlTarget {
+    #[serde(default, skip_serializing_if = "attributes_are_empty")]
+    pub attributes: Box<std::collections::BTreeMap<String, String>>,
     pub role: String,
     pub accessible_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +44,10 @@ pub struct FormControlTarget {
     pub frame_path: Vec<SemanticTargetSegment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadow_path: Vec<SemanticTargetSegment>,
+}
+
+fn attributes_are_empty(attributes: &std::collections::BTreeMap<String, String>) -> bool {
+    attributes.is_empty()
 }
 
 /// A form control that an action revealed (conditional field). Emitted on
@@ -642,8 +648,15 @@ fn validate_target(target: Option<&FormControlTarget>) -> Result<(), String> {
         &target.accessible_name,
         MAX_FORM_TEXT_BYTES,
         "target accessible name",
-        false,
+        target.attributes.get("type").map(String::as_str) == Some("file"),
     )?;
+    if target.attributes.len() > 32 {
+        return Err("form target attributes exceed their bound".into());
+    }
+    for (name, value) in target.attributes.iter() {
+        validate_text(name, MAX_FORM_ID_BYTES, "target attribute name", false)?;
+        validate_text(value, MAX_FORM_TEXT_BYTES, "target attribute value", true)?;
+    }
     if target
         .ordinal
         .is_some_and(|ordinal| ordinal > MAX_FORM_TARGET_ORDINAL)
@@ -700,6 +713,7 @@ mod tests {
 
     fn framed(frame_name: &str) -> FormControlTarget {
         FormControlTarget {
+            attributes: Default::default(),
             role: "textbox".into(),
             accessible_name: "Code".into(),
             ordinal: None,
@@ -710,6 +724,18 @@ mod tests {
             }],
             shadow_path: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_unnamed_file_target_requires_bounded_structural_attributes() {
+        let mut target = framed("");
+        target.role = "button".into();
+        target.accessible_name.clear();
+        assert!(validate_target(Some(&target)).is_err());
+        target.attributes.insert("type".into(), "file".into());
+        assert_eq!(validate_target(Some(&target)), Ok(()));
+        target.attributes.insert("value".into(), "x".repeat(2049));
+        assert!(validate_target(Some(&target)).is_err());
     }
 
     #[test]

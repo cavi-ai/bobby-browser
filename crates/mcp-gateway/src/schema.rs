@@ -3465,6 +3465,7 @@ fn form_validation_issue() -> Value {
 fn form_control_target() -> Value {
     object(
         json!({
+            "attributes":{"type":"object","maxProperties":32,"propertyNames":string(1,128),"additionalProperties":string(0,2048)},
             "role":string(0, 128),
             "accessibleName":string(0, MAX_STRING_BYTES),
             "ordinal":nullable(json!({"type":"integer","minimum":0})),

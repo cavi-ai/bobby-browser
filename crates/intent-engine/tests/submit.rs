@@ -484,6 +484,7 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
             control_kind: types::FormControlKind::Email,
             accessible_name: Some("Email".into()),
             target: Some(types::FormControlTarget {
+                attributes: Default::default(),
                 role: "textbox".into(),
                 accessible_name: "Email".into(),
                 ordinal: None,

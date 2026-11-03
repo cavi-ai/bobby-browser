@@ -823,9 +823,8 @@ pub(crate) fn select_all_events(
     ]
 }
 
-/// An empty string in a target field can never resolve — an exact match
-/// against "" — but a wait condition would poll for it until the deadline,
-/// reporting a timeout instead of the real mistake. Reject it up front.
+/// Reject empty locator fields before a wait polls until its deadline.
+/// Unnamed frame hops and structurally typed file inputs are explicit exceptions.
 pub fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
     validate_target_spec_hop(target, false)
 }
@@ -853,7 +852,10 @@ fn validate_target_spec_hop(target: &TargetSpec, is_frame_hop: bool) -> Result<(
                 && field == "accessibleName"
                 && target.role.is_some()
                 && value.is_empty();
-            if value.trim().is_empty() && !unnamed_frame_hop {
+            let unnamed_file = field == "accessibleName"
+                && value.is_empty()
+                && dom_engine::is_unnamed_file_target(target);
+            if value.trim().is_empty() && !unnamed_frame_hop && !unnamed_file {
                 return Err(target_error(
                     ErrorCode::InvalidRequest,
                     format!("target field {field} is empty and can never resolve"),
@@ -879,7 +881,7 @@ pub(crate) async fn iframe_candidates(
     context_id: Option<ExecutionContextId>,
 ) -> Result<Vec<Candidate>, CommandError> {
     let scope_id = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-    let raw = collect_candidates(page, context_id, &[], scope_id).await?;
+    let raw = collect_candidates(page, context_id, &[], scope_id, true).await?;
     Ok(raw
         .into_iter()
         .map(into_candidate)
@@ -935,6 +937,7 @@ pub async fn gather_candidates(
         &scope_ref,
         &scope.shadow_hosts,
         scope.scope_id,
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let mut candidates =
@@ -1040,7 +1043,7 @@ async fn gather_frame_candidates(
         .await
         .map_err(cdp_error)?;
     let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-    let raw = collect_candidates(&child.session, context_id, &[], nested_scope).await?;
+    let raw = collect_candidates(&child.session, context_id, &[], nested_scope, true).await?;
     Ok(raw
         .into_iter()
         .map(|item| {
@@ -1104,7 +1107,8 @@ async fn open_target_scope(
     let mut frame_owners = Vec::new();
 
     for (index, frame_target) in target.frame_path.iter().enumerate() {
-        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
+        let raw =
+            collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id, true).await?;
         // A hop stamped for an unnamed iframe carries `accessibleName: ""`
         // (see `descend_a11y_iframes`); normalize it to `None` here so
         // `choose` does not filter out every unnamed candidate.
@@ -1159,11 +1163,12 @@ async fn open_target_scope(
         };
         let raw = match &scope_ref {
             LocatorScope::Context(_) => {
-                collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?
+                collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id, true)
+                    .await?
             }
             LocatorScope::ClosedRoot(element) => {
                 let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-                collect_candidates_within(element, &shadow_hosts, nested_scope).await?
+                collect_candidates_within(element, &shadow_hosts, nested_scope, true).await?
             }
         };
         let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
@@ -1283,6 +1288,7 @@ pub async fn resolve_target_with_visibility(
         &base_scope,
         &scope.shadow_hosts,
         scope.scope_id,
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let raw =
@@ -1379,6 +1385,7 @@ pub async fn resolve_ambiguous_wait_values(
         &base_scope,
         &scope.shadow_hosts,
         scope.scope_id,
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
@@ -1444,7 +1451,9 @@ async fn align_with_accessibility(
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
         return Ok(candidates);
     };
-    if accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal) {
+    if dom_engine::is_unnamed_file_target(target)
+        || accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal)
+    {
         return Ok(candidates);
     }
     let exposed = accessibility_matches(page, context_id, role, name).await?;
@@ -1597,8 +1606,9 @@ async fn collect_candidates(
     context_id: Option<ExecutionContextId>,
     shadow_hosts: &[String],
     scope: u64,
+    pierce_roots: bool,
 ) -> Result<Vec<BrowserCandidate>, CommandError> {
-    let operation = candidate_collector_operation(scope)?;
+    let operation = candidate_collector_operation(scope, pierce_roots)?;
     evaluate_in_context(
         page,
         context_id,
@@ -1614,8 +1624,9 @@ async fn collect_candidates_within(
     element: &Element,
     shadow_hosts: &[String],
     scope: u64,
+    pierce_roots: bool,
 ) -> Result<Vec<BrowserCandidate>, CommandError> {
-    let operation = candidate_collector_operation(scope)?;
+    let operation = candidate_collector_operation(scope, pierce_roots)?;
     let function_declaration = closed_root_scope_expression(shadow_hosts, &operation)?;
     let value = element
         .call_js_fn_by_value(function_declaration, false)
@@ -1634,21 +1645,32 @@ async fn collect_candidates_merged(
     scope: &LocatorScope,
     shadow_hosts: &[String],
     gather_scope_id: u64,
+    pierce_roots: bool,
 ) -> Result<(Vec<BrowserCandidate>, HashMap<String, Arc<Element>>), CommandError> {
     let mut candidates = match scope {
         LocatorScope::Context(context_id) => {
-            collect_candidates(page, *context_id, shadow_hosts, gather_scope_id).await?
+            collect_candidates(
+                page,
+                *context_id,
+                shadow_hosts,
+                gather_scope_id,
+                pierce_roots,
+            )
+            .await?
         }
         LocatorScope::ClosedRoot(element) => {
-            collect_candidates_within(element, shadow_hosts, gather_scope_id).await?
+            collect_candidates_within(element, shadow_hosts, gather_scope_id, pierce_roots).await?
         }
     };
 
     let mut owners = HashMap::new();
+    if !pierce_roots {
+        return Ok((candidates, owners));
+    }
     let closed_roots = discover_closed_shadow_roots(page, scope, shadow_hosts).await?;
     for root in closed_roots {
         let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-        let mut nested = collect_candidates_within(&root, &[], nested_scope).await?;
+        let mut nested = collect_candidates_within(&root, &[], nested_scope, true).await?;
         for candidate in &nested {
             owners.insert(candidate.id.clone(), Arc::clone(&root));
         }
@@ -1933,11 +1955,11 @@ async fn discover_closed_root_for_candidate(
         .map(|root| root.backend_node_id))
 }
 
-fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
+fn candidate_collector_operation(scope: u64, pierce_roots: bool) -> Result<String, CommandError> {
     let prefix = serde_json::to_string(&format!("bobby-{scope}-"))
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
     Ok(format!(
-        "return ({}) (root, {{prefix:{prefix}}}).candidates",
+        "return ({}) (root, {{prefix:{prefix},pierceOpen:{pierce_roots}}}).candidates",
         dom_engine::candidate_gather_function()
     ))
 }
@@ -2620,7 +2642,7 @@ mod tests {
 
     #[test]
     fn implicit_role_covers_headings_lists_images_and_tables() {
-        let operation = candidate_collector_operation(1).expect("collector operation");
+        let operation = candidate_collector_operation(1, true).expect("collector operation");
         for mapping in [
             "if(/^H[1-6]$/.test(el.tagName))return 'heading';",
             "if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';",

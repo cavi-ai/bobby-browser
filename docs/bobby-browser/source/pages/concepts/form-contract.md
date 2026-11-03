@@ -33,6 +33,8 @@ A password control never exposes its value. Its state is:
 
 `present` says only whether a value exists.
 
+For uploads, pass the current file control's `id` as `upload_files.controlId`. Hidden file inputs are eligible. An unnamed file target carries `attributes: {"type": "file"}` and an empty `accessibleName`; its ordinal is scoped to unnamed files in the same frame and shadow root. Upload capability and configured upload roots still apply.
+
 ## Act on controls
 
 Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.

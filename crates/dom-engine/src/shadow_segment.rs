@@ -29,6 +29,16 @@ pub fn exact_target_selector(target: &TargetSpec) -> Option<String> {
 pub fn shadow_segment_descriptor(target: &TargetSpec) -> Result<Value, CommandError> {
     let mut descriptor = if let Some(selector) = exact_target_selector(target) {
         json!({"selector":selector})
+    } else if target.role.as_deref() == Some("button")
+        && target.accessible_name.is_some()
+        && target.attributes.len() == 1
+        && target.attributes.get("type").map(String::as_str) == Some("file")
+        && target.label.is_none()
+        && target.text.is_none()
+        && !target.allow_best_match
+        && target.frame_path.is_empty()
+    {
+        json!({"role":"button","name":target.accessible_name,"inputType":"file"})
     } else if let (Some(role), Some(name)) = (&target.role, &target.accessible_name) {
         if !role.trim().is_empty()
             && !name.trim().is_empty()

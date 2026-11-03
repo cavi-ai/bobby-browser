@@ -1942,6 +1942,7 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
             .as_ref()
             .unwrap_or_else(|| panic!("button {name} has no command-ready target"));
         let target = types::FormControlTarget {
+            attributes: Default::default(),
             role: ax_target.role.clone(),
             accessible_name: ax_target.accessible_name.clone(),
             ordinal: ax_target.ordinal,

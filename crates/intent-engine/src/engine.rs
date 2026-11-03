@@ -2044,6 +2044,7 @@ fn form_control_target(
         })
     };
     Ok(FormControlTarget {
+        attributes: Default::default(),
         role: candidate.role.clone().ok_or_else(|| CommandError {
             code: ErrorCode::IntentActionMismatch,
             message: "resolved form control has no semantic role".into(),
@@ -5170,6 +5171,7 @@ async fn execute_vision_action(
                 | ControlAction::SetChecked { .. }
                 | ControlAction::Clear => {
                     let control_target = FormControlTarget {
+                        attributes: Default::default(),
                         role: target.role.clone().unwrap_or_default(),
                         accessible_name: target.accessible_name.clone().unwrap_or_default(),
                         ordinal: target.ordinal,

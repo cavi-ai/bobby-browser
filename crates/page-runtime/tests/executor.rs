@@ -1088,6 +1088,7 @@ fn navigate() -> PrimitiveCommand {
 
 fn form_control_target(role: &str, accessible_name: &str) -> FormControlTarget {
     FormControlTarget {
+        attributes: Default::default(),
         role: role.into(),
         accessible_name: accessible_name.into(),
         ordinal: None,

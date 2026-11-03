@@ -372,7 +372,7 @@ fn score<'a>(
         reasons.push("exactRole".into());
     }
     if let Some(wanted) = target.accessible_name.as_ref() {
-        if candidate.name.as_deref().map(str::trim) != Some(wanted.trim()) {
+        if candidate.name.as_deref().unwrap_or_default().trim() != wanted.trim() {
             return None;
         }
         score += 50;
