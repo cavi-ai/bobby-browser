@@ -263,6 +263,11 @@ impl Target {
             CdpEvent::PageFrameStartedLoading(ev) => {
                 self.frame_manager.on_frame_started_loading(ev);
             }
+            // A frame whose load is cancelled gets no further lifecycle events;
+            // without this it holds every navigation watcher until the deadline.
+            CdpEvent::PageFrameStoppedLoading(ev) => {
+                self.frame_manager.on_frame_stopped_loading(ev);
+            }
 
             // `Target` events
             CdpEvent::TargetAttachedToTarget(ev) => {

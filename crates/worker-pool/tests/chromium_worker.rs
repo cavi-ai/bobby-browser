@@ -437,6 +437,87 @@ async fn navigating_to_a_download_response_fails_fast_instead_of_hanging_to_the_
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn navigation_completes_when_a_frame_stops_loading_without_a_load_event() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request.starts_with("GET /slow") {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+                let body = if request.starts_with("GET /slow") {
+                    "<!doctype html><title>Slow</title>"
+                } else {
+                    "<!doctype html><title>Parent</title><p id=\"ok\">parent</p>\
+                     <iframe src=\"/slow\"></iframe>\
+                     <script>setTimeout(() => document.querySelector('iframe').contentWindow.stop(), 300);</script>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let evidence = worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("http://{address}/parent"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .expect("a frame whose load was stopped must not hold the navigation to its deadline");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "navigation must complete once the stopped frame settles, took {elapsed:?}"
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|item| matches!(item, Evidence::Navigation { title, .. } if title == "Parent")),
+        "expected the parent document, got {evidence:?}"
+    );
+
+    worker.close().await.unwrap();
+    fixture.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn network_log_reports_networkrecordingstarted_only_on_the_attaching_call() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();

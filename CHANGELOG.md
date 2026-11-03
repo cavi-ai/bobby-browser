@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- A Chromium navigation completes when a frame on the page stops loading without a load event, instead of failing at its deadline.
 - Python and TypeScript SDK `RuntimeClientError` messages carry the runtime's error reason, with the bearer token redacted, and `packages/python-sdk/examples/quickstart.py` runs the documented quick start against a real runtime.
 - `context_ask` answers from every control in the page's last snapshot, not only the snapshot's top-level node.
 - Semantic `context_ask` sends the vision provider the controls' labels without the page URL, so the text tier's pick no longer changes with the page's port.
