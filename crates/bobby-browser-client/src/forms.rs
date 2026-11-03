@@ -34,8 +34,8 @@ pub struct SemanticTargetSegment {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormControlTarget {
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub attributes: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "attributes_are_empty")]
+    pub attributes: Box<std::collections::BTreeMap<String, String>>,
     pub role: String,
     pub accessible_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +44,10 @@ pub struct FormControlTarget {
     pub frame_path: Vec<SemanticTargetSegment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadow_path: Vec<SemanticTargetSegment>,
+}
+
+fn attributes_are_empty(attributes: &std::collections::BTreeMap<String, String>) -> bool {
+    attributes.is_empty()
 }
 
 /// A form control that an action revealed (conditional field). Emitted on
@@ -649,7 +653,7 @@ fn validate_target(target: Option<&FormControlTarget>) -> Result<(), String> {
     if target.attributes.len() > 32 {
         return Err("form target attributes exceed their bound".into());
     }
-    for (name, value) in &target.attributes {
+    for (name, value) in target.attributes.iter() {
         validate_text(name, MAX_FORM_ID_BYTES, "target attribute name", false)?;
         validate_text(value, MAX_FORM_TEXT_BYTES, "target attribute value", true)?;
     }

@@ -36,3 +36,16 @@ pub use shadow_segment::{
     exact_target_selector, resolve_shadow_segment, shadow_probe_error, shadow_segment_descriptor,
     shadow_segment_function,
 };
+
+/// The exact structural target a snapshot returns for an unnamed native file input.
+pub fn is_unnamed_file_target(target: &types::TargetSpec) -> bool {
+    target.role.as_deref() == Some("button")
+        && target.accessible_name.as_deref() == Some("")
+        && target.attributes.len() == 1
+        && target.attributes.get("type").map(String::as_str) == Some("file")
+        && target.css.is_none()
+        && target.test_id.is_none()
+        && target.label.is_none()
+        && target.text.is_none()
+        && !target.allow_best_match
+}

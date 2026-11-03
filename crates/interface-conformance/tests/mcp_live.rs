@@ -129,7 +129,7 @@ async fn mcp_uploads_hidden_unnamed_file_inputs_by_snapshot_control_id() {
     let mut endpoint = DirectEndpoint(&server);
     initialize(&mut endpoint).await;
     let mut id = 1;
-    let fixture = r#"<!doctype html><button type="button"></button><input aria-label="Labelled file" type="file"><input type="file" style="display:none"><input type="file" style="display:none"><iframe title="Upload frame" srcdoc='<input type="file" style="display:none">'></iframe><div id="upload-host" role="group" aria-label="Upload panel" style="width:100px;height:50px"></div><script>document.getElementById('upload-host').attachShadow({mode:'open'}).innerHTML='<input type="file" style="display:none">';</script>"#;
+    let fixture = r#"<!doctype html><button type="button"></button><input aria-label="Labelled file" type="file"><input type="file" style="display:none"><input type="file" style="display:none"><iframe title="Upload frame" srcdoc='<input type="file" style="display:none">'></iframe><div id="upload-host" role="group" aria-label="Upload panel" style="width:100px;height:50px"></div><script>document.getElementById('upload-host').attachShadow({mode:'open'}).innerHTML='<input aria-label="Resume" type="file"><input type="file" style="display:none">';</script>"#;
     let started = tool(
         &mut endpoint,
         &mut id,
@@ -152,7 +152,7 @@ async fn mcp_uploads_hidden_unnamed_file_inputs_by_snapshot_control_id() {
         .iter()
         .filter(|control| control["controlKind"] == "file")
         .collect::<Vec<_>>();
-    assert_eq!(files.len(), 5);
+    assert_eq!(files.len(), 6);
     let upload_path = harness.upload_root().join("hidden-file.txt");
     std::fs::write(&upload_path, b"hidden file control upload").unwrap();
     let uploaded = tool(
@@ -179,8 +179,12 @@ async fn mcp_uploads_hidden_unnamed_file_inputs_by_snapshot_control_id() {
         .filter(|control| control["controlKind"] == "file")
         .map(|control| control["state"]["count"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(counts, vec![0, 0, 1, 0, 0]);
-    for file in &files[3..] {
+    assert_eq!(counts, vec![0, 0, 1, 0, 0, 0]);
+    let named_shadow = tool(&mut endpoint, &mut id, "upload_files", json!({
+        "workflowHandle":handle, "target":{"role":"button","accessibleName":"Resume","attributes":{"type":"file"}}, "paths":[upload_path]
+    })).await;
+    completed(&serde_json::from_value::<CommandOutcome>(named_shadow).unwrap());
+    for file in [files[3], files[5]] {
         let uploaded = tool(
             &mut endpoint,
             &mut id,
@@ -206,7 +210,7 @@ async fn mcp_uploads_hidden_unnamed_file_inputs_by_snapshot_control_id() {
         .filter(|control| control["controlKind"] == "file")
         .map(|control| control["state"]["count"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(scoped_counts, vec![0, 0, 1, 1, 1]);
+    assert_eq!(scoped_counts, vec![0, 0, 1, 1, 1, 1]);
     let missing = endpoint
         .request(req(
             id,

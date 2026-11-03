@@ -186,7 +186,7 @@ fn control_target_from_snapshot(
         .and_then(|control| control.target.as_ref())?;
     Some(types::TargetSpec {
         role: Some(control_target.role.clone()),
-        attributes: control_target.attributes.clone(),
+        attributes: (*control_target.attributes).clone(),
         accessible_name: Some(control_target.accessible_name.clone()),
         ordinal: control_target.ordinal,
         frame_path: control_target

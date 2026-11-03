@@ -3939,7 +3939,10 @@ async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
     );
 }
 
-async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<BidiCall>) {
+async fn hidden_upload(
+    count: u64,
+    target: Option<TargetSpec>,
+) -> (Result<Vec<Evidence>, CommandError>, Vec<BidiCall>) {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("resume.txt");
     std::fs::write(&file, b"hidden-bytes-7731").unwrap();
@@ -3950,7 +3953,16 @@ async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<
         Ok(json!({})),
         Ok(json!({"result": {"type": "number", "value": count}})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
+    let mut observed = observation();
+    if target.is_some() {
+        observed.controls[0].attributes = [
+            ("type".into(), "file".into()),
+            ("name".into(), "resume".into()),
+        ]
+        .into_iter()
+        .collect();
+    }
+    let worker = worker(bidi.clone(), FakeObserver::new(observed))
         .await
         .with_upload_roots(vec![root.path().to_path_buf()]);
     let page = PageId::new();
@@ -3963,7 +3975,7 @@ async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<
             &page,
             &UploadFilesCommand {
                 selector: "#hidden-file".into(),
-                target: None,
+                target,
                 paths: vec![file.to_string_lossy().into_owned()],
             },
         )
@@ -3973,7 +3985,7 @@ async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<
 
 #[tokio::test]
 async fn hidden_file_input_is_filled_by_set_files_and_read_back_from_the_sandbox() {
-    let (result, calls) = hidden_upload(1).await;
+    let (result, calls) = hidden_upload(1, None).await;
     result.unwrap();
     let set_files = calls
         .iter()
@@ -4006,7 +4018,7 @@ async fn hidden_file_input_is_filled_by_set_files_and_read_back_from_the_sandbox
 
 #[tokio::test]
 async fn hidden_file_input_fails_when_the_page_reports_no_files() {
-    let (result, _) = hidden_upload(0).await;
+    let (result, _) = hidden_upload(0, None).await;
     assert_eq!(result.unwrap_err().code, ErrorCode::VerificationFailed);
 }
 
@@ -5955,4 +5967,23 @@ async fn navigate_reports_the_document_a_script_redirect_settles_on() {
         )),
         "{evidence:?}"
     );
+}
+
+#[tokio::test]
+async fn typed_file_targets_keep_existing_semantic_resolution() {
+    for accessible_name in [None, Some("Confirm".to_owned())] {
+        let target = TargetSpec {
+            role: Some("button".into()),
+            accessible_name,
+            attributes: [
+                ("type".into(), "file".into()),
+                ("name".into(), "resume".into()),
+            ]
+            .into_iter()
+            .collect(),
+            ..TargetSpec::default()
+        };
+        let (result, _) = hidden_upload(1, Some(target)).await;
+        result.unwrap();
+    }
 }

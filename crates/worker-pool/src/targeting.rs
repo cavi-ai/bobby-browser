@@ -854,7 +854,7 @@ fn validate_target_spec_hop(target: &TargetSpec, is_frame_hop: bool) -> Result<(
                 && value.is_empty();
             let unnamed_file = field == "accessibleName"
                 && value.is_empty()
-                && target.attributes.get("type").map(String::as_str) == Some("file");
+                && dom_engine::is_unnamed_file_target(target);
             if value.trim().is_empty() && !unnamed_frame_hop && !unnamed_file {
                 return Err(target_error(
                     ErrorCode::InvalidRequest,
@@ -937,7 +937,7 @@ pub async fn gather_candidates(
         &scope_ref,
         &scope.shadow_hosts,
         scope.scope_id,
-        target.attributes.get("type").map(String::as_str) != Some("file"),
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let mut candidates =
@@ -1288,7 +1288,7 @@ pub async fn resolve_target_with_visibility(
         &base_scope,
         &scope.shadow_hosts,
         scope.scope_id,
-        target.attributes.get("type").map(String::as_str) != Some("file"),
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let raw =
@@ -1385,7 +1385,7 @@ pub async fn resolve_ambiguous_wait_values(
         &base_scope,
         &scope.shadow_hosts,
         scope.scope_id,
-        target.attributes.get("type").map(String::as_str) != Some("file"),
+        !dom_engine::is_unnamed_file_target(target),
     )
     .await?;
     let candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
@@ -1451,7 +1451,7 @@ async fn align_with_accessibility(
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
         return Ok(candidates);
     };
-    if (name.is_empty() && target.attributes.get("type").map(String::as_str) == Some("file"))
+    if dom_engine::is_unnamed_file_target(target)
         || accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal)
     {
         return Ok(candidates);

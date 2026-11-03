@@ -753,7 +753,7 @@ impl ChromiumWorker {
         }
         TargetSpec {
             role: Some(target.role.clone()),
-            attributes: target.attributes.clone(),
+            attributes: (*target.attributes).clone(),
             accessible_name: Some(target.accessible_name.clone()),
             ordinal: target.ordinal,
             frame_path: target.frame_path.iter().map(segment).collect(),

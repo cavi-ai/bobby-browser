@@ -248,6 +248,7 @@ fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
     }
     TargetSpec {
         role: Some(target.role.clone()),
+        attributes: (*target.attributes).clone(),
         accessible_name: Some(target.accessible_name.clone()),
         ordinal: target.ordinal,
         frame_path: target.frame_path.iter().map(segment).collect(),
@@ -2311,6 +2312,35 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn file_action_pre_dispatch_target_keeps_its_structural_filter() {
+        let target = types::FormControlTarget {
+            attributes: Box::new(
+                [("type".to_owned(), "file".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+            role: "button".into(),
+            accessible_name: String::new(),
+            ordinal: Some(1),
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        };
+        let command = types::PrimitiveCommand::ControlAction(types::ControlActionCommand {
+            target,
+            action: types::ControlAction::SetFiles {
+                paths: vec!["upload.txt".into()],
+            },
+        });
+        let observed = super::primitive_action_target(&command).unwrap();
+        assert_eq!(
+            observed.attributes.get("type").map(String::as_str),
+            Some("file")
+        );
+        assert_eq!(observed.accessible_name.as_deref(), Some(""));
+        assert_eq!(observed.ordinal, Some(1));
+    }
 
     fn close_button() -> dom_engine::Candidate {
         dom_engine::Candidate {

@@ -295,10 +295,12 @@ fn normalize_control(
                 (target_totals.get(&key).copied().unwrap_or_default() > 1).then_some(*seen);
             *seen += 1;
             Some(FormControlTarget {
-                attributes: (kind == FormControlKind::File && name.is_empty())
-                    .then(|| ("type".to_owned(), "file".to_owned()))
-                    .into_iter()
-                    .collect(),
+                attributes: Box::new(
+                    (kind == FormControlKind::File && name.is_empty())
+                        .then(|| ("type".to_owned(), "file".to_owned()))
+                        .into_iter()
+                        .collect(),
+                ),
                 role,
                 accessible_name: name,
                 ordinal,
