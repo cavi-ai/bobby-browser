@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- `bobby-browser-client` publishes to crates.io through a trusted publisher with no stored token, and `publish-crates.yml` run by hand takes a release `tag` and `dry_run`.
+
 ## 0.22.0 - 2026-11-03
 
 ### Added
