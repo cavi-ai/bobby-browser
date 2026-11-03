@@ -34,6 +34,8 @@ pub struct SemanticTargetSegment {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormControlTarget {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attributes: std::collections::BTreeMap<String, String>,
     pub role: String,
     pub accessible_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -642,8 +644,15 @@ fn validate_target(target: Option<&FormControlTarget>) -> Result<(), String> {
         &target.accessible_name,
         MAX_FORM_TEXT_BYTES,
         "target accessible name",
-        false,
+        target.attributes.get("type").map(String::as_str) == Some("file"),
     )?;
+    if target.attributes.len() > 32 {
+        return Err("form target attributes exceed their bound".into());
+    }
+    for (name, value) in &target.attributes {
+        validate_text(name, MAX_FORM_ID_BYTES, "target attribute name", false)?;
+        validate_text(value, MAX_FORM_TEXT_BYTES, "target attribute value", true)?;
+    }
     if target
         .ordinal
         .is_some_and(|ordinal| ordinal > MAX_FORM_TARGET_ORDINAL)
@@ -700,6 +709,7 @@ mod tests {
 
     fn framed(frame_name: &str) -> FormControlTarget {
         FormControlTarget {
+            attributes: Default::default(),
             role: "textbox".into(),
             accessible_name: "Code".into(),
             ordinal: None,
@@ -710,6 +720,18 @@ mod tests {
             }],
             shadow_path: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_unnamed_file_target_requires_bounded_structural_attributes() {
+        let mut target = framed("");
+        target.role = "button".into();
+        target.accessible_name.clear();
+        assert!(validate_target(Some(&target)).is_err());
+        target.attributes.insert("type".into(), "file".into());
+        assert_eq!(validate_target(Some(&target)), Ok(()));
+        target.attributes.insert("value".into(), "x".repeat(2049));
+        assert!(validate_target(Some(&target)).is_err());
     }
 
     #[test]

@@ -13,5 +13,6 @@ function matchShadowSegment(root, spec, gather, limit = 2) {
   if (result.truncated) return 'too-many';
   const norm = value => String(value ?? '').replace(/\s+/g, ' ').trim();
   return select(result.candidates.filter(candidate => candidate.role === spec.role &&
-    norm(candidate.name) === norm(spec.name))).map(candidate => candidate.element);
+    norm(candidate.name) === norm(spec.name) &&
+    (!spec.inputType || candidate.attributes.type === spec.inputType))).map(candidate => candidate.element);
 }

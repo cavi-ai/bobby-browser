@@ -124,9 +124,9 @@ pub fn normalize_form_snapshot(
 
     let mut target_totals = BTreeMap::new();
     for control in &retained {
-        if let (Some(role), Some(name)) = (control_role(control), control.accessible_name.as_ref())
-        {
-            if !name.is_empty() {
+        if let Some(role) = control_role(control) {
+            let name = control.accessible_name.clone().unwrap_or_default();
+            if !name.is_empty() || control_kind(control) == FormControlKind::File {
                 *target_totals
                     .entry(target_key(role, name.clone(), control))
                     .or_insert(0usize) += 1;
@@ -187,6 +187,7 @@ pub fn normalize_form_snapshot(
         forms.push(FormDescriptor {
             id: form_id,
             target: form.accessible_name.as_ref().map(|name| FormControlTarget {
+                attributes: Default::default(),
                 role: "form".into(),
                 accessible_name: name.clone(),
                 ordinal: None,
@@ -255,12 +256,17 @@ pub fn decode_form_snapshot(
 
 /// A control target's ordinal counts the controls with its role and name in
 /// the frame and shadow root its target resolves in.
-type TargetKey = (String, String, String);
+type TargetKey = (String, String, String, bool);
 
 fn target_key(role: String, name: String, control: &RawFormControl) -> TargetKey {
     let scope =
         serde_json::to_string(&(&control.frame_path, &control.shadow_path)).unwrap_or_default();
-    (role, name, scope)
+    (
+        role,
+        name.clone(),
+        scope,
+        name.is_empty() && control_kind(control) == FormControlKind::File,
+    )
 }
 
 fn normalize_control(
@@ -274,9 +280,13 @@ fn normalize_control(
     let kind = control_kind(&raw);
     let role = control_role(&raw);
     let target = role
-        .zip(raw.accessible_name.clone())
+        .zip(
+            raw.accessible_name
+                .clone()
+                .or_else(|| (kind == FormControlKind::File).then(String::new)),
+        )
         .and_then(|(role, name)| {
-            if name.is_empty() {
+            if name.is_empty() && kind != FormControlKind::File {
                 return None;
             }
             let key = target_key(role.clone(), name.clone(), &raw);
@@ -285,6 +295,10 @@ fn normalize_control(
                 (target_totals.get(&key).copied().unwrap_or_default() > 1).then_some(*seen);
             *seen += 1;
             Some(FormControlTarget {
+                attributes: (kind == FormControlKind::File && name.is_empty())
+                    .then(|| ("type".to_owned(), "file".to_owned()))
+                    .into_iter()
+                    .collect(),
                 role,
                 accessible_name: name,
                 ordinal,
@@ -511,6 +525,7 @@ pub fn target_specs_equivalent(a: &types::FormControlTarget, b: &types::FormCont
     a.ordinal.unwrap_or(0) == b.ordinal.unwrap_or(0)
         && a.role.eq_ignore_ascii_case(&b.role)
         && a.accessible_name == b.accessible_name
+        && a.attributes == b.attributes
         && a.frame_path == b.frame_path
         && a.shadow_path == b.shadow_path
 }
@@ -797,6 +812,7 @@ mod tests {
         editor.label = None;
         editor.value = Some("draft".into());
         let target = types::FormControlTarget {
+            attributes: Default::default(),
             role: "textbox".into(),
             accessible_name: "Draft".into(),
             ordinal: None,
@@ -1183,6 +1199,7 @@ mod tests {
     #[test]
     fn explicit_zero_ordinal_matches_an_omitted_ordinal() {
         let base = types::FormControlTarget {
+            attributes: Default::default(),
             role: "combobox".into(),
             accessible_name: "Customer priority".into(),
             ordinal: None,
@@ -1215,6 +1232,7 @@ mod slim_tests {
             form_id: Some("form-1".into()),
             group_id: None,
             target: Some(types::FormControlTarget {
+                attributes: Default::default(),
                 role: "textbox".into(),
                 accessible_name: "Full name".into(),
                 ordinal: None,

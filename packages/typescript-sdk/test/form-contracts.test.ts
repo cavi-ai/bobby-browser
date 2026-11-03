@@ -93,3 +93,19 @@ test("slim wire shape omits default fields and still validates", () => {
     "validity and supportedOperations stay required",
   );
 });
+
+
+test("unnamed file targets preserve structural identity and reject unbounded attributes", () => {
+  const file = control("file", { kind: "files", count: 0 });
+  file.formId = null;
+  file.groupId = null;
+  file.accessibleName = null;
+  file.target = { role: "button", accessibleName: "", attributes: { type: "file" }, ordinal: 1 };
+  file.supportedOperations = ["setFiles", "clear"];
+  const value = { schemaVersion: 1, pageId: ID, truncated: false, forms: [], unownedControls: [file] };
+  assert.equal(isFormSnapshot(value), true);
+  file.target = { role: "button", accessibleName: "", attributes: {} };
+  assert.equal(isFormSnapshot(value), false);
+  file.target = { role: "button", accessibleName: "", attributes: { type: "file", extra: "x".repeat(2049) } };
+  assert.equal(isFormSnapshot(value), false);
+});

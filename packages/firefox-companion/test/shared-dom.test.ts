@@ -20,7 +20,7 @@ function page(html: string) {
 
 type Gathered = {role:string;name:string;css:string;tag:string;attributes:Record<string,string>};
 type Gather = (root:ParentNode, options:Record<string,unknown>) => { candidates:Gathered[]; truncated:boolean };
-type Match = (root:ParentNode, spec:{role?:string;name?:string;selector?:string;ordinal?:number}, gather:Gather, limit?:number) => Element[] | "too-many";
+type Match = (root:ParentNode, spec:{role?:string;name?:string;selector?:string;ordinal?:number;inputType?:string}, gather:Gather, limit?:number) => Element[] | "too-many";
 
 function gatherScript() {
   return readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8")
@@ -188,4 +188,19 @@ test("a visible aria-modal dialog is open and a hidden one is not", () => {
   assert.equal(obscuredByOpenModal(open.document, open.document.body), true);
   assert.equal(obscuredByOpenModal(shut.document, shut.document.body), false);
   assert.equal(obscuredByOpenModal(open.document, null), false);
+});
+
+
+test("file segment matching selects an unnamed file within its own root", () => {
+  const window = page(`<button></button><input type="file" aria-label="Labelled file"><input id="first" type="file" style="display:none"><input id="second" type="file" style="display:none"><div id="host"></div>`);
+  const shadow = window.document.querySelector("#host")!.attachShadow({ mode: "open" });
+  shadow.innerHTML = '<input type="file">';
+  const collect = window.eval("(" + gatherScript() + ")") as Gather;
+  const match = window.eval("(" + readFileSync(new URL("../../../crates/dom-engine/src/shadow_segment.js", import.meta.url), "utf8") + ")") as Match;
+  const selected = match(window.document, { role: "button", name: "", inputType: "file", ordinal: 1 }, collect);
+  assert.notEqual(selected, "too-many");
+  assert.equal((selected as Element[])[0], window.document.querySelector("#second"));
+  const nested = match(shadow, { role: "button", name: "", inputType: "file" }, collect);
+  assert.notEqual(nested, "too-many");
+  assert.equal((nested as Element[])[0], shadow.querySelector("input"));
 });

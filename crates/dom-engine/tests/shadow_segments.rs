@@ -28,3 +28,18 @@ fn shadow_descriptors_preserve_ordinals_for_each_exact_target_kind() {
         }
     }
 }
+
+#[test]
+fn unnamed_file_shadow_targets_keep_type_name_and_ordinal() {
+    let target = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some(String::new()),
+        attributes: [("type".into(), "file".into())].into_iter().collect(),
+        ordinal: Some(1),
+        ..TargetSpec::default()
+    };
+    let descriptor = shadow_segment_descriptor(&target).unwrap();
+    assert_eq!(descriptor["name"], "");
+    assert_eq!(descriptor["inputType"], "file");
+    assert_eq!(descriptor["ordinal"], 1);
+}

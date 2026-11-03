@@ -3335,6 +3335,7 @@ async fn framed_select_control_action_is_denied_before_dispatch() {
             &page,
             &ControlActionCommand {
                 target: FormControlTarget {
+                    attributes: Default::default(),
                     role: "combobox".into(),
                     accessible_name: "Country".into(),
                     ordinal: None,

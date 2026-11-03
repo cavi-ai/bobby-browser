@@ -2775,6 +2775,7 @@ fn file_snapshot_control(id: &str, role: &str, accessible_name: &str) -> types::
         form_id: None,
         group_id: None,
         target: Some(types::FormControlTarget {
+            attributes: Default::default(),
             role: role.to_owned(),
             accessible_name: accessible_name.to_owned(),
             ordinal: None,

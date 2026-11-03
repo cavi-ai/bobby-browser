@@ -740,11 +740,8 @@ impl ChromiumWorker {
     }
 
     fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
-        // An unnamed iframe's stamped hop carries an empty accessibleName;
-        // `TargetSpec { accessible_name: Some("") }` can never match a
-        // gathered candidate (whose name is `None`, not `Some("")`), so
-        // normalize to `None` here rather than relying on validation to
-        // relax the empty-field check for every FormControlTarget path.
+        // Preserve role/ordinal resolution for unnamed frame hops. File
+        // targets themselves retain their exact empty name and type filter.
         fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
             Box::new(TargetSpec {
                 role: Some(segment.role.clone()),
@@ -756,6 +753,7 @@ impl ChromiumWorker {
         }
         TargetSpec {
             role: Some(target.role.clone()),
+            attributes: target.attributes.clone(),
             accessible_name: Some(target.accessible_name.clone()),
             ordinal: target.ordinal,
             frame_path: target.frame_path.iter().map(segment).collect(),
@@ -2741,9 +2739,16 @@ impl crate::InputEngine for ChromiumWorker {
         )
         .await?;
         let page = self.page_handle(page_id).await?;
-        let resolved = self
-            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
-            .await?;
+        let browser = self.browser_handle().await?;
+        let resolved = resolve_target_with_visibility(
+            page_id,
+            &page,
+            &command.selector,
+            command.target.as_ref(),
+            false,
+            Some(&browser),
+        )
+        .await?;
         let mut upload_cache = self.upload_cache.lock().await;
         let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
         let paths = &resolved_uploads.paths;

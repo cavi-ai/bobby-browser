@@ -1529,6 +1529,7 @@ fn rust_context_wire_accepts_legacy_and_true_provenance_but_rejects_false() {
 #[test]
 fn control_action_contract_is_closed_reconciliable_and_secret_safe() {
     let target = FormControlTarget {
+        attributes: Default::default(),
         role: "checkbox".into(),
         accessible_name: "Terms".into(),
         ordinal: None,
@@ -1565,6 +1566,7 @@ fn control_action_contract_is_closed_reconciliable_and_secret_safe() {
 
     let unsafe_envelope = test_envelope(PrimitiveCommand::ControlAction(ControlActionCommand {
         target: FormControlTarget {
+            attributes: Default::default(),
             role: "textbox".into(),
             accessible_name: "Upload".into(),
             ordinal: None,
@@ -1601,6 +1603,7 @@ fn control_action_validates_bounds_and_evidence_round_trips() {
         action: ControlActionEvidence {
             operation: FormControlOperation::SetChecked,
             target: FormControlTarget {
+                attributes: Default::default(),
                 role: "checkbox".into(),
                 accessible_name: "Terms".into(),
                 ordinal: None,

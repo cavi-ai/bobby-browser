@@ -145,6 +145,7 @@ fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
     }
     TargetSpec {
         role: Some(target.role.clone()),
+        attributes: target.attributes.clone(),
         accessible_name: Some(target.accessible_name.clone()),
         ordinal: target.ordinal,
         frame_path: target.frame_path.iter().map(segment).collect(),
@@ -2404,7 +2405,9 @@ impl FirefoxCompanionWorker {
             return Ok((top_context.to_owned(), selector.to_owned(), Vec::new()));
         };
         let (context, owners) = self.resolve_input_scope(top_context, target).await?;
-        if !target.shadow_path.is_empty() {
+        if !target.shadow_path.is_empty()
+            || target.attributes.get("type").map(String::as_str) == Some("file")
+        {
             let response = self
                 .shadow_target_response(&context, target, ShadowRead::Selector)
                 .await?;

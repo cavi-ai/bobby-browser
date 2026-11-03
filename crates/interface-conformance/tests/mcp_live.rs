@@ -122,6 +122,113 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
 }
 
+#[tokio::test]
+async fn mcp_uploads_hidden_unnamed_file_inputs_by_snapshot_control_id() {
+    let harness = ChromeRuntimeHarness::start().await;
+    let server = Server::new(harness.runtime.clone());
+    let mut endpoint = DirectEndpoint(&server);
+    initialize(&mut endpoint).await;
+    let mut id = 1;
+    let fixture = r#"<!doctype html><button type="button"></button><input aria-label="Labelled file" type="file"><input type="file" style="display:none"><input type="file" style="display:none"><iframe title="Upload frame" srcdoc='<input type="file" style="display:none">'></iframe><div id="upload-host" role="group" aria-label="Upload panel" style="width:100px;height:50px"></div><script>document.getElementById('upload-host').attachShadow({mode:'open'}).innerHTML='<input type="file" style="display:none">';</script>"#;
+    let started = tool(
+        &mut endpoint,
+        &mut id,
+        "workflow_start",
+        json!({
+            "profile":"hidden-file-control", "url":format!("data:text/html,{fixture}")
+        }),
+    )
+    .await;
+    let handle = started["workflowHandle"].as_str().unwrap();
+    let snapshot = tool(
+        &mut endpoint,
+        &mut id,
+        "form_snapshot",
+        json!({"workflowHandle":handle}),
+    )
+    .await;
+    let controls = snapshot["unownedControls"].as_array().unwrap();
+    let files = controls
+        .iter()
+        .filter(|control| control["controlKind"] == "file")
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 5);
+    let upload_path = harness.upload_root().join("hidden-file.txt");
+    std::fs::write(&upload_path, b"hidden file control upload").unwrap();
+    let uploaded = tool(
+        &mut endpoint,
+        &mut id,
+        "upload_files",
+        json!({
+            "workflowHandle":handle, "controlId":files[2]["id"], "paths":[upload_path]
+        }),
+    )
+    .await;
+    completed(&serde_json::from_value::<CommandOutcome>(uploaded).unwrap());
+    let after = tool(
+        &mut endpoint,
+        &mut id,
+        "form_snapshot",
+        json!({"workflowHandle":handle}),
+    )
+    .await;
+    let counts = after["unownedControls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|control| control["controlKind"] == "file")
+        .map(|control| control["state"]["count"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(counts, vec![0, 0, 1, 0, 0]);
+    for file in &files[3..] {
+        let uploaded = tool(
+            &mut endpoint,
+            &mut id,
+            "upload_files",
+            json!({
+                "workflowHandle":handle, "controlId":file["id"], "paths":[upload_path]
+            }),
+        )
+        .await;
+        completed(&serde_json::from_value::<CommandOutcome>(uploaded).unwrap());
+    }
+    let after_scoped = tool(
+        &mut endpoint,
+        &mut id,
+        "form_snapshot",
+        json!({"workflowHandle":handle}),
+    )
+    .await;
+    let scoped_counts = after_scoped["unownedControls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|control| control["controlKind"] == "file")
+        .map(|control| control["state"]["count"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(scoped_counts, vec![0, 0, 1, 1, 1]);
+    let missing = endpoint
+        .request(req(
+            id,
+            "tools/call",
+            json!({"name":"upload_files","arguments":{
+                "workflowHandle":handle,"controlId":"control-999","paths":[upload_path]
+            }}),
+        ))
+        .await;
+    assert_eq!(
+        missing["error"]["data"]["reason"], "controlIdNotFound",
+        "{missing}"
+    );
+    tool(
+        &mut endpoint,
+        &mut id,
+        "session_close",
+        json!({"sessionId":started["sessionId"]}),
+    )
+    .await;
+}
+
 async fn prove_snapshot_target_round_trip(
     server: &mut dyn McpEndpoint,
     session_id: &str,
