@@ -506,6 +506,12 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .await
     }
 
+    async fn password_manager_prompt(&self, page_id: &PageId) -> Option<(f64, f64)> {
+        worker_pool::observation_or_default(self.lease.worker().observation())
+            .password_manager_prompt(page_id)
+            .await
+    }
+
     async fn read_attribute(
         &self,
         page_id: &PageId,
