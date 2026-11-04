@@ -6,6 +6,23 @@ Every call is authenticated, limited by capabilities, journaled with evidence, a
 
 > **Alpha.** Interfaces are stable enough to build against but can change before 1.0. See [SECURITY.md](SECURITY.md).
 
+## Fill the form. Check the result.
+
+Use Bobby to fill a form you control, inspect the returned field evidence,
+then submit with an expected result. Completing the form does not submit it.
+
+[Watch the 58-second screenshot walkthrough](assets/form-walkthrough.mp4)
+— an edited sequence from a **synthetic local form**, not a continuous recording.
+
+| Task | Action | Observed result |
+| :-- | :-- | :-- |
+| Reveal team fields and save a sample request | Reveal the fields, inspect required-field failures, correct the remaining values, then submit separately with a saved-receipt check | The corrected email returned exact-value and validity evidence. The separate submit produced `DEMO-001`, with matching data saved by the local demo server. |
+
+One synthetic form does not establish reliability on other websites. Field
+validity does not prove server acceptance.
+
+[Install below](#install), then [try a controlled form](#try-a-controlled-form).
+
 ## Install
 
 Pick one.
@@ -38,6 +55,27 @@ bobby doctor
 `bobby install` creates a credential and writes the MCP entry for Claude Code, VS Code, Zed, an ACP host or OpenShell. Add `--skill` to install the agent skill. For Firefox, run `bobby install --companion`, then `bobby firefox-start` and click **Pair** in the Bobby Companion toolbar popup. After `make install`, the companion is already installed.
 
 Restart your agent host. The agent then calls `workflow_start` with `{"profile": "default", "url": "https://example.com"}`, `workflow_observe` with the returned handle, and `click`, `type_text` or an `intent_*` tool to act. See the [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md).
+
+### Try a controlled form
+
+After setup, open a test form you own and ask your agent:
+
+> Inspect this form with Bobby. Fill it with sample data, including any fields
+> revealed by earlier choices. Show the field evidence before submitting. Submit
+> once only when the values are correct, using the confirmation this form actually
+> returns, then inspect the saved result.
+
+The agent reuses one `workflowHandle`, reads `form_snapshot`, and calls
+`intent_complete_form` with the observed fields. If a field fails, inspect the
+returned evidence and correct only the remaining fields with `intent_fill`.
+`intent_submit_and_verify` is a separate call with the expected confirmation.
+If the submit outcome is uncertain, inspect the destination before another
+submit. Close the task session with `session_close` when finished.
+
+See [form arguments and expected-state examples](docs/bobby-browser/source/pages/guides/intents.md#fill-a-whole-form).
+If the workflow stops unexpectedly, [report a reproducible issue](https://github.com/cavi-ai/bobby-browser/issues)
+with the tool, error and expected result, omitting tokens and private form values.
+Documentation improvements are welcome through [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Use from code
 
