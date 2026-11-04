@@ -159,6 +159,12 @@ pub trait ObservationEngine: Send + Sync {
     ) -> Result<Option<(String, String)>, CommandError> {
         Err(unsupported_error())
     }
+
+    /// Viewport point of the sign-in control in a password manager's own
+    /// prompt frame on the page. Default: none, which leaves it to vision.
+    async fn password_manager_prompt(&self, _page_id: &PageId) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 #[async_trait]

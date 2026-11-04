@@ -2289,6 +2289,14 @@ impl crate::ObservationEngine for ChromiumWorker {
             .await
     }
 
+    async fn password_manager_prompt(&self, page_id: &PageId) -> Option<(f64, f64)> {
+        let page = self.page_handle(page_id).await.ok()?;
+        let browser = self.browser_handle().await.ok()?;
+        crate::targeting::password_manager_prompt_point(&page, &browser)
+            .await
+            .map(|point| (point.x, point.y))
+    }
+
     async fn element_at_point(
         &self,
         page_id: &PageId,

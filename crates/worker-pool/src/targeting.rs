@@ -2081,6 +2081,127 @@ pub(crate) async fn page_frames(
     }
 }
 
+/// Extension frames that hold a password manager's own sign-in prompt. Only
+/// the extension can load these URLs, so a page cannot draw a lookalike.
+const PASSWORD_MANAGER_PROMPT_FRAMES: &[&str] = &[
+    // 1Password's banner offering the saved login for the site.
+    "chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/inline/universal-sign-on/",
+];
+
+/// Whether a target is a password manager's prompt frame on the page's own
+/// document.
+fn is_password_manager_prompt(
+    kind: &str,
+    url: &str,
+    parent: Option<&chromiumoxide::cdp::browser_protocol::page::FrameId>,
+    main_frame: &chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> bool {
+    kind == "iframe"
+        && parent == Some(main_frame)
+        && PASSWORD_MANAGER_PROMPT_FRAMES
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
+}
+
+/// The control in a manager's prompt that signs in with the saved login, such
+/// as 1Password's "Sign in with <site> — <account>".
+fn is_sign_in_control(role: &str, name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    role == "button" && (name.starts_with("sign in") || name.starts_with("log in"))
+}
+
+/// Viewport point of the sign-in button in a password manager's prompt frame
+/// on this page, or `None` when no known prompt is shown. The button is read
+/// from the frame's accessibility tree, which reaches closed shadow roots.
+pub(crate) async fn password_manager_prompt_point(
+    page: &Page,
+    browser: &BrowserHandle,
+) -> Option<Point> {
+    use chromiumoxide::cdp::browser_protocol::accessibility::{AxValue, GetFullAxTreeParams};
+    use chromiumoxide::cdp::browser_protocol::dom::GetFrameOwnerParams;
+    use chromiumoxide::cdp::browser_protocol::page::FrameId;
+    use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
+    let main_frame = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .ok()?
+        .result
+        .frame_tree
+        .frame
+        .id;
+    let prompt = browser
+        .execute(GetTargetsParams::default())
+        .await
+        .ok()?
+        .result
+        .target_infos
+        .into_iter()
+        .find(|target| {
+            is_password_manager_prompt(
+                &target.r#type,
+                &target.url,
+                target.parent_frame_id.as_ref(),
+                &main_frame,
+            )
+        })?;
+    let owner = page
+        .execute(GetFrameOwnerParams::new(FrameId::new(
+            prompt.target_id.inner().clone(),
+        )))
+        .await
+        .ok()?
+        .result
+        .backend_node_id;
+    let frame_box = page
+        .execute(GetBoxModelParams::builder().backend_node_id(owner).build())
+        .await
+        .ok()?
+        .result
+        .model
+        .content;
+    let frame = browser.get_page(prompt.target_id.clone()).await.ok()?;
+    let text = |value: &Option<AxValue>| {
+        value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let control = frame
+        .execute(GetFullAxTreeParams::default())
+        .await
+        .ok()?
+        .result
+        .nodes
+        .into_iter()
+        .find(|node| !node.ignored && is_sign_in_control(&text(&node.role), &text(&node.name)))?
+        .backend_dom_node_id?;
+    let center = frame
+        .execute(
+            GetContentQuadsParams::builder()
+                .backend_node_id(control)
+                .build(),
+        )
+        .await
+        .ok()?
+        .result
+        .quads
+        .iter()
+        .filter(|quad| quad.inner().len() == 8)
+        .map(ElementQuad::from_quad)
+        .filter(|quad| quad.quad_area() > 1.)
+        .map(|quad| quad.quad_center())
+        .next()?;
+    let viewport: (f64, f64) = frame
+        .evaluate("[window.innerWidth, window.innerHeight]")
+        .await
+        .ok()?
+        .into_value()
+        .ok()?;
+    frame_point(center, frame_box.inner(), viewport)
+}
+
 /// Every frame id in the session's own frame tree.
 async fn frame_tree_ids(
     page: &Page,
@@ -2319,6 +2440,43 @@ fn target_error(code: ErrorCode, message: impl std::fmt::Display) -> CommandErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_managers_own_frame_on_the_page_counts_as_its_prompt() {
+        use chromiumoxide::cdp::browser_protocol::page::FrameId;
+        let main = FrameId::new("main");
+        let other = FrameId::new("nested");
+        let prompt = "chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/inline/universal-sign-on/universal-sign-on.html?tabId=1";
+        assert!(super::is_password_manager_prompt(
+            "iframe",
+            prompt,
+            Some(&main),
+            &main
+        ));
+        // A page cannot serve the extension's URL: a lookalike path on the
+        // site's own origin is never the manager's prompt.
+        assert!(!super::is_password_manager_prompt(
+            "iframe",
+            "https://example.test/inline/universal-sign-on/universal-sign-on.html",
+            Some(&main),
+            &main
+        ));
+        assert!(!super::is_password_manager_prompt(
+            "iframe",
+            prompt,
+            Some(&other),
+            &main
+        ));
+        assert!(!super::is_password_manager_prompt(
+            "page", prompt, None, &main
+        ));
+        assert!(super::is_sign_in_control(
+            "button",
+            "Sign in with Hackajob — sasan@example.test"
+        ));
+        assert!(!super::is_sign_in_control("button", "Dismiss banner"));
+        assert!(!super::is_sign_in_control("StaticText", "Sign in"));
+    }
+
     #[test]
     fn frame_points_apply_scale_rotation_and_nested_origins() {
         let scaled = super::frame_point(

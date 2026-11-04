@@ -111,6 +111,13 @@ pub trait IntentBrowser: Send + Sync {
         Vec::new()
     }
 
+    /// Viewport point of the password manager's own sign-in control when the
+    /// worker can find it in the manager's extension frame. Defaults to none,
+    /// which leaves the prompt to vision.
+    async fn password_manager_prompt(&self, _page_id: &PageId) -> Option<(f64, f64)> {
+        None
+    }
+
     async fn type_text(
         &self,
         page_id: &PageId,
@@ -1748,122 +1755,140 @@ async fn fill_with_password_manager(
         };
     let mut evidence = vec![resolution];
 
-    let assist = match vision.assist.as_ref() {
-        Some(assist) if vision.session_ok && vision.capability_ok => assist,
-        _ => {
-            return failed(
-                ErrorCode::VisionAssistDenied,
-                "passwordManagerFill finds the password manager's prompt with vision; start the \
-                 session with executionPolicy.visionAssist and a vision node"
-                    .into(),
-                evidence,
-                record("visionUnavailable".into(), None),
-            );
+    // A worker that sees the manager's own prompt frame presses it directly;
+    // vision is the fallback for prompts it cannot locate.
+    let details = if let Some((x, y)) = browser.password_manager_prompt(page_id).await {
+        match browser.click_xy(page_id, x, y).await {
+            Ok(mut clicked) => evidence.append(&mut clicked),
+            Err(error) => {
+                return failed(
+                    error.code,
+                    error.message,
+                    evidence,
+                    record("passwordManagerPromptClickFailed".into(), None),
+                );
+            }
         }
-    };
+        None
+    } else {
+        let assist = match vision.assist.as_ref() {
+            Some(assist) if vision.session_ok && vision.capability_ok => assist,
+            _ => {
+                return failed(
+                    ErrorCode::VisionAssistDenied,
+                    "passwordManagerFill finds the password manager's prompt with vision; start the \
+                     session with executionPolicy.visionAssist and a vision node"
+                        .into(),
+                    evidence,
+                    record("visionUnavailable".into(), None),
+                );
+            }
+        };
 
-    let (png, mut screenshot_evidence) = match browser
-        .capture_screenshot(
-            page_id,
-            &CaptureScreenshotCommand {
-                mode: ScreenshotMode::Viewport,
-            },
-        )
-        .await
-    {
-        Ok(captured) => captured,
-        Err(error) => {
-            return failed(
-                ErrorCode::VisionAssistFailed,
-                format!("vision screenshot failed: {}", error.message),
-                evidence,
-                record("visionScreenshotFailed".into(), None),
-            );
-        }
-    };
-    evidence.append(&mut screenshot_evidence);
-    let artifact_ids = artifact_ids_from(&evidence);
-    let proposal = match assist
-        .propose(VisionProposeRequest {
-            purpose: PASSWORD_MANAGER_PROMPT.into(),
-            intent_kind: "fill".into(),
-            screenshot_png: Some(png),
-            corpus_screenshot_png: None,
-            stuck: StuckKind::TargetMissing,
-            context: None,
-        })
-        .await
-    {
-        Ok(proposal) => proposal,
-        Err(error) => {
-            return failed(
-                ErrorCode::VisionAssistFailed,
-                format!("vision propose failed: {}", error.message),
-                evidence,
-                record("visionProposeFailed".into(), None),
-            );
-        }
-    };
-    let details = ResolutionDetails {
-        path: IntentResolutionPath::VisionFallback,
-        vision_proposal_sha256: Some(proposal_sha256(&proposal)),
-        artifact_ids,
-    };
-    if proposal.confidence < PASSWORD_MANAGER_CONFIDENCE_FLOOR {
-        return failed(
-            ErrorCode::VisionAssistFailed,
-            format!(
-                "vision proposal confidence {:.2} below floor {PASSWORD_MANAGER_CONFIDENCE_FLOOR}",
-                proposal.confidence
-            ),
-            evidence,
-            record("visionConfidenceBelowFloor".into(), Some(details)),
-        );
-    }
-    let VisionAction::Click { x, y } = proposal.action else {
-        return failed(
-            ErrorCode::VisionAssistFailed,
-            "vision did not point at the password manager's prompt".into(),
-            evidence,
-            record("visionNotAClick".into(), Some(details)),
-        );
-    };
-    // The prompt belongs to the password manager, not the page: a point on a
-    // page control would press that control or focus the credential field.
-    match browser.element_at_point(page_id, x, y).await {
-        Ok(None) => {}
-        Ok(Some((role, _))) if !PAGE_CONTROL_ROLES.contains(&role.as_str()) => {}
-        Ok(Some((role, _))) => {
-            return failed(
-                ErrorCode::VisionAssistFailed,
-                format!("vision pointed at a page {role}, not the password manager's prompt"),
-                evidence,
-                record("visionPointedAtPageControl".into(), Some(details)),
-            );
-        }
-        Err(error) => {
+        let (png, mut screenshot_evidence) = match browser
+            .capture_screenshot(
+                page_id,
+                &CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            )
+            .await
+        {
+            Ok(captured) => captured,
+            Err(error) => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    format!("vision screenshot failed: {}", error.message),
+                    evidence,
+                    record("visionScreenshotFailed".into(), None),
+                );
+            }
+        };
+        evidence.append(&mut screenshot_evidence);
+        let artifact_ids = artifact_ids_from(&evidence);
+        let proposal = match assist
+            .propose(VisionProposeRequest {
+                purpose: PASSWORD_MANAGER_PROMPT.into(),
+                intent_kind: "fill".into(),
+                screenshot_png: Some(png),
+                corpus_screenshot_png: None,
+                stuck: StuckKind::TargetMissing,
+                context: None,
+            })
+            .await
+        {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    format!("vision propose failed: {}", error.message),
+                    evidence,
+                    record("visionProposeFailed".into(), None),
+                );
+            }
+        };
+        let details = ResolutionDetails {
+            path: IntentResolutionPath::VisionFallback,
+            vision_proposal_sha256: Some(proposal_sha256(&proposal)),
+            artifact_ids,
+        };
+        if proposal.confidence < PASSWORD_MANAGER_CONFIDENCE_FLOOR {
             return failed(
                 ErrorCode::VisionAssistFailed,
                 format!(
-                    "cannot confirm the proposed point is clear of page controls: {}",
-                    error.message
+                    "vision proposal confidence {:.2} below floor {PASSWORD_MANAGER_CONFIDENCE_FLOOR}",
+                    proposal.confidence
                 ),
                 evidence,
-                record("visionPointUnchecked".into(), Some(details)),
+                record("visionConfidenceBelowFloor".into(), Some(details)),
             );
         }
-    }
-    match browser.click_xy(page_id, x, y).await {
-        Ok(mut clicked) => evidence.append(&mut clicked),
-        Err(error) => {
+        let VisionAction::Click { x, y } = proposal.action else {
             return failed(
-                error.code,
-                error.message,
+                ErrorCode::VisionAssistFailed,
+                "vision did not point at the password manager's prompt".into(),
                 evidence,
-                record("passwordManagerPromptClickFailed".into(), Some(details)),
+                record("visionNotAClick".into(), Some(details)),
             );
+        };
+        // The prompt belongs to the password manager, not the page: a point on a
+        // page control would press that control or focus the credential field.
+        match browser.element_at_point(page_id, x, y).await {
+            Ok(None) => {}
+            Ok(Some((role, _))) if !PAGE_CONTROL_ROLES.contains(&role.as_str()) => {}
+            Ok(Some((role, _))) => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    format!("vision pointed at a page {role}, not the password manager's prompt"),
+                    evidence,
+                    record("visionPointedAtPageControl".into(), Some(details)),
+                );
+            }
+            Err(error) => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    format!(
+                        "cannot confirm the proposed point is clear of page controls: {}",
+                        error.message
+                    ),
+                    evidence,
+                    record("visionPointUnchecked".into(), Some(details)),
+                );
+            }
         }
-    }
+        match browser.click_xy(page_id, x, y).await {
+            Ok(mut clicked) => evidence.append(&mut clicked),
+            Err(error) => {
+                return failed(
+                    error.code,
+                    error.message,
+                    evidence,
+                    record("passwordManagerPromptClickFailed".into(), Some(details)),
+                );
+            }
+        }
+        Some(details)
+    };
 
     let watched = browser
         .control_action(
@@ -1876,7 +1901,7 @@ async fn fill_with_password_manager(
                             error.code,
                             error.message,
                             evidence,
-                            record("passwordManagerFieldUntargetable".into(), Some(details)),
+                            record("passwordManagerFieldUntargetable".into(), details),
                         );
                     }
                 },
@@ -1891,11 +1916,11 @@ async fn fill_with_password_manager(
                     ErrorCode::VerificationFailed,
                     message,
                     evidence,
-                    record("verifyFailed".into(), Some(details)),
+                    record("verifyFailed".into(), details),
                 );
             }
             evidence.append(&mut watched);
-            evidence.push(record("passwordManagerFilled".into(), Some(details)));
+            evidence.push(record("passwordManagerFilled".into(), details));
             IntentOutcome::Completed { evidence }
         }
         // The manager submitted the form and the field left with the page.
@@ -1909,14 +1934,14 @@ async fn fill_with_password_manager(
             if let Ok(mut settled) = browser.inspect_settled_page(page_id).await {
                 evidence.append(&mut settled);
             }
-            evidence.push(record("passwordManagerSubmitted".into(), Some(details)));
+            evidence.push(record("passwordManagerSubmitted".into(), details));
             IntentOutcome::Completed { evidence }
         }
         Err(error) => failed(
             error.code,
             error.message,
             evidence,
-            record("passwordManagerUnfilled".into(), Some(details)),
+            record("passwordManagerUnfilled".into(), details),
         ),
     }
 }
