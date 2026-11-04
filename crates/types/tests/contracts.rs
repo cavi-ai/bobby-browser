@@ -5,15 +5,15 @@ use types::{
     ClickAndWaitForPopupCommand, ClickCommand, ClickModifier, ClosePageCommand, CommandClass,
     CommandEnvelope, CommandError, CommandId, CommandOutcome, CompleteFormField,
     CompleteFormIntent, ControlAction, ControlActionCommand, ControlActionEvidence,
-    CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState, ErrorCode,
-    ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
-    ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
-    FollowIntent, FormControlOperation, FormControlState, FormControlTarget, FormControlValidity,
-    InspectCommand, IntentCommand, IntentHints, IntentResolutionPath, ListPagesCommand,
-    LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand,
-    ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand,
-    UploadAndConfirmCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
-    WaitUntil, WorkflowId,
+    CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState,
+    EnterCodeIntent, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath,
+    ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
+    ExtractValueKind, FillIntent, FollowIntent, FormControlOperation, FormControlState,
+    FormControlTarget, FormControlValidity, InspectCommand, IntentCommand, IntentHints,
+    IntentResolutionPath, ListPagesCommand, LocateIntent, NetworkResourceType, OneTimeCode,
+    OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId,
+    SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, UploadAndConfirmCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -359,6 +359,25 @@ fn command_envelope_uses_stable_camel_case_json() {
         value["command"]["input"]["input"]["waitUntil"],
         json!("interactive")
     );
+}
+
+#[test]
+fn journal_safe_envelope_drops_the_one_time_code_without_mutating_live_command() {
+    let mut envelope = test_envelope(PrimitiveCommand::ListPages(ListPagesCommand));
+    envelope.command = RuntimeCommand::Intent(IntentCommand::EnterCode(EnterCodeIntent {
+        code: OneTimeCode::new("482 913"),
+        hints: IntentHints::default(),
+        submit: true,
+        expected_state: None,
+    }));
+    let durable = serde_json::to_string(&envelope.journal_safe()).unwrap();
+    assert!(!durable.contains("482"), "{durable}");
+    assert!(!durable.contains("913"), "{durable}");
+    assert!(!format!("{envelope:?}").contains("482"));
+    let RuntimeCommand::Intent(IntentCommand::EnterCode(live)) = &envelope.command else {
+        unreachable!()
+    };
+    assert_eq!(live.code.normalized(), "482913");
 }
 
 #[test]

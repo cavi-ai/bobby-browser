@@ -233,11 +233,15 @@ impl Rig {
 
     async fn request(&self, method: &str, params: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let response = self
-            .server
-            .handle_message(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await
-            .unwrap_or(Value::Null);
+        // Boxed: every awaiting case then holds a pointer instead of the
+        // server's whole call chain, which in a debug build nears a test
+        // thread's stack.
+        let response = Box::pin(
+            self.server
+                .handle_message(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})),
+        )
+        .await
+        .unwrap_or(Value::Null);
         if method == "tools/call" {
             assert!(!response.is_null(), "MCP tool call returned no response");
             self.journey_meter.record(&response);

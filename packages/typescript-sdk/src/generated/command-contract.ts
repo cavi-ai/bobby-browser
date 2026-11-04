@@ -33,6 +33,7 @@ export const COMMAND_CONTRACT = {
     "completeForm": { fields: ["fields","purpose"], required: ["fields","purpose"] },
     "detectChallenge": { fields: ["hints","purpose"], required: ["purpose"] },
     "dismissObstruction": { fields: ["hints","purpose","timeoutMs"], required: ["purpose"] },
+    "enterCode": { fields: ["code","expectedState","hints","submit"], required: ["code"] },
     "extract": { fields: ["fields","purpose"], required: ["fields","purpose"] },
     "fill": { fields: ["hints","purpose","value"], required: ["purpose","value"] },
     "follow": { fields: ["boundary","expectedDestination","hints","purpose"], required: ["expectedDestination","purpose"] },

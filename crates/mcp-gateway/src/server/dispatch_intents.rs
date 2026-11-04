@@ -260,7 +260,10 @@ impl Server {
                                 .and_then(Value::as_str);
                             matches!(status, Some("completed") | Some("needsReconciliation"))
                                 || (matches!(status, Some("failed"))
-                                    && code == Some("verificationFailed"))
+                                    && matches!(
+                                        code,
+                                        Some("verificationFailed" | "verificationCodeRequired")
+                                    ))
                         }
                         Err(_) => false,
                     };
@@ -373,6 +376,45 @@ impl Server {
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
+            }
+            "intent_enter_code" => {
+                let input: IntentEnterCodeArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::EnterCode(types::EnterCodeIntent {
+                    code: types::OneTimeCode::new(input.code),
+                    hints: input.hints.unwrap_or_default(),
+                    submit: input.submit.unwrap_or(true),
+                    expected_state: input.expected_state,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
+                let (context, mut envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                let observe_context = context.clone();
+                let result = if input.auto_checkpoint.unwrap_or(true) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope, handle, call.name.as_str())
+                        .await
+                };
+                let result = result.map(|outcome| {
+                    project_verified_action_outcome(outcome, EvidenceDetail::Compact)
+                });
+                self.attach_post_state(result, observe_context, session_id, page_id, handle)
                     .await
             }
             "intent_extract" => {
@@ -720,6 +762,8 @@ mod tests {
             // below with a `CompleteFormField`, which additionally requires
             // each item's `value`.
             "fields" => json!([{"name": "field", "purpose": "parity guard field"}]),
+            "code" => json!("123456"),
+            "submit" => json!(true),
             "evidenceDetail" => json!("compact"),
             "expectedState" | "expectedDestination" => json!({
                 "condition": {"kind": "document", "ready": "commit"},

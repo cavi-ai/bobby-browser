@@ -100,7 +100,12 @@ impl Server {
     ) -> Value {
         match result {
             Ok(mut value) => {
-                if crate::catalog::is_page_derived(name) {
+                // A code step's destination hint is page text, whatever tool
+                // found it.
+                let carries_page_text = value["evidence"].as_array().is_some_and(|evidence| {
+                    evidence.iter().any(|item| item["kind"] == "codeEntry")
+                });
+                if carries_page_text || crate::catalog::is_page_derived(name) {
                     value["pageDerived"] = json!(true);
                 }
                 if let Some(handle) = defaulted_handle {

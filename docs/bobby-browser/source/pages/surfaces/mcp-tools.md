@@ -62,6 +62,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `intent_complete_form` | `browser:mutate`, `intent:execute` | Fill an ordered list of named fields. Never submits |
 | `intent_detect_challenge` | `browser:mutate`, `intent:execute`, `vision:assist` | Classify a captcha or verification challenge |
 | `intent_dismiss_obstruction` | `browser:mutate`, `intent:execute` | Dismiss a popup, overlay or cookie banner |
+| `intent_enter_code` | `browser:mutate`, `intent:execute` | Enter a one-time code on a code step and submit it. Use after a submit returns `verificationCodeRequired` |
 | `intent_extract` | `browser:mutate`, `intent:execute` | Read named fields without changing the page |
 | `intent_fill` | `browser:mutate`, `intent:execute` | Fill one described control and verify the value |
 | `intent_follow` | `browser:mutate`, `intent:execute` | Activate a control and verify the resulting state |

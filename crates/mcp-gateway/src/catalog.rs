@@ -236,6 +236,12 @@ tools! {
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_dismiss_obstruction_schema, args: IntentDismissObstructionArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("DismissObstruction", "Reconciliable"), hints: (false, false, false, false) }
+    intent_enter_code { order: 54, title: "Enter one-time code", description: "Enter a one-time code on a code step (one field or split boxes) and submit it (Boundary). Requires browser:mutate and intent:execute. Use after a submit returns verificationCodeRequired, with a code from your own mail or SMS tool. Never echoed. On failure with verificationFailed the code was wrong or expired; get a fresh one.",
+        capabilities: &[
+            types::Capability::BrowserMutate,
+            types::Capability::IntentExecute,
+        ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_enter_code_schema, args: IntentEnterCodeArgs,
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("EnterCode", "Boundary if it submits, else Reconciliable"), hints: (false, true, false, true) }
     intent_extract { order: 14, title: "Extract fields", description: "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         capabilities: &[
             types::Capability::BrowserMutate,

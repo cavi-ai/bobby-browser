@@ -59,6 +59,7 @@ impl RuntimeCommand {
     pub fn sanitize_urls(&mut self) {
         match self {
             Self::Primitive(command) => command.sanitize_urls(),
+            Self::Intent(IntentCommand::EnterCode(intent)) => intent.code.redact(),
             Self::Intent(_) => {}
         }
     }
@@ -98,6 +99,10 @@ pub enum IntentCommand {
     /// Read-only challenge classification: screenshot → vision classify →
     /// report. Never acts on the page, so it is replayable like Locate.
     DetectChallenge(crate::challenges::DetectChallengeIntent),
+    /// Enters a one-time code into the code step a page is showing and, by
+    /// default, submits it. The code is a credential and never leaves the
+    /// command: it is redacted from evidence, errors and the journal.
+    EnterCode(EnterCodeIntent),
 }
 
 impl IntentCommand {
@@ -109,6 +114,13 @@ impl IntentCommand {
                 CommandClass::Reconciliable
             }
             Self::SolveChallenge(_) => CommandClass::Reconciliable,
+            Self::EnterCode(intent) => {
+                if intent.submit {
+                    CommandClass::Boundary
+                } else {
+                    CommandClass::Reconciliable
+                }
+            }
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
                 if intent.boundary {
@@ -219,6 +231,64 @@ pub struct FollowIntent {
     pub expected_destination: WaitForCommand,
     #[serde(default)]
     pub boundary: bool,
+}
+
+/// A one-time code. Serializes as a plain string and never prints: `Debug`
+/// redacts it so a logged command cannot leak the credential.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct OneTimeCode(String);
+
+impl OneTimeCode {
+    pub fn new(code: impl Into<String>) -> Self {
+        Self(code.into())
+    }
+
+    /// The code as the page should receive it: spaces and dashes removed.
+    pub fn normalized(&self) -> String {
+        self.0
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && !matches!(ch, '-' | '\u{2010}'..='\u{2015}'))
+            .collect()
+    }
+
+    /// Replaces the code with a marker, for journals.
+    pub fn redact(&mut self) {
+        self.0 = "[redacted-code]".into();
+    }
+}
+
+impl std::fmt::Debug for OneTimeCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OneTimeCode([redacted])")
+    }
+}
+
+/// Longest code the intent accepts, in characters after normalization.
+pub const MAX_ONE_TIME_CODE_CHARS: usize = 32;
+
+fn default_enter_code_submit() -> bool {
+    true
+}
+
+/// Enter a one-time code into the code step the page shows (one field, or one
+/// character per box) and, when `submit` is set, submit it.
+///
+/// Boundary when it submits: a code consumed by the page cannot be replayed.
+/// Verification is built in: the entered value is read back from each field,
+/// then `expected_state` must hold, or the page must leave the code step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct EnterCodeIntent {
+    pub code: OneTimeCode,
+    #[serde(default)]
+    pub hints: IntentHints,
+    #[serde(default = "default_enter_code_submit")]
+    pub submit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_state: Option<WaitForCommand>,
 }
 
 pub const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS: u64 = 5_000;

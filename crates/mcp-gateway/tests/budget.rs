@@ -356,6 +356,7 @@ const DESTRUCTIVE: &[&str] = &[
     "page_close",
     "cookie_delete",
     "intent_submit_and_verify",
+    "intent_enter_code",
     "intent_follow",
     "job_cancel",
 ];
@@ -375,6 +376,7 @@ const OPEN_WORLD: &[&str] = &[
     "click",
     "intent_follow",
     "intent_submit_and_verify",
+    "intent_enter_code",
 ];
 
 // `idempotentHint` is unconditional under MCP: repeating the call with the same arguments

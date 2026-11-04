@@ -8,6 +8,7 @@ import {
   detectChallengeEnvelope,
   detectChallengeRuntimeCommand,
   dismissObstructionEnvelope,
+  enterCodeRuntimeCommand,
   dismissObstructionRuntimeCommand,
   extractEnvelope,
   extractRuntimeCommand,
@@ -455,4 +456,18 @@ test("assertIntentPurpose enforces the 256-byte bound", () => {
   assert.throws(() => assertIntentPurpose(""), /non-empty/);
   assert.throws(() => assertIntentPurpose("a".repeat(MAX_INTENT_PURPOSE_BYTES + 1)), /256/);
   assert.throws(() => locateEnvelope(META, "a".repeat(257)), /256/);
+});
+
+test("enterCodeRuntimeCommand submits by default and omits an absent expectedState", () => {
+  const command = enterCodeRuntimeCommand({ code: "123-456" });
+  assert.equal(command.kind, "intent");
+  assert.deepEqual(
+    { ...(command.input as { input: object }).input },
+    {
+      code: "123-456",
+      hints: command.input.kind === "enterCode" ? command.input.input.hints : undefined,
+      submit: true,
+    },
+  );
+  assert.throws(() => enterCodeRuntimeCommand({ code: " - " }));
 });

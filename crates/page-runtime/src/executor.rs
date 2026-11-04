@@ -812,7 +812,9 @@ fn is_pre_effect(error: &CommandError) -> bool {
 fn is_postcondition_failure(error: &CommandError) -> bool {
     matches!(
         error.code,
-        ErrorCode::VerificationFailed | ErrorCode::WaitConditionTimedOut
+        ErrorCode::VerificationFailed
+            | ErrorCode::VerificationCodeRequired
+            | ErrorCode::WaitConditionTimedOut
     )
 }
 

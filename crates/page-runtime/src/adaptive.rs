@@ -581,6 +581,19 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         }
     }
 
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Option<types::FormSnapshot>, CommandError> {
+        let evidence = worker_pool::observation_or_default(self.lease.worker().observation())
+            .form_snapshot(page_id, Some(512))
+            .await?;
+        Ok(evidence.into_iter().find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        }))
+    }
+
     async fn validation_issues(
         &self,
         page_id: &PageId,
@@ -1834,6 +1847,7 @@ fn record_intent_metrics(
         types::IntentCommand::DetectChallenge(_) => {
             observability::IntentMetricKind::DetectChallenge
         }
+        types::IntentCommand::EnterCode(_) => observability::IntentMetricKind::Fill,
     };
     let evidence = match outcome {
         IntentOutcome::Completed { evidence } | IntentOutcome::Failed { evidence, .. } => evidence,

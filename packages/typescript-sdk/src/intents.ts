@@ -19,6 +19,7 @@ import {
   type DetectChallengeHints,
   type DetectChallengeIntent,
   type DismissObstructionIntent,
+  type EnterCodeIntent,
   type ExtractField,
   type ExtractIntent,
   type FillIntent,
@@ -183,6 +184,25 @@ export function followRuntimeCommand(input: FollowIntent): RuntimeCommand {
         hints: withHints(input.hints),
         expectedDestination: input.expectedDestination,
         boundary: input.boundary ?? false,
+      },
+    },
+  };
+}
+
+/** Build an `enterCode` intent command. `submit` defaults to true. */
+export function enterCodeRuntimeCommand(input: EnterCodeIntent): RuntimeCommand {
+  if (input.code.replace(/[\s-]/g, "").length === 0) {
+    throw new Error("enterCode intent needs a non-empty code");
+  }
+  return {
+    kind: "intent",
+    input: {
+      kind: "enterCode",
+      input: {
+        code: input.code,
+        hints: withHints(input.hints),
+        submit: input.submit ?? true,
+        ...(input.expectedState ? { expectedState: input.expectedState } : {}),
       },
     },
   };

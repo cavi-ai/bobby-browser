@@ -5,6 +5,7 @@
 ### Added
 
 - `[vision].python` and `bobby vision connect --python` (or `bobby vision-proxy --python` and `BOBBY_VISION_PYTHON`) set the interpreter that runs the MLX and text-tier vision servers.
+- `intent_enter_code` enters a one-time code on a code step (one field or one character per box) and submits it, and `intent_submit_and_verify` fails `verificationCodeRequired` with the code field targets, code length and the page's destination hint when a submit lands on such a step.
 
 ### Fixed
 

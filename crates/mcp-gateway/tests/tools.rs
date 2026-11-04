@@ -732,7 +732,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        10
+        11
     );
 
     // In `tools/list`, `command_execute` must advertise the envelope command as
@@ -793,7 +793,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 32, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 33, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -814,6 +814,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         evidence_kinds.contains(&"controlAction"),
         "{evidence_kinds:?}"
     );
+    assert!(evidence_kinds.contains(&"codeEntry"), "{evidence_kinds:?}");
     assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
     assert!(
@@ -2551,9 +2552,10 @@ async fn authenticated_with_intents() -> AuthenticatedRuntime {
     AuthenticatedRuntime::new(RuntimeService::default(), handle)
 }
 
-const INTENT_TOOLS: [&str; 8] = [
+const INTENT_TOOLS: [&str; 9] = [
     "intent_complete_form",
     "intent_dismiss_obstruction",
+    "intent_enter_code",
     "intent_extract",
     "intent_fill",
     "intent_follow",

@@ -559,6 +559,16 @@ pub enum Evidence {
     FormValidation {
         issues: Vec<crate::FormValidationIssue>,
     },
+    /// The one-time-code step the page is showing: where the code goes, how
+    /// long it is when the page says, and the page's own words about where it
+    /// was sent. Page-derived.
+    CodeEntry {
+        fields: Vec<crate::FormControlTarget>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_length: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_hint: Option<String>,
+    },
     ControlAction {
         action: ControlActionEvidence,
     },
@@ -665,6 +675,7 @@ impl Evidence {
             Self::Inspection { .. }
                 | Self::AccessibilitySnapshot { .. }
                 | Self::FormSnapshot { .. }
+                | Self::CodeEntry { .. }
                 | Self::StructuredExtraction { .. }
         )
     }
@@ -932,6 +943,9 @@ pub enum ErrorCode {
     // another would double-apply the effect unless the caller explicitly
     // acknowledges the prior one (`reSubmit`).
     BoundaryAlreadyExecuted,
+    // A submit did not reach its expected state because the page now asks for
+    // a one-time code. Not a failure of the submit: the code is the next step.
+    VerificationCodeRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

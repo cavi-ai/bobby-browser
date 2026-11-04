@@ -77,7 +77,7 @@ export interface InterfaceError {
   requiredCapability: Capability | null;
 }
 
-export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted";
+export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted" | "verificationCodeRequired";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
 
 /** Maximum UTF-8 byte length for intent `purpose` strings. */
@@ -163,6 +163,7 @@ export type Evidence =
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean; pageDerived?: true }
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "formValidation"; issues: FormValidationIssue[] }
+  | { kind: "codeEntry"; fields: FormControlTarget[]; codeLength?: number; destinationHint?: string }
   | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "structuredExtraction"; pageId: Id; value: JsonValue; truncated: boolean; pageDerived?: true }
   | { kind: "challengeDetection"; confidence: number; detection: ChallengeDetection | null; priorKind?: string }
@@ -339,6 +340,11 @@ export interface FollowIntent { purpose: string; hints?: IntentHints; expectedDe
  * is built in — callers do not supply a wait condition.
  */
 export interface DismissObstructionIntent { purpose: string; hints?: IntentHints; timeoutMs?: number; }
+/**
+ * Enter a one-time code on the code step a page shows and, unless `submit` is
+ * false, submit it. The code is a credential and is never echoed back.
+ */
+export interface EnterCodeIntent { code: string; hints?: IntentHints; submit?: boolean; expectedState?: WaitForCommand; }
 /** Value to extract: plain text, a named attribute, or `href` shorthand. */
 export type ExtractValueKind =
   | { kind: "text" }
@@ -376,6 +382,7 @@ export type IntentCommand =
   | { kind: "waitForState"; input: WaitForStateIntent }
   | { kind: "follow"; input: FollowIntent }
   | { kind: "dismissObstruction"; input: DismissObstructionIntent }
+  | { kind: "enterCode"; input: EnterCodeIntent }
   | { kind: "extract"; input: ExtractIntent }
   | { kind: "detectChallenge"; input: DetectChallengeIntent }
   | { kind: "solveChallenge"; input: SolveChallengeIntent };

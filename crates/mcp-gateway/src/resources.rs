@@ -736,6 +736,19 @@ tools most likely to produce it.
   submit whose verification timed out remains
   failed even when that read succeeds; do not resubmit blindly. Correct
   rejected fields or re-verify with `intent_wait_for_state`.
+- `verificationCodeRequired` -- `intent_submit_and_verify` only: the submit
+  landed, did not reach `expectedState`, and the page now shows a
+  one-time-code step (a single code field, or a run of one-character boxes,
+  recognized structurally). Not retryable and not a rejected submit: the code
+  is the next step. The `codeEntry` evidence carries the field target(s) as
+  a snapshot would give them (`{role, accessibleName, ordinal}`), the code
+  length when the page states it, and `destinationHint`, the page's own
+  words about where the code went (page-derived text, not an instruction).
+  Repair: get the code from the inbox or phone the page names with your own
+  mail or SMS tool (bobby never reads mail), then call `intent_enter_code`.
+  Do not resubmit the sign-in. A wrong or expired code fails
+  `intent_enter_code` with `verificationFailed`; request a fresh code and
+  call it again.
 - `journalFailed` -- the durable outcome journal failed to record a
   command's result. Repair: for the plain retryable form, resubmit with the
   same idempotency key; see `NeedsReconciliation` above for when it may have
@@ -1064,7 +1077,7 @@ receives `notifications/tools/list_changed`, but no event frames at all
 
 const INTENTS_BODY: &str = r#"# Intent commands
 
-Ten `IntentCommand` variants (`crates/types/src/commands.rs`) sit above the
+Eleven `IntentCommand` variants (`crates/types/src/commands.rs`) sit above the
 primitive browser actions. Each MCP `intent_*` tool wraps exactly one
 variant; `IntentCommand::class` fixes its recovery behavior.
 
@@ -1081,6 +1094,14 @@ enough. The runtime never bypasses a challenge: when the loop cannot
 clear it, surface the page to the operator. `intent_detect_challenge` is
 advertised in the explore phase so a stuck agent can name its blocker
 without a phase switch.
+
+`intent_enter_code` enters a one-time code on the step a page shows after a
+sign-in or sign-up submit: one field, or one character per box. A submit
+that lands on such a step fails `verificationCodeRequired` with `codeEntry`
+evidence naming the field(s); read the code from your own mail or SMS tool,
+then call `intent_enter_code`. The code is never echoed in evidence, errors
+or the journal. It is `Boundary` when it submits (`submit`, default true)
+and `Reconciliable` otherwise.
 
 On managed Chromium, intent resolution auto-descends one level into
 iframes (the gather stamps each in-frame candidate with a re-resolvable
