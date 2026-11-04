@@ -74,7 +74,10 @@ async fn challenge_tools_answer_a_call_instead_of_dropping_the_connection() {
         Capability::VisionAssist,
     ])
     .await;
-    for (id, name) in [(2, "intent_detect_challenge"), (3, "intent_solve_challenge")] {
+    for (id, name) in [
+        (2, "intent_detect_challenge"),
+        (3, "intent_solve_challenge"),
+    ] {
         let response = server
             .handle_message(request(
                 id,
