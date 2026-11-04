@@ -1,11 +1,10 @@
 use std::io::BufRead;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use config::{AppConfig, NodeKind, VisionProviderConfig, VisionTextTierConfig};
+use config::{AppConfig, NodeKind, VisionConfig, VisionProviderConfig, VisionTextTierConfig};
 use node_registry::{NodeRegistry, LEGACY_VISION_NODE};
 use url::Url;
 
@@ -175,9 +174,7 @@ impl ManagedVisionProxy {
         provider_name: &str,
         profile: &VisionProviderConfig,
         token_env: &str,
-        collect_training_data: bool,
-        training_data_dir: &Path,
-        text_tier: Option<&VisionTextTierConfig>,
+        vision: &VisionConfig,
     ) -> Result<Self> {
         if !decision.should_spawn {
             anyhow::bail!("vision child spawn not requested: {}", decision.reason);
@@ -214,15 +211,7 @@ impl ManagedVisionProxy {
             bind: SocketAddr::new(decision.bind.ip(), 0),
             ..decision.clone()
         };
-        configure_vision_proxy_command(
-            &mut cmd,
-            &ephemeral,
-            provider_name,
-            profile,
-            collect_training_data,
-            training_data_dir,
-            text_tier,
-        );
+        configure_vision_proxy_command(&mut cmd, &ephemeral, provider_name, profile, vision);
         cmd.arg("--managed");
         // stdin is the child's lifeline and stdout carries its one
         // `listening <addr>` line; stderr is inherited so it cannot fill a pipe.
@@ -295,9 +284,7 @@ pub(crate) fn configure_vision_proxy_command(
     decision: &VisionChildDecision,
     provider_name: &str,
     profile: &VisionProviderConfig,
-    collect_training_data: bool,
-    training_data_dir: &Path,
-    text_tier: Option<&VisionTextTierConfig>,
+    vision: &VisionConfig,
 ) {
     cmd.arg("vision-proxy")
         .arg("--bind")
@@ -321,12 +308,12 @@ pub(crate) fn configure_vision_proxy_command(
         cmd.arg("--api-key-env")
             .arg(profile.api_key_env.as_deref().unwrap_or(""));
     }
-    if collect_training_data {
+    if vision.collect_training_data {
         cmd.arg("--collect-training-data")
             .arg("--training-data-dir")
-            .arg(training_data_dir);
+            .arg(&vision.training_data_dir);
     }
-    if let Some(tier) = text_tier {
+    if let Some(tier) = &vision.text_tier {
         cmd.arg("--text-base-url")
             .arg(&tier.base_url)
             .arg("--text-model")
@@ -337,6 +324,9 @@ pub(crate) fn configure_vision_proxy_command(
                 cmd.arg("--text-adapter").arg(adapter);
             }
         }
+    }
+    if let Some(python) = &vision.python {
+        cmd.arg("--python").arg(python);
     }
 }
 
@@ -381,9 +371,11 @@ mod tests {
             &decision,
             "mlx",
             &profile,
-            true,
-            Path::new("training"),
-            None,
+            &VisionConfig {
+                collect_training_data: true,
+                training_data_dir: "training".into(),
+                ..VisionConfig::default()
+            },
         );
         let args: Vec<String> = command
             .get_args()
@@ -419,9 +411,7 @@ mod tests {
             &decision,
             "mlx",
             &profile,
-            false,
-            Path::new("training"),
-            None,
+            &VisionConfig::default(),
         );
         let args = command
             .get_args()
@@ -449,9 +439,10 @@ mod tests {
                 model: "image-model".into(),
                 api_key_env: None,
             },
-            false,
-            Path::new("training"),
-            Some(text_tier),
+            &VisionConfig {
+                text_tier: Some(text_tier.clone()),
+                ..VisionConfig::default()
+            },
         );
         command
             .get_args()

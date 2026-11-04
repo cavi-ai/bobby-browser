@@ -326,6 +326,7 @@ pub(in crate::doctor) fn check_vision_readiness(vision: &VisionConfig) -> Option
             timeout: Duration::from_secs(3),
             allow_download: false,
             allow_start: false,
+            python: vision.python.clone(),
         },
     ) {
         Ok(crate::vision_readiness::ReadinessOutcome::Ready { provider, model }) => {

@@ -74,6 +74,10 @@ pub struct VisionConfig {
     /// named by the text inside them (macOS). Unset detects nothing.
     #[serde(default, alias = "detectorModel")]
     pub detector_model: Option<std::path::PathBuf>,
+    /// Python interpreter that runs the managed vision servers (MLX and the
+    /// text tier). Unset runs `python3` from PATH.
+    #[serde(default)]
+    pub python: Option<std::path::PathBuf>,
 }
 
 impl Default for VisionConfig {
@@ -97,6 +101,7 @@ impl Default for VisionConfig {
             training_data_dir: default_training_data_dir(),
             text_tier: None,
             detector_model: None,
+            python: None,
         }
     }
 }

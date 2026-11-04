@@ -1081,11 +1081,52 @@ fn install_cli_from(exe: &Path, dest_dir: &Path) -> Result<CliInstall> {
             &dest_dir.join(gateway.file_name().expect("gateway file name")),
         )?;
     }
+    // The vision servers go where an installed `bobby` looks for them:
+    // `<prefix>/share/bobby-browser/scripts` beside `<prefix>/bin`.
+    if let (Some(scripts), Some(prefix)) = (vision_scripts_near(exe), dest_dir.parent()) {
+        let dest = prefix.join("share/bobby-browser/scripts/vision-mlx");
+        if scripts != dest {
+            copy_vision_scripts(&scripts, &dest)?;
+        }
+    }
     Ok(CliInstall {
         on_path: directory_on_path(dest_dir),
         bobby: bobby_dest,
         bobby_changed,
     })
+}
+
+/// `scripts/vision-mlx` of the checkout or release archive `exe` was built in.
+fn vision_scripts_near(exe: &Path) -> Option<PathBuf> {
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    exe.ancestors().skip(1).find_map(|ancestor| {
+        [
+            ancestor.join("scripts/vision-mlx"),
+            ancestor.join("share/bobby-browser/scripts/vision-mlx"),
+        ]
+        .into_iter()
+        .find(|dir| dir.join("vision_server.py").is_file())
+    })
+}
+
+fn copy_vision_scripts(src: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("could not create {}", dest.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "__pycache__" {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            copy_vision_scripts(&path, &dest.join(&name))?;
+        } else {
+            std::fs::copy(&path, dest.join(&name))
+                .with_context(|| format!("copy {} → {}", path.display(), dest.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether `dest` already holds exactly the bytes of `src`.
@@ -1778,6 +1819,9 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                 timeout: std::time::Duration::from_secs(45),
                 allow_download: false,
                 allow_start: true,
+                python: config::AppConfig::load(&config_path)
+                    .ok()
+                    .and_then(|loaded| loaded.vision.python),
             },
         )? {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
@@ -2217,6 +2261,34 @@ mod install_tests {
             std::fs::write(build.path().join(name), format!("#!/bin/sh\necho {name}\n")).unwrap();
         }
         build
+    }
+
+    #[test]
+    fn cli_install_puts_the_vision_servers_where_the_installed_bobby_finds_them() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let build = checkout.path().join("target/release");
+        std::fs::create_dir_all(&build).unwrap();
+        for name in ["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND] {
+            std::fs::write(build.join(name), format!("#!/bin/sh\necho {name}\n")).unwrap();
+        }
+        let scripts = checkout.path().join("scripts/vision-mlx");
+        std::fs::create_dir_all(scripts.join("providers")).unwrap();
+        std::fs::write(scripts.join("vision_server.py"), "# server\n").unwrap();
+        std::fs::write(scripts.join("providers/base.py"), "# provider\n").unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+
+        install_cli_from(&build.join("bobby"), &prefix.path().join("bin")).unwrap();
+
+        let installed = prefix.path().join("share/bobby-browser/scripts/vision-mlx");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("vision_server.py")).unwrap(),
+            "# server\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(installed.join("providers/base.py")).unwrap(),
+            "# provider\n"
+        );
     }
 
     #[test]

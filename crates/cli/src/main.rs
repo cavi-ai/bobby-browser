@@ -390,6 +390,9 @@ enum CliCommand {
         /// Path to vision_server.py when spawning (env BOBBY_VISION_SERVER_SCRIPT; auto-detect from repo layout)
         #[arg(long)]
         server_script: Option<PathBuf>,
+        /// Python interpreter for the spawned vision servers (env BOBBY_VISION_PYTHON; default python3 on PATH)
+        #[arg(long)]
+        python: Option<PathBuf>,
         /// Enable training data collection (logs all vision proposals to disk)
         #[arg(long)]
         collect_training_data: bool,
@@ -467,6 +470,9 @@ struct VisionConnectArgs {
     /// Text-tier server address (default http://127.0.0.1:9102)
     #[arg(long, requires = "text_model")]
     text_base_url: Option<String>,
+    /// Python interpreter with the vision server's packages (written to [vision].python)
+    #[arg(long)]
+    python: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -496,6 +502,7 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
             text_model: args.text_model,
             text_adapter: args.text_adapter,
             text_base_url: args.text_base_url,
+            python: args.python,
         }
     }
 }
@@ -990,6 +997,7 @@ pub async fn run() -> Result<()> {
             vision_base_url,
             spawn_server,
             server_script,
+            python,
             collect_training_data,
             training_data_dir,
             api_key_env,
@@ -1007,6 +1015,7 @@ pub async fn run() -> Result<()> {
                 vision_base_url,
                 spawn_server,
                 server_script,
+                python,
                 collect_training_data,
                 training_data_dir,
                 api_key_env,
@@ -1181,9 +1190,7 @@ fn prepare_vision_child(
             provider_name,
             profile,
             token_env,
-            config.vision.collect_training_data,
-            &config.vision.training_data_dir,
-            config.vision.text_tier.as_ref(),
+            &config.vision,
         )?;
         vision_child::point_vision_nodes_at(&mut config, &decision, proxy.endpoint());
         Some(proxy)
@@ -1229,6 +1236,7 @@ struct VisionProxyRunArgs {
     vision_base_url: Option<String>,
     spawn_server: bool,
     server_script: Option<PathBuf>,
+    python: Option<PathBuf>,
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
@@ -1273,6 +1281,7 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         vision_base_url: Some(profile.base_url.clone()),
         spawn_server: provider.eq_ignore_ascii_case("mlx"),
         server_script: None,
+        python: config.vision.python.clone(),
         collect_training_data: config.vision.collect_training_data,
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
@@ -1359,6 +1368,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         vision_base_url,
         spawn_server,
         server_script,
+        python,
         collect_training_data,
         training_data_dir,
         api_key_env,
@@ -1422,6 +1432,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                         &model,
                         None,
                         server_script.clone(),
+                        python.as_deref(),
                     )?);
                 }
                 let mut upstream = MlxUpstream::new(model, base_url);
@@ -1446,6 +1457,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                     &model,
                     text_adapter.as_deref(),
                     server_script,
+                    python.as_deref(),
                 )?);
             }
             let mut upstream = MlxUpstream::new(model, base_url);
@@ -1495,6 +1507,7 @@ fn spawn_vision_server(
     model: &str,
     adapter: Option<&Path>,
     server_script: Option<PathBuf>,
+    python: Option<&Path>,
 ) -> Result<ManagedPythonServer> {
     let script = server_script
         .or_else(|| std::env::var_os("BOBBY_VISION_SERVER_SCRIPT").map(PathBuf::from))
@@ -1513,7 +1526,13 @@ fn spawn_vision_server(
         })
         .unwrap_or_else(|| "127.0.0.1:9101".to_string());
 
-    let mut cmd = std::process::Command::new("python3");
+    // The interpreter must have the server's dependencies; PATH's python3 is
+    // only the fallback when none is configured.
+    let python = python
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("BOBBY_VISION_PYTHON").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let mut cmd = std::process::Command::new(&python);
     cmd.arg(&script)
         .arg("--bind")
         .arg(&bind)
@@ -1534,7 +1553,9 @@ fn spawn_vision_server(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
 
-    let mut child = cmd.spawn().context("failed to spawn vision_server.py")?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn vision_server.py with {}", python.display()))?;
     let lifeline = child.stdin.take().context("vision_server.py stdin")?;
 
     // Do not wait for readiness here: the caller (bobby serve) probes the
@@ -1552,6 +1573,8 @@ fn spawn_vision_server(
 /// executable (source checkout or installed alongside the repo).
 fn find_vision_server_script() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    // A `bobby` reached through a symlink finds the scripts installed beside its target.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     for ancestor in exe.ancestors().skip(1) {
         for candidate in [
             ancestor.join("scripts/vision-mlx/vision_server.py"),
