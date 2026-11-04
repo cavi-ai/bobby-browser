@@ -1,0 +1,86 @@
+name: browser test
+
+# Runs chosen real-browser tests on demand, so a change that needs a live
+# browser is proven on a runner instead of a developer machine.
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: chromium or firefox
+        required: true
+        type: choice
+        options: [chromium, firefox]
+      suites:
+        description: runtime-tests arguments, such as `--test site_regressions_chromium credential`
+        required: true
+        type: string
+
+concurrency:
+  group: browser-test-${{ github.ref }}-${{ inputs.engine }}-${{ inputs.suites }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  test:
+    name: ${{ inputs.engine }} · ${{ inputs.suites }}
+    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BOBBY_CHROME_NO_SANDBOX: "1"
+      SUITES: ${{ inputs.suites }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Chrome
+        if: ${{ inputs.engine == 'chromium' }}
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: 150.0.7871.124
+          install-dependencies: false
+
+      - name: Chromium tests
+        if: ${{ inputs.engine == 'chromium' }}
+        run: |
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
+          export BOBBY_CHROME_EXECUTABLE="$(readlink -f "$BIN")"
+          # SUITES is word-split on purpose: it is a list of cargo test arguments.
+          cargo test -p runtime-tests --locked $SUITES -- --ignored --test-threads=1
+
+      - uses: pnpm/action-setup@v6
+        if: ${{ inputs.engine == 'firefox' }}
+
+      - uses: actions/setup-node@v7
+        if: ${{ inputs.engine == 'firefox' }}
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Install Firefox
+        if: ${{ inputs.engine == 'firefox' }}
+        uses: browser-actions/setup-firefox@latest
+
+      - name: Firefox tests
+        if: ${{ inputs.engine == 'firefox' }}
+        run: |
+          pnpm install --frozen-lockfile
+          make test-browsers-setup
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 TEST_BROWSERS_FIREFOX_SUITES="$SUITES"
