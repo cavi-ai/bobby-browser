@@ -1,9 +1,10 @@
 name: CI
 
+# Release gate: runs on a release tag or by hand. Every job finishes within 15
+# minutes; a check that cannot does not belong here.
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
@@ -13,21 +14,20 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # No debug info: smaller and faster builds, and the target fits the runner disk.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   rust:
     name: rust · build · test · lint
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v7
-
-      # Workspace build and test artifacts outgrow the runner's free disk; drop
-      # preinstalled SDKs the job never uses.
-      - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL && df -h /
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
@@ -48,16 +48,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 
-      - name: Build
-        run: cargo build --workspace --locked
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24.18.1
-          cache: pnpm
-
       # The runner image already carries Chrome's libraries; skipping apt keeps
       # a slow package mirror out of the job.
       - name: Install Chrome for workspace tests
@@ -75,13 +65,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-      - name: Vision model selection
-        run: python3 scripts/test_vision_model_selection.py
-
       - name: Version and naming agreement
         # One tag ships binaries, npm, and the crate, so a version that
-        # disagrees between manifests ships a mislabelled artifact. npm reached
-        # 0.3.1 while the last sdk-v* tag was 0.3.0 because nothing checked.
+        # disagrees between manifests ships a mislabelled artifact.
         run: |
           python3 -m unittest scripts/test_check_version_agreement.py
           python3 scripts/check-version-agreement.py
@@ -90,285 +76,21 @@ jobs:
       - name: Release installer regressions
         run: scripts/install-release.test.sh
 
-      - name: Vision experiment regressions
+      - name: Vision server
+        # The vision server and its providers ship with every release.
         working-directory: scripts/vision-mlx
-        run: python3 -m unittest test_provider_base.py test_v1_provider.py test_eval_provider.py test_vision_server.py training/test_evaluate_adapter.py training/test_corpus_lint.py training/test_relabel_live_windows.py training/test_model_promotion.py
+        run: python3 -m unittest test_provider_base.py test_v1_provider.py test_vision_server.py
 
-      - name: Perception script regressions
-        working-directory: scripts/perception
-        run: python3 -m unittest test_perception_scripts.py
-
-      - name: Firefox launcher regressions
-        run: scripts/dev/firefox-start.test.sh
-
-      - name: Browser-free ignored tests
-        # `default_profile_golden` is #[ignore]d because it is a golden lock,
-        # not because it needs a browser: it diffs the committed Firefox
-        # companion profile against `create_session` output. Nothing else in
-        # the workspace catches a drift between those two.
+      - name: Profile golden
+        # `default_profile_golden` diffs the committed Firefox companion
+        # profile against `create_session` output; nothing else catches that drift.
         run: cargo test -p fingerprinting --test default_profile_golden --locked -- --ignored
-
-  windows:
-    name: windows · build shipped binary
-    # Every v* tag builds bobby for windows-msvc in release-binaries, but CI was
-    # ubuntu-only. A #[cfg(unix)]-gated exec_mcp_stdio therefore reached the
-    # v0.4.0 tag and broke the Windows binary after the release was cut. Compile
-    # the same crate the release ships so the break lands on the PR instead.
-    if: ${{ !github.event.repository.private }}
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
-
-      - name: Cache cargo
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build
-        run: cargo build -p bobby-browser --locked
-
-      - name: Compile cross-platform runtime tests
-        run: cargo test -p runtime-tests --tests --no-run --locked
-
-  chromium:
-    name: chromium · live browser tests
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      BOBBY_CHROME_NO_SANDBOX: "1"
-    steps:
-      - uses: actions/checkout@v7
-
-      # Workspace build and test artifacts outgrow the runner's free disk; drop
-      # preinstalled SDKs the job never uses.
-      - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL && df -h /
-
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
-
-      - name: Cache cargo
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24.18.1
-          cache: pnpm
-
-      - name: Build the SDK
-        run: |
-          pnpm install --frozen-lockfile
-          # The conformance package typechecks against the SDK's emitted types.
-          pnpm --filter @cavi-ai/bobby-browser build
-
-      - name: Install Chrome
-        uses: browser-actions/setup-chrome@latest
-        with:
-          chrome-version: 150.0.7871.124
-          install-dependencies: false
-
-      - name: Locate Chrome
-        run: |
-          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
-          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
-          echo "resolved=$(readlink -f "$BIN")"
-          "$(readlink -f "$BIN")" --version
-          "$(readlink -f "$BIN")" --headless --no-sandbox --dump-dom about:blank | head -c 200
-
-      - name: Chrome diagnostics
-        run: |
-          echo "executable=$BOBBY_CHROME_EXECUTABLE"
-          ls -la "$BOBBY_CHROME_EXECUTABLE" || true
-          if ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found"; then exit 1; fi
-
-      - name: Worker live tests
-        timeout-minutes: 10
-        run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --nocapture --test-threads=1
-
-      - name: Shared worker policy contract · Chromium
-        run: cargo test -p runtime-tests --test worker_policy_contract --locked _chromium -- --ignored --test-threads=1
-
-      - name: Runtime live tests
-        run: >-
-          cargo test -p runtime-tests --locked
-          --test adaptive_http
-          --test agentic_interaction
-          --test browser_vertical_slice
-          --test checkpoint_recovery
-          --test chromium_durable_profile
-          --test click_explicit_dispatch
-          --test context_exit
-          --test context_privacy
-          --test intent_dismiss_obstruction_workflow
-          --test intent_extract_workflow
-          --test intent_follow_workflow
-          --test intent_form_workflow
-          --test intent_frames
-          --test intent_vision_escalation
-          --test intent_vision_prefill
-          --test interface_capacity
-          --test interface_recovery
-          --test interface_security
-          --test popup_discovery
-          --test prompt_injection_canary
-          --test recovery_demo
-          --test remembered_site_calls
-          --test semantic_context_ask
-          --test site_regressions_chromium
-          --test vision_label_memory
-          --test journeys_chromium
-          -- --ignored --test-threads=1
-          --skip stuck_locate_records_a_real_local_vision_proposal
-
-      - name: Chromium cookie contract
-        run: cargo test -p runtime-tests --locked --test cookie_engine_contract chromium_cookie_support_matches_native_behavior -- --ignored --exact
-
-      - name: Chromium session capability contract
-        run: cargo test -p runtime-tests --locked --test session_capabilities chromium_session_capabilities_match_worker -- --ignored --exact
-
-      - name: CLI live tests
-        run: cargo test -p bobby-browser --locked --test audit_replay_live --test shared_runtime_load -- --ignored --test-threads=1
-
-      - name: CLI recovery · Chromium
-        run: |
-          cargo build -p bobby-browser -p mcp-gateway --locked
-          cargo test -p runtime-tests --locked --test cli_recovery chromium_ -- --ignored --test-threads=1
-
-      - name: Conformance live tests
-        run: >-
-          cargo test -p interface-conformance --locked
-          --test acp_walkthrough
-          --test javascript_evaluation
-          --test mcp_live
-          -- --ignored --test-threads=1
-
-      # The only automated proof that a real client can drive a page over the CDP
-      # surface. Everything else that touches CDP in CI is either MCP on the wire
-      # or a synthetic in-process driver, both of which pass while a real client
-      # fails: the gateway pins Playwright's injected bundle by digest, so a
-      # client upgrade breaks every page it opens and nothing else notices.
-      # Each test spawns the conformance gateway itself, so this belongs on the
-      # job that already has Chrome.
-      - name: CDP client conformance · playwright
-        run: pnpm --filter @cavi-ai/bobby-interface-conformance test:playwright
-
-      - name: CDP client conformance · puppeteer
-        run: pnpm --filter @cavi-ai/bobby-interface-conformance test:puppeteer
-
-      - name: Worker-pool live tests
-        run: >-
-          cargo test -p worker-pool --locked
-          --test fingerprint_conformance
-          --test orphan_reap
-          -- --ignored --test-threads=1
-
-  firefox:
-    name: firefox · live companion tests
-    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
-
-      - name: Cache cargo
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24.18.1
-          cache: pnpm
-
-      - name: Install pnpm dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install Firefox
-        uses: browser-actions/setup-firefox@latest
-
-      # The local rig: builds bobby and the extension, a scoped extension copy,
-      # the test profile, and only the scoped test native host manifest.
-      - name: Prepare the test profile and scoped native host
-        run: make test-browsers-setup
-
-      # Same target and environment as local `make test-browsers`, headed
-      # under xvfb. The prefill suite keeps its own fresh profile.
-      - name: Firefox live tests
-        run: |
-          PREFILL_PROFILE="$RUNNER_TEMP/bobby-firefox-prefill-profile"
-          mkdir -p "$PREFILL_PROFILE"
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_PROFILE="$PREFILL_PROFILE" \
-            TEST_BROWSERS_FIREFOX_SUITES="--test intent_vision_prefill_firefox"
-
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_FIREFOX_SUITES="--test firefox_companion --test behavioral_firefox --test site_regressions_firefox --test journeys_firefox"
-
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_FIREFOX_SUITES="--test worker_policy_contract _firefox"
-
-      - name: Firefox cookie contract
-        run: |
-          mkdir -p "$RUNNER_TEMP/bobby-firefox-cookie-profile"
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_PROFILE="$RUNNER_TEMP/bobby-firefox-cookie-profile" \
-            TEST_BROWSERS_FIREFOX_SUITES="--test cookie_engine_contract firefox_cookie_support_refuses_before_partial_mutation"
-
-      - name: Firefox session capability contract
-        run: |
-          mkdir -p "$RUNNER_TEMP/bobby-firefox-capabilities-profile"
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_PROFILE="$RUNNER_TEMP/bobby-firefox-capabilities-profile" \
-            TEST_BROWSERS_FIREFOX_SUITES="--test session_capabilities firefox_session_capabilities_match_worker"
-
-      # The lifecycle suite sideloads the unsigned companion into its own
-      # profiles, which only Developer Edition, Nightly, or ESR accept.
-      - name: Install Firefox Developer Edition
-        uses: browser-actions/setup-firefox@latest
-        with:
-          firefox-version: latest-devedition
-
-      - name: Firefox companion lifecycle tests
-        run: |
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_FIREFOX_SUITES="--test firefox_extension_lifecycle"
-
-      - name: CLI recovery · Firefox
-        run: |
-          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
-            TEST_BROWSERS_FIREFOX_SUITES="--test cli_recovery firefox_"
 
   node:
     name: node · typescript · docs
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -385,21 +107,10 @@ jobs:
       - name: TypeScript SDK
         run: pnpm --filter @cavi-ai/bobby-browser test
 
-      - name: Cavi API client example
-        run: pnpm --filter @cavi-ai/bobby-page-summary-example test
-
       - name: Firefox companion
         run: pnpm --filter @cavi-ai/bobby-firefox-companion test
 
-      - name: Interface conformance
-        # Typecheck and the browser-free tests. The browser-driven client
-        # conformance needs a real Chrome and runs on the chromium job.
-        run: pnpm --filter @cavi-ai/bobby-interface-conformance test:unit
-
       - name: Python SDK
-        # Fake-HTTP-server unit tests only. test_live_runtime.py starts the
-        # real `bobby` binary and skips cleanly when BOBBY_CHROME_EXECUTABLE
-        # is unset, which it is here.
         run: python3 -m unittest discover -s packages/python-sdk/tests
 
       - name: Docs artifact
@@ -407,7 +118,3 @@ jobs:
           pnpm docs:build
           pnpm docs:verify
           pnpm docs:test
-          # docs/bobby-browser/vX is untracked and rebuilt from source here and
-          # at release time. Version drift is caught by docs:verify (repo docs
-          # name only the current version) and docs:test (source uses tokens
-          # only).

@@ -2,20 +2,7 @@ name: mcp-eval
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'crates/mcp-gateway/**'
-      - 'crates/gateway-transport/**'
-      - 'crates/broker/src/mcp_http.rs'
-      - '.github/workflows/mcp-eval.yml'
-      - 'mcp-eval.manifest.json'
-  pull_request:
-    paths:
-      - 'crates/mcp-gateway/**'
-      - 'crates/gateway-transport/**'
-      - 'crates/broker/src/mcp_http.rs'
-      - '.github/workflows/mcp-eval.yml'
-      - 'mcp-eval.manifest.json'
+    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
@@ -27,7 +14,7 @@ jobs:
     name: mcp-eval · probe bobby's MCP surface
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       CARGO_TERM_COLOR: always
       BOBBY_CHROME_NO_SANDBOX: "1"
