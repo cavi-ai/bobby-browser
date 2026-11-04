@@ -66,6 +66,27 @@ async fn initialize(server: &Server) {
         .await;
 }
 
+#[tokio::test]
+async fn challenge_tools_answer_a_call_instead_of_dropping_the_connection() {
+    let server = fixture_server(vec![
+        Capability::BrowserMutate,
+        Capability::IntentExecute,
+        Capability::VisionAssist,
+    ])
+    .await;
+    for (id, name) in [(2, "intent_detect_challenge"), (3, "intent_solve_challenge")] {
+        let response = server
+            .handle_message(request(
+                id,
+                "tools/call",
+                json!({"name": name, "arguments": {"purpose": "Check the page"}}),
+            ))
+            .await
+            .expect("a tools/call gets a response");
+        assert_eq!(response["id"], id, "{name}: {response}");
+    }
+}
+
 fn request(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
 }
