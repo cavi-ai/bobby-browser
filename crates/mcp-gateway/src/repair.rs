@@ -165,6 +165,9 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
         "verificationFailed" => {
             "Read returned postState or validation detail. If the activation landed, do not repeat it blindly; correct rejected fields or re-verify with intent_wait_for_state."
         }
+        "verificationCodeRequired" => {
+            "The submit landed and the page now asks for a one-time code. Get the code from the inbox or phone the page names (your own mail or SMS tool), then call intent_enter_code. Do not resubmit the sign-in."
+        }
         "journalFailed" => {
             "Resubmit with the same idempotency key; if the status is needsReconciliation, call recovery_status first and never retry the command."
         }

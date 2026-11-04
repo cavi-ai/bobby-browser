@@ -1923,6 +1923,23 @@
             "kind",
             "input"
           ]
+        },
+        {
+          "description": "Enters a one-time code into the code step a page is showing and, by\ndefault, submits it. The code is a credential and never leaves the\ncommand: it is redacted from evidence, errors and the journal.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "enterCode"
+            },
+            "input": {
+              "$ref": "#/$defs/EnterCodeIntent"
+            }
+          },
+          "required": [
+            "kind",
+            "input"
+          ]
         }
       ]
     },
@@ -2403,6 +2420,48 @@
           "default": 15000
         }
       }
+    },
+    "EnterCodeIntent": {
+      "description": "Enter a one-time code into the code step the page shows (one field, or one\ncharacter per box) and, when `submit` is set, submit it.\n\nBoundary when it submits: a code consumed by the page cannot be replayed.\nVerification is built in: the entered value is read back from each field,\nthen `expected_state` must hold, or the page must leave the code step.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/OneTimeCode"
+        },
+        "hints": {
+          "$ref": "#/$defs/IntentHints",
+          "default": {
+            "role": null,
+            "nearText": null,
+            "accessibleName": null,
+            "ordinal": null,
+            "framePath": [],
+            "shadowPath": [],
+            "allowBestMatch": false
+          }
+        },
+        "submit": {
+          "type": "boolean",
+          "default": true
+        },
+        "expectedState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WaitForCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ]
+    },
+    "OneTimeCode": {
+      "description": "A one-time code. Serializes as a plain string and never prints: `Debug`\nredacts it so a logged command cannot leak the credential.",
+      "type": "string"
     }
   }
 }

@@ -53,6 +53,7 @@ await client.submit(
 | `follow` | `intent_follow` | Reconciliable, Boundary with `boundary: true` | Activates a control and verifies the result |
 | `waitForState` | `intent_wait_for_state` | Replayable | Waits for a page condition |
 | `dismissObstruction` | `intent_dismiss_obstruction` | Reconciliable | Closes a popup, overlay or cookie banner |
+| `enterCode` | `intent_enter_code` | Boundary with `submit` (default), else Reconciliable | Enters a one-time code on a code step and submits it |
 | `extract` | `intent_extract` | Replayable | Reads named fields without changing the page |
 | `detectChallenge` | `intent_detect_challenge` | Replayable | Classifies a captcha or verification challenge |
 | `solveChallenge` | `intent_solve_challenge` | Reconciliable | Runs the vision solve loop on a challenge |
@@ -144,6 +145,12 @@ A fill succeeds only with postcondition evidence. It also reads the browser's co
 - `validationRejected`: fix the fields listed in `formValidation` (control, kind, name, target, validity, never values) and do not resubmit blindly.
 
 A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`.
+
+## One-time codes
+
+When a submit does not reach `expectedState` and the page now asks for a one-time code, the result is `verificationCodeRequired` (not retryable) instead of `verificationFailed`. A code step is a field with `autocomplete="one-time-code"`, a run of 4 to 8 adjacent one-character inputs, or a field whose label or placeholder names a verification, one-time or passcode code, with page text that says a code was sent. The `codeEntry` evidence lists the field targets (`role`, `accessibleName`, `ordinal`), the code length when the page states it, and `destinationHint`, the page's own line about where the code went (page-derived text).
+
+Read the code from your own mail or SMS tool (bobby never reads either), then call `intent_enter_code` with `code`. Spaces and dashes are removed. It fills the field, or one character per box, reads the values back, then presses the step's submit control (or Enter) unless `submit` is `false`, and verifies `expectedState` or that the page left the code step. `hints` names the field when the page shows several. A wrong or expired code fails `verificationFailed`; the code is never echoed in evidence, errors or the journal.
 
 ## Wait conditions
 

@@ -104,6 +104,7 @@ function evidenceFixtures(): Evidence[] {
     { kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: "link", target: { role: "link", accessibleName: "Docs", framePath: [{ role: "iframe", accessibleName: "Content", ordinal: null }] }, url: "https://example.test/docs" }], truncated: false, pageDerived: true },
     { kind: "formSnapshot", snapshot: { schemaVersion: 1, pageId: ID, forms: [], unownedControls: [], truncated: false } },
     { kind: "formValidation", issues: [{ controlId: "email", controlKind: "email", accessibleName: "Email", target: null, validity: { willValidate: true, valid: false, flags: ["valueMissing"], message: "Required", describedBy: [] } }] },
+    { kind: "codeEntry", fields: [{ role: "textbox", accessibleName: "Verification code" }], codeLength: 6, destinationHint: "We sent a code to a***@example.test" },
     { kind: "controlAction", action: { operation: "setChecked", target: { role: "checkbox", accessibleName: "Business" }, state: { kind: "checked", checked: true }, validity: { willValidate: true, valid: true }, nodeReplaced: false, revealedControls: [{ controlKind: "text", accessibleName: "Company", target: { role: "textbox", accessibleName: "Company" } }] } },
     { kind: "structuredExtraction", pageId: ID, value: { title: "Example" }, truncated: false, pageDerived: true },
     { kind: "challengeDetection", confidence: 0.9, detection: { challenge_type: "recaptchaV2Checkbox", confidence: 0.8, region: { x: 1, y: 2, width: 3, height: 4 }, blocking: true, hints: { target_field_purpose: "Verify", instruction_text: "Check the box" } }, priorKind: "recaptchaV2Checkbox" },
@@ -197,7 +198,7 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false, passwordManager: false } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
 
-  assert.equal(new Set(evidenceFixtures().map((evidence) => evidence.kind)).size, 32);
+  assert.equal(new Set(evidenceFixtures().map((evidence) => evidence.kind)).size, 33);
   for (const evidence of evidenceFixtures()) {
     assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [evidence] }), true, JSON.stringify(evidence));
   }

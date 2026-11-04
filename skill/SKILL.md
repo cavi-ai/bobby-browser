@@ -126,6 +126,9 @@ calls. Rules that govern every call:
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.
+- A submit returns `verificationCodeRequired` (the page asks for a one-time
+  code): read the code from your own mail or SMS tool, then call
+  `intent_enter_code`. bobby never reads mail itself; do not resubmit.
 - **A captcha or verification widget blocks the page:**
   `intent_detect_challenge` (widen to `intent` or `full` with
   `toolset_select`) classifies it read-only; `intent_solve_challenge` runs
@@ -176,6 +179,7 @@ calls. Rules that govern every call:
 | `authenticationFailed` / `tokenExpired` | Credential bad or expired | Operator re-runs `bobby init --force`; reconnect |
 | `targetNotFound` / `targetAmbiguous` | Stale or guessed target | Fresh `a11y_snapshot`; pass the new target verbatim |
 | `verificationFailed` | Action ran; expected state not proven | Re-inspect; adjust expectation or fill; do not blind-retry |
+| `verificationCodeRequired` | Submit landed; page asks for a one-time code | Get the code from the inbox or phone the page names, call `intent_enter_code`; do not resubmit |
 | `boundaryAlreadyExecuted` | A prior submit for this workflow + control completed | Inspect the named prior outcome; pass `reSubmit: true` only for a genuinely intended second effect on the same control |
 | `needsReconciliation` | Side effect may already have landed | Call `recovery_status`; never retry the Boundary command |
 | `targetDetached` / page-level `notFound` | Transport reset or stale page | Reattach/relaunch already handled; re-observe, continue with current ids |

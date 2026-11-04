@@ -100,6 +100,9 @@ macro_rules! every_case {
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
             a_download_from_a_covered_control_fails_obscured,
+            a_submit_landing_on_a_code_field_asks_for_the_code,
+            a_split_code_takes_one_character_per_box,
+            a_wrong_code_fails_without_echoing_it,
             $($extra,)*
         }
     };
@@ -5257,6 +5260,253 @@ pub async fn password_manager_fill_requires_the_session_opt_in(rig: &Rig) {
     assert!(
         idle.to_string().contains("idle"),
         "the menu was driven without opt-in: {idle}"
+    );
+    live.close().await;
+}
+
+/// The code the fixture code steps accept.
+const GOOD_CODE: &str = "482913";
+
+/// A sign-in whose submit lands on a code step. `step` is the markup the code
+/// step shows; `verify` is script that calls `accept()` or `reject()` for
+/// the entered code.
+fn code_step_page(step: &str, verify: &str) -> String {
+    let body = format!(
+        r#"<main id="app"><form id="signin"><label>Email <input type="email" id="email"></label>
+        <button type="submit">Continue</button></form></main>
+        <script>
+          const app = document.getElementById("app");
+          const accept = () => {{
+            history.pushState({{}}, "", "/home");
+            app.innerHTML = "<h1>Signed in</h1><p id='welcome'>Welcome back</p>";
+          }};
+          const reject = () => {{
+            document.getElementById("note").textContent = "That code is incorrect";
+          }};
+          app.addEventListener("submit", (event) => {{
+            event.preventDefault();
+            if (event.target.id === "signin") {{
+              app.innerHTML = {step:?};
+            }} else {{
+              check();
+            }}
+          }});
+          let check = () => {{}};
+          {verify}
+        </script>"#
+    );
+    page("Sign in", &body)
+}
+
+fn url_contains_home() -> Value {
+    json!({"condition":{"kind":"url","matcher":{"kind":"contains","value":"/home"}},"timeoutMs":3000})
+}
+
+async fn submit_sign_in(live: &Live<'_>) -> Value {
+    live.call(
+        "intent_submit_and_verify",
+        json!({
+            "purpose":"Continue sign-in",
+            "hints":{"role":"button","accessibleName":"Continue"},
+            "expectedState": url_contains_home()
+        }),
+    )
+    .await
+}
+
+fn assert_code_required(result: &Value) {
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(
+        result["error"]["code"], "verificationCodeRequired",
+        "{result}"
+    );
+    assert_eq!(result["error"]["retryable"], false, "{result}");
+    assert_eq!(
+        result["error"]["repair"]["doc"], "bobby://failure-taxonomy",
+        "{result}"
+    );
+    assert!(
+        result["error"]["repair"]["action"]
+            .as_str()
+            .is_some_and(|action| action.contains("intent_enter_code")),
+        "{result}"
+    );
+}
+
+fn code_entry(result: &Value) -> &Value {
+    let mut found = Vec::new();
+    objects_of_kind(result, "codeEntry", &mut found);
+    found
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no codeEntry evidence: {result}"))
+}
+
+/// A submit that lands on a single code field is `verificationCodeRequired`
+/// with the field, its length and the page's own destination line; the code
+/// then goes in through `intent_enter_code`, which never echoes it.
+pub async fn a_submit_landing_on_a_code_field_asks_for_the_code(rig: &Rig) {
+    let step = r#"<h1>Check your email</h1><p>We sent a code to a***@example.com</p>
+        <form id="verify"><label for="code">Verification code</label>
+        <input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+        <button type="submit">Verify</button></form><p id="note"></p>"#;
+    let verify = format!(
+        r#"check = () => {{
+          document.getElementById("code").value === "{GOOD_CODE}" ? accept() : reject();
+        }};"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let submitted = submit_sign_in(&live).await;
+    assert_code_required(&submitted);
+    let entry = code_entry(&submitted);
+    assert_eq!(
+        entry["fields"],
+        json!([{"role":"textbox","accessibleName":"Verification code"}]),
+        "{submitted}"
+    );
+    assert_eq!(entry["codeLength"], 6, "{submitted}");
+    assert_eq!(
+        entry["destinationHint"], "We sent a code to a***@example.com",
+        "{submitted}"
+    );
+    assert_eq!(submitted["pageDerived"], true, "{submitted}");
+
+    let entered = live
+        .call(
+            "intent_enter_code",
+            json!({"code":"482 913","expectedState": url_contains_home()}),
+        )
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    let text = entered.to_string();
+    assert!(
+        !text.contains(GOOD_CODE) && !text.contains("482 913"),
+        "code echoed: {text}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page.to_string().contains("Welcome back"), "{page}");
+    live.close().await;
+}
+
+/// Six one-character boxes that move focus on input: the targets come back in
+/// visual order and the code is typed one character per box, then submitted
+/// with Enter because the step has no button.
+pub async fn a_split_code_takes_one_character_per_box(rig: &Rig) {
+    let mut boxes = String::new();
+    for index in 1..=6 {
+        boxes.push_str(&format!(
+            r#"<input class="digit" aria-label="Digit {index}" inputmode="numeric" maxlength="1">"#
+        ));
+    }
+    let step = format!(
+        r#"<h1>Enter the code</h1><p>We sent a code to your phone ending in 42</p>
+        <div id="boxes">{boxes}</div><p id="note"></p>"#
+    );
+    let verify = format!(
+        r#"app.addEventListener("input", (event) => {{
+          const digits = [...document.querySelectorAll(".digit")];
+          const at = digits.indexOf(event.target);
+          if (at >= 0 && event.target.value && digits[at + 1]) digits[at + 1].focus();
+        }});
+        app.addEventListener("keydown", (event) => {{
+          if (event.key !== "Enter" || !event.target.classList.contains("digit")) return;
+          const typed = [...document.querySelectorAll(".digit")].map((box) => box.value).join("");
+          typed === "{GOOD_CODE}" ? accept() : reject();
+        }});"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(&step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let submitted = submit_sign_in(&live).await;
+    assert_code_required(&submitted);
+    let entry = code_entry(&submitted);
+    let names: Vec<_> = entry["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .map(|field| {
+            field["accessibleName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["Digit 1", "Digit 2", "Digit 3", "Digit 4", "Digit 5", "Digit 6"],
+        "{submitted}"
+    );
+    assert_eq!(entry["codeLength"], 6, "{submitted}");
+
+    let entered = live
+        .call("intent_enter_code", json!({"code":"482-913"}))
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    assert!(
+        !entered.to_string().contains(GOOD_CODE),
+        "code echoed: {entered}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page.to_string().contains("Welcome back"), "{page}");
+    live.close().await;
+}
+
+/// A wrong code fails verification and the page keeps its code step; the
+/// right code then gets through. The code never appears in either result.
+pub async fn a_wrong_code_fails_without_echoing_it(rig: &Rig) {
+    let step = r#"<h1>Check your email</h1><p>We sent a code to a***@example.com</p>
+        <form id="verify"><label for="code">Verification code</label>
+        <input id="code" autocomplete="one-time-code" maxlength="6">
+        <button type="submit">Verify</button></form><p id="note"></p>"#;
+    let verify = format!(
+        r#"check = () => {{
+          document.getElementById("code").value === "{GOOD_CODE}" ? accept() : reject();
+        }};"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    assert_code_required(&submit_sign_in(&live).await);
+
+    let wrong = live
+        .call(
+            "intent_enter_code",
+            json!({"code":"111222","expectedState": url_contains_home()}),
+        )
+        .await;
+    assert_eq!(wrong["status"], "failed", "{wrong}");
+    assert_eq!(wrong["error"]["code"], "verificationFailed", "{wrong}");
+    assert!(
+        !wrong.to_string().contains("111222"),
+        "code echoed: {wrong}"
+    );
+    assert_eq!(
+        code_entry(&wrong)["fields"],
+        json!([{"role":"textbox","accessibleName":"Verification code"}]),
+        "the failed result does not name the field to retry: {wrong}"
+    );
+
+    let right = live
+        .call(
+            "intent_enter_code",
+            json!({"code":GOOD_CODE,"expectedState": url_contains_home()}),
+        )
+        .await;
+    assert_eq!(right["status"], "completed", "{right}");
+    assert!(
+        !right.to_string().contains(GOOD_CODE),
+        "code echoed: {right}"
     );
     live.close().await;
 }

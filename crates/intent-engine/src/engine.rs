@@ -1,3 +1,4 @@
+mod enter_code;
 mod locate;
 use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 
@@ -201,6 +202,15 @@ pub trait IntentBrowser: Send + Sync {
         })
     }
 
+    /// Bounded snapshot of the page's form controls, for recognizing a
+    /// one-time-code step. Runtimes that cannot read one report `None`.
+    async fn form_snapshot(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Option<types::FormSnapshot>, CommandError> {
+        Ok(None)
+    }
+
     /// Compact, value-free invalid-control evidence after a soft submit wait.
     /// An empty vector means the settled page did not retain a rejected form.
     async fn validation_issues(
@@ -311,6 +321,24 @@ impl IntentEngine {
                 purpose,
                 timeout_ms,
             } => execute_detect_challenge(page_id, browser, vision, purpose, timeout_ms).await,
+            IntentPlan::EnterCode {
+                code,
+                hints,
+                submit,
+                expected_state,
+            } => {
+                enter_code::execute_enter_code(
+                    page_id,
+                    browser,
+                    enter_code::EnterCodeRequest {
+                        code: &code,
+                        hints: &hints,
+                        submit,
+                        expected_state,
+                    },
+                )
+                .await
+            }
         }
     }
 }
@@ -2338,6 +2366,40 @@ async fn execute_submit_and_verify(
             // the POST. Rewrap so the effect and the safe next step are
             // explicit.
             let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
+            // A submit that lands on a one-time-code step is the next step of
+            // the sign-in, not a failure to repair: say so, with where the
+            // code goes.
+            if let Some(step) = enter_code::read_code_step(page_id, browser, None)
+                .await
+                .ok()
+                .flatten()
+            {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VerificationCodeRequired,
+                        message: "the submit landed and the page now asks for a one-time code \
+                                  instead of reaching the expected state; get the code from the \
+                                  inbox or phone the page names, then call intent_enter_code"
+                            .into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: {
+                        let mut evidence = vec![resolution];
+                        evidence.append(&mut click_evidence);
+                        evidence.push(step.evidence());
+                        evidence.push(intent_evidence(execution_record(
+                            "submitAndVerify",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "codeRequired",
+                        )));
+                        evidence
+                    },
+                };
+            }
             let error = CommandError {
                 code: ErrorCode::VerificationFailed,
                 message: format!(

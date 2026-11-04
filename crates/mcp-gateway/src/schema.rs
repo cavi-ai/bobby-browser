@@ -338,6 +338,19 @@ pub(crate) fn intent_dismiss_obstruction_schema() -> (Value, Vec<&'static str>) 
     )
 }
 
+pub(crate) fn intent_enter_code_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_scope(json!({
+            "code":string(1, 64),
+            "hints":{"$ref":"#/$defs/IntentHints"},
+            "submit":{"type":"boolean"},
+            "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+            "autoCheckpoint":{"type":"boolean"}
+        })),
+        intent_required(&["code"]),
+    )
+}
+
 pub(crate) fn intent_extract_schema() -> (Value, Vec<&'static str>) {
     (
         without_property(
@@ -758,6 +771,10 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("download_url", "saveAs") => "Absolute path to save the file to.",
         ("download_url", "expectedContentType") => "Content type the response must have.",
         ("intent_complete_form", "fields") => "Fields to fill, in order.",
+        ("intent_enter_code", "code") => "The code. Spaces and dashes are ignored.",
+        ("intent_enter_code", "hints") => "Names the code field; omit to use the one the page shows.",
+        ("intent_enter_code", "submit") => "Press the step's submit control; default true.",
+        ("intent_enter_code", "expectedState") => "Wait that proves the code was accepted; default is the page leaving the code step.",
         ("intent_extract", "fields") => "Named fields to read.",
         ("intent_extract" | "extract_structured", "purpose") => "What to extract, in plain words.",
         ("extract_structured", "schema") => "JSON Schema the extracted value must match.",
@@ -2237,6 +2254,18 @@ fn intent_commands() -> Vec<Value> {
             ),
         ),
         tagged_input(
+            "enterCode",
+            object(
+                json!({
+                    "code":string(1, 64),
+                    "hints":{"$ref":"#/$defs/IntentHints"},
+                    "submit":{"type":"boolean"},
+                    "expectedState":{"$ref":"#/$defs/WaitForCommand"}
+                }),
+                &["code"],
+            ),
+        ),
+        tagged_input(
             "extract",
             object(
                 json!({
@@ -2934,6 +2963,15 @@ fn evidence_variants() -> Vec<Value> {
             json!({"issues":array(json!({"$ref":"#/$defs/FormValidationIssue"}), 512)}),
             &["issues"],
         ),
+        tagged_fields(
+            "codeEntry",
+            json!({
+                "fields":array(json!({"$ref":"#/$defs/FormControlTarget"}), 8),
+                "codeLength":{"type":"integer","minimum":1},
+                "destinationHint":string(0,MAX_STRING_BYTES)
+            }),
+            &["fields"],
+        ),
         tagged_fields("controlAction", json!({"action":any_value()}), &["action"]),
         tagged_fields(
             "emulation",
@@ -3070,7 +3108,7 @@ fn error_code() -> Value {
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
         "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
-        "expectedStatePreSatisfied","boundaryAlreadyExecuted"
+        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired"
     ]})
 }
 

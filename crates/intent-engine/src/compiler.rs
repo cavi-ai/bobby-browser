@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use thiserror::Error;
 use types::{
     ControlAction, ExtractValueKind, IntentCommand, IntentHints, TargetSpec, TextMatch,
-    WaitCondition, WaitForCommand, MAX_INTENT_PURPOSE_BYTES,
+    WaitCondition, WaitForCommand, MAX_INTENT_PURPOSE_BYTES, MAX_ONE_TIME_CODE_CHARS,
 };
 
 const MAX_FORM_FIELDS: usize = 128;
@@ -48,6 +48,12 @@ pub enum IntentPlan {
         purpose: String,
         timeout_ms: u64,
     },
+    EnterCode {
+        code: types::OneTimeCode,
+        hints: IntentHints,
+        submit: bool,
+        expected_state: Option<WaitForCommand>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +96,8 @@ pub enum CompileError {
     EmptyFieldName,
     #[error("duplicate extract field name: {0}")]
     DuplicateFieldName(String),
+    #[error("the code must be 1 to {MAX_ONE_TIME_CODE_CHARS} printable characters once spaces and dashes are removed")]
+    InvalidCode,
     #[error("hints set accessibleName and a nearText other than the same exact name")]
     ConflictingNameHints,
 }
@@ -222,6 +230,28 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
             Ok(IntentPlan::DetectChallenge {
                 purpose: purpose.into(),
                 timeout_ms: intent.hints.timeout_ms.max(1),
+            })
+        }
+        IntentCommand::EnterCode(intent) => {
+            let code = intent.code.normalized();
+            if code.is_empty()
+                || code.chars().count() > MAX_ONE_TIME_CODE_CHARS
+                || code.chars().any(char::is_control)
+            {
+                return Err(CompileError::InvalidCode);
+            }
+            if let (Some(name), Some(near)) =
+                (&intent.hints.accessible_name, &intent.hints.near_text)
+            {
+                if !matches!(near, TextMatch::Exact(exact) if exact == name) {
+                    return Err(CompileError::ConflictingNameHints);
+                }
+            }
+            Ok(IntentPlan::EnterCode {
+                code: intent.code.clone(),
+                hints: intent.hints.clone(),
+                submit: intent.submit,
+                expected_state: intent.expected_state.clone(),
             })
         }
     }

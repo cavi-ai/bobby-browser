@@ -279,6 +279,14 @@ intent_args!(IntentDismissObstructionArgs {
     timeout_ms: Option<u64>,
 });
 
+intent_args!(IntentEnterCodeArgs {
+    code: String,
+    hints: Option<types::IntentHints>,
+    submit: Option<bool>,
+    expected_state: Option<types::WaitForCommand>,
+    auto_checkpoint: Option<bool>,
+});
+
 intent_args!(IntentExtractArgs {
     purpose: String,
     fields: Vec<types::ExtractField>,

@@ -1,3 +1,4 @@
+mod code_entry;
 mod compiler;
 mod corpus;
 mod engine;

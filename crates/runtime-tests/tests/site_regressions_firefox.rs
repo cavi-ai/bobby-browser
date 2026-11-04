@@ -101,3 +101,12 @@ async fn bounded_frame_snapshot_regressions() {
     cases::a_bounded_snapshot_lists_frames_in_document_order(&rig).await;
     cases::snapshot_frame_owners_ignore_nested_frames_with_the_same_name(&rig).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn one_time_code_steps() {
+    let rig = Rig::firefox().await;
+    cases::a_submit_landing_on_a_code_field_asks_for_the_code(&rig).await;
+    cases::a_split_code_takes_one_character_per_box(&rig).await;
+    cases::a_wrong_code_fails_without_echoing_it(&rig).await;
+}
