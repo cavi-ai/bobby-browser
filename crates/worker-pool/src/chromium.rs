@@ -264,6 +264,8 @@ pub struct ChromiumWorkerFactory {
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
+    /// Credentials its workers fill by name, each on its own origin only.
+    credentials: Vec<config::CredentialConfig>,
 }
 
 impl ChromiumWorkerFactory {
@@ -280,6 +282,7 @@ impl ChromiumWorkerFactory {
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
+            credentials: Vec::new(),
         }
     }
 
@@ -295,11 +298,18 @@ impl ChromiumWorkerFactory {
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
+            credentials: Vec::new(),
         }
     }
 
     pub fn with_fingerprint(mut self, fingerprint: FingerprintConfig) -> Self {
         self.fingerprint = fingerprint;
+        self
+    }
+
+    /// Credentials the workers may fill, by name, on their configured origins.
+    pub fn with_credentials(mut self, credentials: Vec<config::CredentialConfig>) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -444,6 +454,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             pid_registry_path,
             debug_ws_url: Some(browser.websocket_address().clone()),
             upload_roots: self.config.upload_roots.clone(),
+            credentials: self.credentials.clone(),
             download_dir,
             upload_cache: Mutex::new(crate::upload::UploadCache::default()),
             session_id: session_id.clone(),
@@ -535,6 +546,7 @@ struct ChromiumWorker {
     /// transport-only failure, preserving all page state.
     debug_ws_url: Option<String>,
     upload_roots: Vec<PathBuf>,
+    credentials: Vec<config::CredentialConfig>,
     download_dir: PathBuf,
     upload_cache: Mutex<crate::upload::UploadCache>,
     session_id: SessionId,
@@ -2851,6 +2863,24 @@ impl crate::InputEngine for ChromiumWorker {
                 _ => resolved.clear_control(&page).await?,
             },
             ControlAction::Activate => resolved.click(&page).await?,
+            ControlAction::Credential { name } => {
+                let origin = resolved.document_origin(&page).await?;
+                let credential = crate::credentials::select(&self.credentials, name, &origin)?;
+                let secret = crate::credentials::resolve(credential).await?;
+                // The command can wait on an unlock; the page may have moved on.
+                if resolved.document_origin(&page).await? != origin {
+                    return Err(driver_error(
+                        ErrorCode::PolicyDenied,
+                        "the field's page changed origin while its credential was read",
+                    ));
+                }
+                if !resolved.fill_secret(&page, &secret.fill_script()).await? {
+                    return Err(driver_error(
+                        ErrorCode::IntentActionMismatch,
+                        "a credential fills only a password field",
+                    ));
+                }
+            }
             ControlAction::PasswordManagerFill => {
                 // Only watches: the field is never clicked, focused or typed
                 // into, which would raise the browser's own credential dialogs.
@@ -5064,6 +5094,7 @@ mod tests {
             pid_registry_path: None,
             debug_ws_url: None,
             upload_roots: Vec::new(),
+            credentials: Vec::new(),
             download_dir: root.join("downloads"),
             upload_cache: super::Mutex::new(crate::upload::UploadCache::default()),
             session_id: SessionId::new(),

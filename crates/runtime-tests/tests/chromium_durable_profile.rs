@@ -94,6 +94,7 @@ fn config(root: &Path, context_dir: Option<&Path>) -> config::AppConfig {
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         context: config::ContextConfig {
             dir: context_dir.map(Path::to_path_buf),
             ..config::ContextConfig::default()

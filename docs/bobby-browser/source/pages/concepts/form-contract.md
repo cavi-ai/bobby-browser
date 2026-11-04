@@ -49,6 +49,7 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 | `clear` | `{kind}` | Empty the control |
 | `activate` | `{kind}` | Activate a link or button |
 | `passwordManagerFill` | `{kind}` | Watch a text, email or password field for the browser password manager's fill; the field is never clicked, focused or typed into. The `fill` and `completeForm` intents first click the manager's own prompt: on Chromium, 1Password's prompt frame directly; any other manager's prompt, found with vision. Needs `executionPolicy.passwordManager`; the filled value is never returned |
+| `credential` | `{kind, name}` | Fill a password field with the secret of the [`[[credentials]]`](../guides/configuration.md#credentials) entry `name`, only when the field's page origin is that entry's `origin`. The field is set and gets `input` and `change` events; it is never clicked, focused or typed into. Needs `executionPolicy.passwordManager`; the secret is never returned, logged or journaled |
 
 The `fill` and `completeForm` intents use the same vocabulary, without `activate`. See [Intent commands](../guides/intents.md).
 

@@ -2069,6 +2069,17 @@ async fn act_fill(
                 )
                 .await
         }
+        ControlAction::Credential { .. } => {
+            browser
+                .control_action(
+                    page_id,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: value.clone(),
+                    },
+                )
+                .await
+        }
         ControlAction::Activate => Err(CommandError {
             code: ErrorCode::InvalidRequest,
             message: "activate is not valid for fill; use control_action instead".into(),
@@ -2206,6 +2217,7 @@ fn fill_kind(value: &ControlAction) -> &'static str {
         ControlAction::Clear => "clear",
         ControlAction::Activate => "activate",
         ControlAction::PasswordManagerFill => "passwordManagerFill",
+        ControlAction::Credential { .. } => "credential",
     }
 }
 
@@ -5256,7 +5268,8 @@ async fn execute_vision_action(
                 ControlAction::SelectOne { .. }
                 | ControlAction::SelectMany { .. }
                 | ControlAction::SetChecked { .. }
-                | ControlAction::Clear => {
+                | ControlAction::Clear
+                | ControlAction::Credential { .. } => {
                     let control_target = FormControlTarget {
                         attributes: Default::default(),
                         role: target.role.clone().unwrap_or_default(),

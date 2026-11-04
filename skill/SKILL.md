@@ -117,6 +117,13 @@ calls. Rules that govern every call:
   dialog. A `passwordManagerSubmitted` record means the manager also submitted
   the form: `workflow_observe` before any `intent_submit_and_verify`. Without
   the opt-in it is `policyDenied`.
+- **A sign-in with a configured credential:** with
+  `executionPolicy: {passwordManager: true}`, one `intent_fill` with hints for
+  the password field and `value: {kind: "credential", name}`. bobby fills the
+  operator's secret only on the origin it is configured for, without focusing
+  the field, and it never comes back. `invalidRequest` lists the names
+  configured for the page's origin; `policyDenied` means that name belongs to
+  another origin.
 - **A control the accessibility tree does not name** (a button drawn on a
   canvas): with `visionAssist` and a detector configured, the vision window of
   an intent that clicks also offers detected on-screen controls, and a picked

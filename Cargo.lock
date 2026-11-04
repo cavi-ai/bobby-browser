@@ -5920,6 +5920,7 @@ dependencies = [
  "tracing",
  "types",
  "url",
+ "zeroize",
 ]
 
 [[package]]

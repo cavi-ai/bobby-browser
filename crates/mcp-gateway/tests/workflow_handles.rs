@@ -2335,6 +2335,7 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
     let config = config::AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

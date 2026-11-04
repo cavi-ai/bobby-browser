@@ -757,6 +757,7 @@ pub struct FirefoxCompanionFactory {
     observer: Arc<dyn ExtensionObserver>,
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
+    credentials: Vec<config::CredentialConfig>,
     downloads_dir: Option<PathBuf>,
     shared_transport: Option<BidiClient>,
 }
@@ -777,6 +778,7 @@ impl FirefoxCompanionFactory {
             observer,
             artifacts: None,
             upload_roots: Vec::new(),
+            credentials: Vec::new(),
             downloads_dir: None,
             shared_transport: None,
         }
@@ -797,6 +799,12 @@ impl FirefoxCompanionFactory {
 
     pub fn with_upload_roots(mut self, upload_roots: Vec<PathBuf>) -> Self {
         self.upload_roots = upload_roots;
+        self
+    }
+
+    /// Credentials it may fill, by name, on their configured origins.
+    pub fn with_credentials(mut self, credentials: Vec<config::CredentialConfig>) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -833,6 +841,7 @@ impl WorkerFactory for FirefoxCompanionFactory {
         worker.session_id = Some(session_id.clone());
         worker.artifacts = self.artifacts.clone();
         worker.upload_roots = self.upload_roots.clone();
+        worker.credentials = self.credentials.clone();
         worker.downloads_dir = self.downloads_dir.clone();
         Ok(Arc::new(worker))
     }
@@ -926,6 +935,7 @@ pub struct FirefoxCompanionWorker {
     session_id: Option<SessionId>,
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
+    credentials: Vec<config::CredentialConfig>,
     downloads_dir: Option<PathBuf>,
     session_random: TaskMutex<SessionRandom>,
     upload_cache: Arc<AsyncMutex<worker_pool::upload::UploadCache>>,
@@ -1353,6 +1363,27 @@ impl FirefoxCompanionWorker {
     pub fn with_upload_roots(mut self, upload_roots: Vec<PathBuf>) -> Self {
         self.upload_roots = upload_roots;
         self
+    }
+
+    /// Credentials it may fill, by name, on their configured origins.
+    pub fn with_credentials(mut self, credentials: Vec<config::CredentialConfig>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// The origin of browsing context `context`, from the browser's own tree;
+    /// page scripts cannot change it.
+    async fn context_origin(&self, context: &str) -> Result<String, CommandError> {
+        context_url(&self.transport, context)
+            .await
+            .and_then(|url| worker_pool::credentials::serialized_origin(&url))
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::PolicyDenied,
+                    "the field's page has no origin a credential can match",
+                    false,
+                )
+            })
     }
 
     /// Puts each remote frame's subtree, built by that frame's own content
@@ -1857,6 +1888,7 @@ impl FirefoxCompanionWorker {
             session_id: None,
             artifacts: None,
             upload_roots: Vec::new(),
+            credentials: Vec::new(),
             downloads_dir: None,
             session_random,
             upload_cache: Arc::new(AsyncMutex::new(worker_pool::upload::UploadCache::default())),
@@ -5125,6 +5157,22 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             }
             ControlAction::Clear => {
                 self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio'))el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+            }
+            ControlAction::Credential { name } => {
+                let origin = self.context_origin(&context).await?;
+                let credential =
+                    worker_pool::credentials::select(&self.credentials, name, &origin)?;
+                let secret = worker_pool::credentials::resolve(credential).await?;
+                // The command can wait on an unlock; the page may have moved on.
+                if self.context_origin(&context).await? != origin {
+                    return Err(driver_error(
+                        ErrorCode::PolicyDenied,
+                        "the field's page changed origin while its credential was read",
+                        false,
+                    ));
+                }
+                self.evaluate_control_script(page_id, &target, &secret.fill_script())
+                    .await?;
             }
             // Only watches: the field is never clicked, focused or typed into,
             // which would raise the browser's own credential dialogs.

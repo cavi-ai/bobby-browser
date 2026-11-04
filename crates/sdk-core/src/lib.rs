@@ -217,7 +217,10 @@ impl RuntimeService {
     }
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
-        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        let factory = Arc::new(
+            ChromiumWorkerFactory::new(config.browser.clone())
+                .with_credentials(config.credentials.clone()),
+        );
         Self::build_inner(config, factory, None, None, None).await
     }
 
@@ -226,7 +229,10 @@ impl RuntimeService {
         config: &AppConfig,
         assist: Arc<dyn VisionAssist>,
     ) -> Result<Self, RuntimeError> {
-        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        let factory = Arc::new(
+            ChromiumWorkerFactory::new(config.browser.clone())
+                .with_credentials(config.credentials.clone()),
+        );
         Self::build_inner(config, factory, None, Some(assist), None).await
     }
 
@@ -308,7 +314,10 @@ impl RuntimeService {
         config: &AppConfig,
         observer: Arc<dyn ExecutionPhaseObserver>,
     ) -> Result<Self, RuntimeError> {
-        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        let factory = Arc::new(
+            ChromiumWorkerFactory::new(config.browser.clone())
+                .with_credentials(config.credentials.clone()),
+        );
         Self::build_inner(config, factory, Some(observer), None, None).await
     }
 

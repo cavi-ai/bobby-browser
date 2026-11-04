@@ -5234,6 +5234,180 @@ pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
     live.close().await;
 }
 
+/// The secret the fixture credential command prints.
+const CREDENTIAL_SECRET: &str = "fixture-Pass-42";
+
+/// A login form whose submit uses the password its own `input` listener saw,
+/// as a framework-controlled form does: a value set without input events
+/// signs nothing in. Focusing a field is recorded.
+fn credential_page() -> String {
+    page(
+        "Sign in",
+        &format!(
+            r#"<form id="login">
+            <label>Email <input id="user" type="email" autocomplete="username"></label>
+            <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+            <button>Sign in</button>
+        </form>
+        <p role="status" aria-label="Result" id="result">idle</p>
+        <p role="status" aria-label="Field" id="field">untouched</p>
+        <script>
+            let typed = "";
+            pass.addEventListener("input", () => {{ typed = pass.value; }});
+            pass.addEventListener("focus", () => {{ field.textContent = "touched"; }});
+            login.addEventListener("submit", (event) => {{
+                event.preventDefault();
+                result.textContent = typed === "{CREDENTIAL_SECRET}" ? "signed in" : "rejected " + typed.length;
+            }});
+        </script>"#
+        ),
+    )
+}
+
+/// A login site, the credentials a rig built after it is configured with,
+/// and the log their commands append to when they run.
+pub struct CredentialFixture {
+    pub site: FixtureSite,
+    pub credentials: Vec<config::CredentialConfig>,
+    run_log: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+pub async fn credential_fixture() -> CredentialFixture {
+    let site = FixtureSite::spawn(vec![("/login", Route::Html(credential_page()))]).await;
+    let dir = tempfile::tempdir().expect("credential command dir");
+    let run_log = dir.path().join("ran");
+    let command = |label: &str, secret: &str| {
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("printf '{label}\\n' >> \"$0\"; printf '%s\\n' '{secret}'"),
+            run_log.display().to_string(),
+        ]
+    };
+    let origin = site.url("");
+    let credentials = vec![
+        config::CredentialConfig {
+            name: "fixture".into(),
+            origin: origin.clone(),
+            command: command("fixture", CREDENTIAL_SECRET),
+        },
+        // The same server under another origin: never this page's.
+        config::CredentialConfig {
+            name: "elsewhere".into(),
+            origin: origin.replace("127.0.0.1", "localhost"),
+            command: command("elsewhere", "never-filled"),
+        },
+    ];
+    CredentialFixture {
+        site,
+        credentials,
+        run_log,
+        _dir: dir,
+    }
+}
+
+impl CredentialFixture {
+    fn runs(&self) -> String {
+        std::fs::read_to_string(&self.run_log).unwrap_or_default()
+    }
+}
+
+async fn fill_credential(live: &Live<'_>, field: &str, name: &str) -> Value {
+    live.call(
+        "intent_fill",
+        json!({"purpose":"Sign in",
+               "hints":{"role":"textbox","accessibleName":field},
+               "value":{"kind":"credential","name":name}}),
+    )
+    .await
+}
+
+/// Needs a rig configured with [`CredentialFixture::credentials`].
+pub async fn a_configured_credential_fills_its_password_field(
+    rig: &Rig,
+    fixture: &CredentialFixture,
+) {
+    let url = fixture.site.url("/login");
+
+    let refused = start_password_manager_session(rig, &url, json!({"passwordManager":false})).await;
+    let without_opt_in = Live {
+        rig,
+        session_id: refused["sessionId"].clone(),
+        page_id: refused["pageId"].clone(),
+        started: refused,
+    };
+    let denied = fill_credential(&without_opt_in, "Password", "fixture").await;
+    assert_eq!(
+        denied["error"]["code"], "policyDenied",
+        "without opt-in: {denied}"
+    );
+    without_opt_in.close().await;
+
+    let started = start_password_manager_session(rig, &url, json!({"passwordManager":true})).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let elsewhere = fill_credential(&live, "Password", "elsewhere").await;
+    assert_eq!(
+        elsewhere["error"]["code"], "policyDenied",
+        "another origin's credential: {elsewhere}"
+    );
+    let into_text = fill_credential(&live, "Email", "fixture").await;
+    assert_eq!(
+        into_text["error"]["code"], "intentActionMismatch",
+        "a text field: {into_text}"
+    );
+    assert_eq!(fixture.runs(), "", "a command ran for a refused fill");
+
+    let filled = fill_credential(&live, "Password", "fixture").await;
+    assert_eq!(filled["status"], "completed", "credential fill: {filled}");
+    assert_eq!(fixture.runs(), "fixture\n");
+    let untouched = live.call("a11y_snapshot", json!({})).await;
+    assert!(
+        untouched.to_string().contains("untouched"),
+        "the credential field was focused: {untouched}"
+    );
+    let submitted = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Sign in"}}),
+        )
+        .await;
+    assert_eq!(submitted["status"], "completed", "submit: {submitted}");
+    let landed = wait_for_result(&live, "signed in").await;
+    assert_eq!(
+        landed["status"], "completed",
+        "the page's own listener did not get the password: {landed}"
+    );
+
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut passwords = Vec::new();
+    controls_named(&snapshot, "Password", &mut passwords);
+    assert_eq!(
+        passwords.first().map(|control| control["state"].clone()),
+        Some(json!({"kind":"redacted","present":true})),
+        "{snapshot}"
+    );
+    let journal =
+        std::fs::read_to_string(rig.storage_root().join("commands.jsonl")).unwrap_or_default();
+    for seen in [
+        filled.to_string(),
+        snapshot.to_string(),
+        landed.to_string(),
+        journal,
+    ] {
+        assert!(
+            !seen.contains(CREDENTIAL_SECRET),
+            "the secret left the browser: {seen}"
+        );
+    }
+    live.close().await;
+}
+
 pub async fn password_manager_fill_requires_the_session_opt_in(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
     let started =

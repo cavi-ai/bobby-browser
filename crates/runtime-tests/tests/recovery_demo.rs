@@ -76,6 +76,7 @@ fn config(root: &Path) -> config::AppConfig {
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         context: config::ContextConfig::default(),
         nodes: Default::default(),
     }

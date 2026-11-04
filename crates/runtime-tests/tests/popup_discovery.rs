@@ -51,6 +51,7 @@ async fn popup_opens_as_a_listed_page() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()
@@ -169,6 +170,7 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

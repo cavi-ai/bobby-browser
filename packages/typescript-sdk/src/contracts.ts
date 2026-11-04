@@ -260,7 +260,9 @@ export type ControlAction =
   | { kind: "setFiles"; paths: string[] }
   | { kind: "clear" }
   | { kind: "activate" }
-  | { kind: "passwordManagerFill" };
+  | { kind: "passwordManagerFill" }
+  /** A configured `[[credentials]]` entry, filled only on its origin. */
+  | { kind: "credential"; name: string };
 export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
 export interface RevealedControl { controlKind: FormControlKind; accessibleName?: string; target?: FormControlTarget; }
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }

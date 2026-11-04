@@ -48,6 +48,7 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

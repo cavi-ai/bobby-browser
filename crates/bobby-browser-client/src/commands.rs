@@ -64,10 +64,16 @@ impl RuntimeCommand {
         }
     }
 
-    /// True when the command drives the browser's password manager, which the
-    /// session must opt into with `ExecutionPolicy::password_manager`.
+    /// True when the command drives the browser's password manager or types a
+    /// configured credential, which the session must opt into with
+    /// `ExecutionPolicy::password_manager`.
     pub fn uses_password_manager(&self) -> bool {
-        let fill = |action: &ControlAction| matches!(action, ControlAction::PasswordManagerFill);
+        let fill = |action: &ControlAction| {
+            matches!(
+                action,
+                ControlAction::PasswordManagerFill | ControlAction::Credential { .. }
+            )
+        };
         match self {
             Self::Primitive(PrimitiveCommand::ControlAction(command)) => fill(&command.action),
             Self::Intent(IntentCommand::Fill(intent)) => fill(&intent.value),
@@ -510,6 +516,12 @@ pub enum ControlAction {
     /// Accept the browser password manager's suggestion for this credential
     /// field. Requires the session's `passwordManager` policy; never returns a value.
     PasswordManagerFill,
+    /// Type the operator's configured credential `name` into this password
+    /// field, on its configured origin only. Requires the session's
+    /// `passwordManager` policy; never returns a value.
+    Credential {
+        name: String,
+    },
 }
 
 impl ControlAction {
@@ -552,6 +564,14 @@ impl ControlAction {
             Self::SetChecked { .. } | Self::Clear | Self::Activate | Self::PasswordManagerFill => {
                 Ok(())
             }
+            Self::Credential { name } => {
+                if name.is_empty() || name.len() > MAX_CREDENTIAL_NAME_BYTES {
+                    return Err(format!(
+                        "credential name must be 1 to {MAX_CREDENTIAL_NAME_BYTES} bytes"
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -565,9 +585,13 @@ impl ControlAction {
             Self::Clear => crate::FormControlOperation::Clear,
             Self::Activate => crate::FormControlOperation::Activate,
             Self::PasswordManagerFill => crate::FormControlOperation::PasswordManagerFill,
+            Self::Credential { .. } => crate::FormControlOperation::SetText,
         }
     }
 }
+
+/// Longest credential name a fill accepts.
+pub const MAX_CREDENTIAL_NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
