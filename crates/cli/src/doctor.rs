@@ -394,6 +394,7 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
                         allow_download: options.download_model
                             || provider_name.eq_ignore_ascii_case("ollama"),
                         allow_start: true,
+                        python: config.vision.python.clone(),
                     },
                 );
                 match readiness {

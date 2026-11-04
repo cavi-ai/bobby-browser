@@ -223,6 +223,21 @@ pub fn upsert_vision_detector_model(path: &Path, model: &Path) -> Result<(), Con
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
+/// Sets `[vision].python`, keeping every other setting.
+pub fn upsert_vision_python(path: &Path, python: &Path) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
+    vision["python"] = value(python.to_string_lossy().as_ref());
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
+}
+
 fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {
     if parent.contains_key(key) && !parent[key].is_table() {
         return Err(ConfigWriteError::Invalid(format!(

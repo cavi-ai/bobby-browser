@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- `[vision].python` and `bobby vision connect --python` (or `bobby vision-proxy --python` and `BOBBY_VISION_PYTHON`) set the interpreter that runs the MLX and text-tier vision servers.
+
+### Fixed
+
+- MLX `bobby vision connect --activate` starts the vision server and waits for it to accept connections, and fails when the server exits instead of reporting it ready.
+- An MLX vision `model` can be a local model directory.
+- `bobby install` copies the vision server scripts beside the installed `bobby`, and a `bobby` reached through a symlink finds them.
+
 ## 0.22.1 - 2026-11-03
 
 ### Fixed

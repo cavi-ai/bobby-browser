@@ -210,6 +210,7 @@ Add `--activate` to readiness-test the provider right away, and `--download-mode
 | `propose_budget_ms` | unset | Round-trip budget. `bobby doctor` warns above it, and `/v1/runtime` reports it as `visionProposeBudgetMs` |
 | `health_failure_threshold` | `3` | Consecutive failures before `/v1/runtime` reports the provider `unhealthy` (or `degraded` for budget violations) |
 | `prefill` | `true` | Resolve unresolved form fields from one screenshot before filling |
+| `python` | unset | Interpreter with the vision server's packages (`scripts/vision-mlx/requirements.txt`); runs the MLX and text-tier servers. Unset runs `BOBBY_VISION_PYTHON`, else `python3` from `PATH` |
 
 Each `[vision.providers.<name>]` profile has `base_url` (required, OpenAI-compatible), `model` (required) and `api_key_env` (optional; omit for local servers).
 
@@ -235,7 +236,7 @@ Presets for `bobby vision connect --provider`:
 | `mlx` | local | selected model | none |
 | `custom` | `--base-url` | `--model` | `--api-key-env` |
 
-Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows.
+Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows. An MLX `--model` is a Hugging Face repository id or a local model directory; `--python` names the interpreter with the vision server's packages, and `--activate` starts that server and waits for it to accept connections.
 
 Interactive install and `bobby vision connect` list available models after you choose a provider. Type to search, select the model, or choose **Refresh** or **Back**. Ollama and LM Studio report image support, so known text-only models are excluded. OpenAI-compatible providers that omit image metadata show **image support not reported** beside their models; check the provider's model documentation before choosing one. MLX lists cached image models and offers download choices with confirmation.
 

@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use config::{
     upsert_vision_acp_profile, upsert_vision_detector_model, upsert_vision_platform,
-    upsert_vision_text_tier, VisionAcpProfile, VisionAuthKind, VisionProviderConfig,
-    VisionTextTierConfig,
+    upsert_vision_python, upsert_vision_text_tier, VisionAcpProfile, VisionAuthKind,
+    VisionProviderConfig, VisionTextTierConfig,
 };
 
 pub const LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:9100/vision";
@@ -34,6 +34,7 @@ pub struct ConnectOpts {
     pub text_model: Option<String>,
     pub text_adapter: Option<PathBuf>,
     pub text_base_url: Option<String>,
+    pub python: Option<PathBuf>,
 }
 
 impl Default for ConnectOpts {
@@ -54,6 +55,7 @@ impl Default for ConnectOpts {
             text_model: None,
             text_adapter: None,
             text_base_url: None,
+            python: None,
         }
     }
 }
@@ -176,6 +178,14 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
         .map_err(|error| anyhow!("{error}"))?;
         println!("Wrote [vision.text_tier] to {}", config_path.display());
     }
+    if let Some(python) = &opts.python {
+        upsert_vision_python(&config_path, python).map_err(|error| anyhow!("{error}"))?;
+        println!(
+            "Wrote [vision].python {} to {}",
+            python.display(),
+            config_path.display()
+        );
+    }
     // Detected controls are named by Apple Vision text, so the detector serves macOS only.
     if opts.download_model && cfg!(target_os = "macos") {
         let detector = crate::vision_readiness::download_detector_model()?;
@@ -197,6 +207,11 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
                 timeout: Duration::from_secs(45),
                 allow_download: opts.download_model,
                 allow_start: true,
+                python: opts.python.clone().or_else(|| {
+                    config::AppConfig::load(&config_path)
+                        .ok()
+                        .and_then(|loaded| loaded.vision.python)
+                }),
             },
         )? {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {

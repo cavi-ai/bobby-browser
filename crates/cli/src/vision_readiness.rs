@@ -1,7 +1,7 @@
 use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -13,6 +13,8 @@ pub(crate) struct ReadinessOptions {
     pub(crate) timeout: Duration,
     pub(crate) allow_download: bool,
     pub(crate) allow_start: bool,
+    /// Interpreter for the MLX vision server; unset runs `python3` from PATH.
+    pub(crate) python: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,10 @@ pub(crate) fn hugging_face_cache_root() -> Result<PathBuf> {
 }
 
 pub(crate) fn cached_hugging_face_model(model: &str) -> Result<bool> {
+    // A local model directory loads the same way a cached snapshot does.
+    if is_model_dir(Path::new(model)) {
+        return Ok(true);
+    }
     cached_hugging_face_model_at(
         hugging_face_cache_root()?
             .parent()
@@ -63,11 +69,11 @@ fn cached_hugging_face_model_at(hf_home: &Path, model: &str) -> Result<bool> {
     let Ok(entries) = std::fs::read_dir(snapshots) else {
         return Ok(false);
     };
-    Ok(entries.flatten().any(|entry| {
-        let snapshot = entry.path();
-        snapshot.join("config.json").is_file()
-            && snapshot.join("preprocessor_config.json").is_file()
-    }))
+    Ok(entries.flatten().any(|entry| is_model_dir(&entry.path())))
+}
+
+fn is_model_dir(dir: &Path) -> bool {
+    dir.join("config.json").is_file() && dir.join("preprocessor_config.json").is_file()
 }
 
 /// Bytes of the weights a cached Hugging Face model loads: the
@@ -190,7 +196,17 @@ pub(crate) fn check_provider_readiness(
                 model: profile.model.clone(),
             });
         }
-        return check_mlx_readiness(profile, options.timeout);
+        if !options.allow_start {
+            return Ok(ReadinessOutcome::NeedsAction {
+                provider,
+                model: profile.model.clone(),
+                detail: format!(
+                    "MLX vision server is not running at {}; `bobby vision connect --activate` starts and tests it",
+                    profile.base_url
+                ),
+            });
+        }
+        return check_mlx_readiness(profile, options.python.as_deref(), options.timeout);
     }
 
     let api_key = if let Some(name) = profile
@@ -553,67 +569,38 @@ fn pull_ollama_model(model: &str) -> bool {
         .is_some_and(|status| status.success())
 }
 
-fn configure_mlx_readiness_command(
-    command: &mut Command,
-    bind: SocketAddr,
-    profile: &VisionProviderConfig,
-) {
-    let decision = crate::vision_child::VisionChildDecision {
-        should_spawn: true,
-        bind,
-        path: "/vision".to_string(),
-        reason: "setup readiness check".to_string(),
-    };
-    crate::vision_child::configure_vision_proxy_command(
-        command,
-        &decision,
-        "mlx",
-        profile,
-        false,
-        Path::new("data/vision"),
-        None,
-    );
-}
-
+/// Starts the MLX vision server itself and waits for it to accept connections:
+/// a proxy binds before its server has loaded anything, so it proves nothing.
 fn check_mlx_readiness(
     profile: &VisionProviderConfig,
+    python: Option<&Path>,
     timeout: Duration,
 ) -> Result<ReadinessOutcome> {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .context("failed to reserve readiness probe port")?;
-    let bind = listener.local_addr()?;
-    drop(listener);
-
-    let mut command = Command::new(std::env::current_exe().context("current executable unknown")?);
-    configure_mlx_readiness_command(&mut command, bind, profile);
-    command
-        .env(
-            "BOBBY_VISION_TOKEN",
-            format!("bobby-readiness-{}", uuid::Uuid::new_v4().simple()),
+    let address = endpoint_socket(&profile.base_url).with_context(|| {
+        format!(
+            "MLX base_url {} is not a loopback address bobby can start",
+            profile.base_url
         )
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
-    let child = command
-        .spawn()
-        .context("failed to start MLX readiness worker")?;
-    let mut child = ChildGuard(Some(child));
+    })?;
+    let mut server = crate::spawn_vision_server(
+        &profile.base_url,
+        "mlx-vlm",
+        &profile.model,
+        None,
+        None,
+        python,
+    )?;
     let deadline = Instant::now() + timeout;
     loop {
-        if TcpStream::connect_timeout(&bind, Duration::from_millis(200)).is_ok() {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
             return Ok(ReadinessOutcome::Ready {
                 provider: "mlx".to_string(),
                 model: profile.model.clone(),
             });
         }
-        if let Some(status) = child
-            .0
-            .as_mut()
-            .context("MLX readiness child missing")?
-            .try_wait()?
-        {
+        if let Some(status) = server.child.try_wait()? {
             anyhow::bail!(
-                "MLX readiness worker exited before loading {}: {status}",
+                "MLX vision server exited before loading {}: {status}",
                 profile.model
             );
         }
@@ -626,17 +613,6 @@ fn check_mlx_readiness(
             );
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-struct ChildGuard(Option<Child>);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 }
 
@@ -691,6 +667,7 @@ mod tests {
             timeout: Duration::from_millis(10),
             allow_download: false,
             allow_start: false,
+            python: None,
         };
 
         let ollama = check_provider_readiness("ollama", &ollama, &options).unwrap();
@@ -723,35 +700,11 @@ mod tests {
                 timeout: Duration::from_millis(10),
                 allow_download: false,
                 allow_start: false,
+                python: None,
             },
         )
         .unwrap();
         assert!(matches!(outcome, ReadinessOutcome::NeedsAction { .. }));
-    }
-
-    #[test]
-    fn vision_readiness_mlx_command_loads_the_exact_selected_model() {
-        let profile = VisionProviderConfig {
-            base_url: "http://127.0.0.1:19101".into(),
-            model: "mlx-community/example-selected".into(),
-            api_key_env: None,
-        };
-        let mut command = std::process::Command::new("bobby");
-
-        configure_mlx_readiness_command(&mut command, "127.0.0.1:19100".parse().unwrap(), &profile);
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        assert!(args.windows(2).any(|pair| pair == ["--upstream", "mlx"]));
-        assert!(args.contains(&"--spawn-server".to_string()));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--model", "mlx-community/example-selected"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--vision-base-url", "http://127.0.0.1:19101"]));
     }
 
     #[test]
@@ -860,6 +813,7 @@ mod tests {
                 timeout: Duration::from_secs(2),
                 allow_download: false,
                 allow_start: false,
+                python: None,
             },
         )
         .unwrap()
