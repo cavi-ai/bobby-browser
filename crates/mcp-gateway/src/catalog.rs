@@ -228,7 +228,7 @@ tools! {
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
             types::Capability::VisionAssist,
-        ], operation: None, schema: intent_detect_challenge_schema, args: IntentDetectChallengeArgs,
+        ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_detect_challenge_schema, args: IntentDetectChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("DetectChallenge", "Replayable"), hints: (true, false, false, false) }
     intent_dismiss_obstruction { order: 13, title: "Dismiss obstruction", description: "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present -- the evidence names any open dialog; snapshot it for a dismissal control. Without hints, visionAssist closes an open dialog.",
         capabilities: &[
@@ -271,7 +271,7 @@ tools! {
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
             types::Capability::VisionAssist,
-        ], operation: None, schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
+        ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SolveChallenge", "Reconciliable"), hints: (false, false, false, false) }
     intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. networkQuiet returns submitSettlement=settled|validationRejected; on rejection, do not inspect or blindly resubmit. On failure with needsReconciliation, call recovery_status.",
         capabilities: &[
