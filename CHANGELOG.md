@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.22.1 - 2026-11-03
+
+### Fixed
+
+- MCP `upload_files` resolves hidden, unnamed file inputs by the control IDs returned by `form_snapshot`, while preserving file ordinals within each frame and shadow root.
+
 ### Changed
 
 - `bobby-browser-client` publishes to crates.io through a trusted publisher with no stored token, and `publish-crates.yml` run by hand takes a release `tag` and `dry_run`.
