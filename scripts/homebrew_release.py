@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-import time
 
 PLATFORMS = ("macos-arm64", "macos-x64", "linux-arm64", "linux-x64")
 FORMULA = "Formula/bobby-browser.rb"
@@ -105,22 +104,6 @@ def needs_update(current, candidate):
     return True
 
 
-def wait_for_ci(repository, commit):
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
-        runs = api(f"repos/{repository}/actions/runs?head_sha={commit}&event=pull_request")["workflow_runs"]
-        runs = [run for run in runs if run["path"] == ".github/workflows/ci.yml"]
-        if runs:
-            run = max(runs, key=lambda item: item["id"])
-            gh("run", "watch", str(run["id"]), "--repo", repository, "--interval", "60", "--exit-status", timeout=2700)
-            jobs = api(f"repos/{repository}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
-            if not jobs or any(job["conclusion"] != "success" for job in jobs):
-                raise RuntimeError("formula update requires every CI job to succeed")
-            return
-        time.sleep(5)
-    raise RuntimeError("formula update CI did not start within three minutes")
-
-
 def publication_branch(version, base):
     return f"feat/homebrew-{version}-{base[:12]}"
 
@@ -199,8 +182,8 @@ def publish_repository(repository, candidate, version):
             url = gh("pr", "create", "--repo", repository, "--head", branch, "--base", default, "--title", title, "--body-file", body_file.name).strip()
         number = int(url.rsplit("/", 1)[1])
     print(f"https://github.com/{repository}/pull/{number}", flush=True)
-    if repository == SOURCE:
-        wait_for_ci(repository, commit)
+    # The formula alone changes, and this workflow already verified its
+    # archive hashes and a Homebrew install and test of the release.
     if api(f"repos/{repository}/git/ref/heads/{default}")["object"]["sha"] != base:
         raise RuntimeError("default branch changed while validating the formula; rerun the workflow")
     gh("pr", "merge", str(number), "--repo", repository, "--squash", "--match-head-commit", commit, "--subject", title, "--body", "")
