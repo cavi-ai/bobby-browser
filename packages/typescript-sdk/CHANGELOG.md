@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.0
+
+- `ControlAction` includes `{ kind: "credential"; name }` for configured credentials.
+- Align the client package with the Bobby Browser 0.23.0 runtime release.
+
 ## 0.22.1
 
 - Form-control targets support structural attributes for unnamed file inputs.
