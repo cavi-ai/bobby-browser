@@ -365,19 +365,20 @@ fn command_envelope_uses_stable_camel_case_json() {
 fn journal_safe_envelope_drops_the_one_time_code_without_mutating_live_command() {
     let mut envelope = test_envelope(PrimitiveCommand::ListPages(ListPagesCommand));
     envelope.command = RuntimeCommand::Intent(IntentCommand::EnterCode(EnterCodeIntent {
-        code: OneTimeCode::new("482 913"),
+        // Letters no id, timestamp or field name in the envelope contains.
+        code: OneTimeCode::new("MQK XWV"),
         hints: IntentHints::default(),
         submit: true,
         expected_state: None,
     }));
     let durable = serde_json::to_string(&envelope.journal_safe()).unwrap();
-    assert!(!durable.contains("482"), "{durable}");
-    assert!(!durable.contains("913"), "{durable}");
-    assert!(!format!("{envelope:?}").contains("482"));
+    assert!(!durable.contains("MQK"), "{durable}");
+    assert!(!durable.contains("XWV"), "{durable}");
+    assert!(!format!("{envelope:?}").contains("MQK"));
     let RuntimeCommand::Intent(IntentCommand::EnterCode(live)) = &envelope.command else {
         unreachable!()
     };
-    assert_eq!(live.code.normalized(), "482913");
+    assert_eq!(live.code.normalized(), "MQKXWV");
 }
 
 #[test]
