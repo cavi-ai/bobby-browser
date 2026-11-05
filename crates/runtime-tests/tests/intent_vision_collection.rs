@@ -99,6 +99,7 @@ fn base_config(root: &std::path::Path) -> AppConfig {
         nodes: Default::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
     }
 }
 

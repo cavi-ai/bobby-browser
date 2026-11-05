@@ -49,6 +49,7 @@ struct ConfiguredFirefoxFactory {
     server: Mutex<Option<Arc<CompanionServerHandle>>>,
     artifacts: ArtifactStore,
     upload_roots: Vec<PathBuf>,
+    credentials: Vec<config::CredentialConfig>,
     downloads_dir: PathBuf,
     bidi: Mutex<Option<crate::BidiClient>>,
     lifecycle: Mutex<()>,
@@ -510,6 +511,7 @@ impl ConfiguredFirefoxFactory {
         )
         .with_artifacts(self.artifacts.clone())
         .with_upload_roots(self.upload_roots.clone())
+        .with_credentials(self.credentials.clone())
         .with_downloads_dir(self.downloads_dir.clone())
         .with_shared_transport(bidi)
         .launch(session_id)
@@ -1629,6 +1631,7 @@ fn compose_worker_factory_inner(
         config.browser.max_screenshot_dimension,
     );
     let firefox_upload_roots = config.browser.upload_roots.clone();
+    let firefox_credentials = config.credentials.clone();
     let firefox_downloads_dir = config.browser.downloads_dir.clone();
     let chromium_capabilities = CompanionCapabilities {
         observe: true,
@@ -1651,7 +1654,8 @@ fn compose_worker_factory_inner(
         } => Some(profile_id.clone()),
         _ => None,
     };
-    let mut chromium_factory = ChromiumWorkerFactory::new(config.browser.clone());
+    let mut chromium_factory = ChromiumWorkerFactory::new(config.browser.clone())
+        .with_credentials(config.credentials.clone());
     if let Some(profile_id) = chromium_durable_profile_id {
         // A listed profile keeps its own directory, such as a signed-in Chrome.
         chromium_factory = match selection
@@ -1698,6 +1702,7 @@ fn compose_worker_factory_inner(
                             server: Mutex::new(server),
                             artifacts: firefox_artifacts.clone(),
                             upload_roots: firefox_upload_roots.clone(),
+                            credentials: firefox_credentials.clone(),
                             downloads_dir: firefox_downloads_dir.clone(),
                             bidi: Mutex::new(None),
                             lifecycle: Mutex::new(()),

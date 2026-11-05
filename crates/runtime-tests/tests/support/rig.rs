@@ -61,6 +61,7 @@ fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppC
         nodes: Default::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
     }
 }
 
@@ -103,8 +104,18 @@ impl Rig {
     }
 
     pub async fn chromium_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
+        Self::chromium_configured(|config| config.browser.upload_roots = upload_roots).await
+    }
+
+    /// A Chromium rig whose workers may fill `credentials`.
+    pub async fn chromium_with_credentials(credentials: Vec<config::CredentialConfig>) -> Self {
+        Self::chromium_configured(|config| config.credentials = credentials).await
+    }
+
+    async fn chromium_configured(configure: impl FnOnce(&mut AppConfig)) -> Self {
         let root = tempfile::tempdir().expect("create rig root");
-        let mut config = config(root.path(), upload_roots);
+        let mut config = config(root.path(), vec![]);
+        configure(&mut config);
         if let Some(executable) = std::env::var_os("BOBBY_CHROME_EXECUTABLE") {
             config.browser.executable = Some(executable.into());
         }
@@ -146,6 +157,15 @@ impl Rig {
     }
 
     pub async fn firefox_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
+        Self::firefox_configured(|config| config.browser.upload_roots = upload_roots).await
+    }
+
+    /// A Firefox rig whose workers may fill `credentials`.
+    pub async fn firefox_with_credentials(credentials: Vec<config::CredentialConfig>) -> Self {
+        Self::firefox_configured(|config| config.credentials = credentials).await
+    }
+
+    async fn firefox_configured(configure: impl FnOnce(&mut AppConfig)) -> Self {
         let mut installed = InstalledFirefoxConfig::from_env()
             .unwrap_or_else(|name| panic!("{name} must be set to run the Firefox suite"));
         let root = tempfile::tempdir().expect("create rig root");
@@ -153,7 +173,8 @@ impl Rig {
         // not share crash counters, cookies, or profile locks.
         installed.profile = root.path().join("firefox-profile");
         std::fs::create_dir(&installed.profile).expect("create rig Firefox profile");
-        let config = config(root.path(), upload_roots);
+        let mut config = config(root.path(), vec![]);
+        configure(&mut config);
         let firefox =
             runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")
                 .await

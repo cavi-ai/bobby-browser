@@ -123,6 +123,7 @@ pub(crate) fn compatible_role(value: &ControlAction, role: &str, is_file_input: 
         ControlAction::PasswordManagerFill => {
             !is_file_input && matches!(role, "textbox" | "searchbox")
         }
+        ControlAction::Credential { .. } => !is_file_input && role == "textbox",
         ControlAction::Clear | ControlAction::Activate => true,
     }
 }
@@ -150,6 +151,7 @@ pub fn verify_fill(value: &ControlAction, evidence: &[Evidence]) -> Result<(), S
         ControlAction::SelectMany { values } => verify_selected_values(values, evidence),
         ControlAction::Clear => verify_cleared(evidence),
         ControlAction::PasswordManagerFill => verify_password_manager_filled(evidence),
+        ControlAction::Credential { .. } => verify_credential_filled(evidence),
         ControlAction::Activate => {
             Err("activate is not valid for fill; use control_action instead".into())
         }
@@ -262,6 +264,23 @@ fn verify_cleared(evidence: &[Evidence]) -> Result<(), String> {
         FormControlState::Selection { values } if values.is_empty() => Ok(()),
         FormControlState::Files { count } if *count == 0 => Ok(()),
         state => Err(format!("clear did not produce an empty state: {state:?}")),
+    }
+}
+
+/// A credential fill leaves the password field holding a redacted value.
+fn verify_credential_filled(evidence: &[Evidence]) -> Result<(), String> {
+    let filled = evidence.iter().any(|item| {
+        matches!(
+            item,
+            Evidence::ControlAction { action }
+                if action.operation == FormControlOperation::SetText
+                    && action.state == FormControlState::Redacted { present: true }
+        )
+    });
+    if filled {
+        Ok(())
+    } else {
+        Err("the credential did not reach the password field".into())
     }
 }
 

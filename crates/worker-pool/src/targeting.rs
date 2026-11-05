@@ -353,6 +353,47 @@ impl ResolvedTarget {
         self.eval(page, "return el.value || ''").await.map(Some)
     }
 
+    /// The origin the browser reports for the frame holding the element;
+    /// page scripts cannot change it.
+    pub(crate) async fn document_origin(&self, page: &Page) -> Result<String, CommandError> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            Frame, FrameId, FrameTree, GetFrameTreeParams,
+        };
+        fn find<'a>(tree: &'a FrameTree, id: &FrameId) -> Option<&'a Frame> {
+            if &tree.frame.id == id {
+                return Some(&tree.frame);
+            }
+            tree.child_frames
+                .iter()
+                .flatten()
+                .find_map(|child| find(child, id))
+        }
+        let tree = self
+            .execution_page(page)
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map_err(cdp_error)?
+            .result
+            .frame_tree;
+        let frame = match &self.frame_id {
+            Some(id) => find(&tree, id).ok_or_else(|| {
+                target_error(ErrorCode::FrameNotFound, "the field's frame is gone")
+            })?,
+            None => &tree.frame,
+        };
+        Ok(frame.security_origin.clone())
+    }
+
+    /// Runs a credential fill `script` with `el` bound to the element and
+    /// reads whether it set the field.
+    pub(crate) async fn fill_secret(
+        &self,
+        page: &Page,
+        script: &str,
+    ) -> Result<bool, CommandError> {
+        self.eval(page, script).await
+    }
+
     pub async fn attribute(&self, page: &Page, name: &str) -> Result<Option<String>, CommandError> {
         let name = serde_json::to_string(name)
             .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;

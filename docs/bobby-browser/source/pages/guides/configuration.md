@@ -92,6 +92,25 @@ A smaller starting set shrinks the `tools/list` an agent downloads at connect. I
 startup_toolset = "intent"
 ```
 
+## `[[credentials]]`
+
+Each entry lets an agent fill a password field by name without seeing the secret. bobby runs `command` only when a fill names the entry for a password field whose page origin is exactly `origin`, then types what it prints into that field.
+
+| Key | Meaning |
+|---|---|
+| `name` | What a fill passes: `{kind: "credential", name}` |
+| `origin` | Exact origin of the password field's page, such as `https://login.example.com` |
+| `command` | Program and arguments that print the secret on stdout; one trailing line break is dropped. At most 16 KiB, within 60 seconds |
+
+```toml
+[[credentials]]
+name = "work"
+origin = "https://login.example.com"
+command = ["op", "read", "op://Private/Work login/password"]
+```
+
+The secret is never returned, logged or journaled, and the command's stderr is discarded. A fill needs the session's `executionPolicy.passwordManager`.
+
 ## `[http]`
 
 Limits on outbound requests the runtime makes, such as downloads. These are not the server's own listener.

@@ -555,6 +555,14 @@ pub fn validate_control_action(
             "control is not mutable",
         ));
     }
+    if matches!(action, ControlAction::Credential { .. })
+        && control.control_kind != FormControlKind::Password
+    {
+        return Err(snapshot_error(
+            ErrorCode::IntentActionMismatch,
+            "a credential fills only a password field",
+        ));
+    }
     Ok(())
 }
 
@@ -589,6 +597,21 @@ pub fn control_action_evidence(
     action
         .validate()
         .map_err(|message| snapshot_error(ErrorCode::InvalidRequest, message))?;
+    // A credential never leaves as text, even when the page turned its field
+    // into a plain text input after the fill.
+    let redacted;
+    let control = match (action, &control.state) {
+        (ControlAction::Credential { .. }, FormControlState::Text { value }) => {
+            redacted = FormControl {
+                state: FormControlState::Redacted {
+                    present: !value.is_empty(),
+                },
+                ..control.clone()
+            };
+            &redacted
+        }
+        _ => control,
+    };
     let matched = match (action, &control.state) {
         (
             ControlAction::SetText { value, clear_first },
@@ -629,6 +652,7 @@ pub fn control_action_evidence(
         (ControlAction::Clear, FormControlState::Files { count }) => *count == 0,
         (ControlAction::Activate, _) => true,
         (ControlAction::PasswordManagerFill, state) => password_manager_filled(state),
+        (ControlAction::Credential { .. }, state) => password_manager_filled(state),
         _ => false,
     };
     if !matched {

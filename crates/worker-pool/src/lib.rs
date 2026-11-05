@@ -1,5 +1,6 @@
 mod accessibility_targets;
 mod chromium;
+pub mod credentials;
 mod engine;
 mod engine_features;
 mod page_behavior;

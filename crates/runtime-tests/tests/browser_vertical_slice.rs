@@ -153,6 +153,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

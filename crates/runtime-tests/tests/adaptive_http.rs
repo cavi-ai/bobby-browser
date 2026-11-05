@@ -153,6 +153,7 @@ async fn adaptive_http() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,

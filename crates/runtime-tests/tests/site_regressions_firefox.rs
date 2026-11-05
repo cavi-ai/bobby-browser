@@ -96,6 +96,14 @@ async fn password_manager_fill() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Firefox and paired test profile"]
+async fn credential_fill_fills_only_on_its_origin() {
+    let fixture = cases::credential_fixture().await;
+    let rig = Rig::firefox_with_credentials(fixture.credentials.clone()).await;
+    cases::a_configured_credential_fills_its_password_field(&rig, &fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
 async fn bounded_frame_snapshot_regressions() {
     let rig = Rig::firefox().await;
     cases::a_bounded_snapshot_lists_frames_in_document_order(&rig).await;

@@ -1707,6 +1707,24 @@
             "kind"
           ],
           "additionalProperties": false
+        },
+        {
+          "description": "Type the operator's configured credential `name` into this password\nfield, on its configured origin only. Requires the session's\n`passwordManager` policy; never returns a value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "credential"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
         }
       ]
     },

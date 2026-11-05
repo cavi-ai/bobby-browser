@@ -57,6 +57,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

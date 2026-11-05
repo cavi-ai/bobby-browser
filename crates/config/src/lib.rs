@@ -161,6 +161,22 @@ pub struct AppConfig {
     pub cdp: CdpConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Secrets an agent fills into a password field by name.
+    #[serde(default)]
+    pub credentials: Vec<CredentialConfig>,
+}
+
+/// A `[[credentials]]` entry: `command` prints the secret, typed only into a
+/// password field whose page origin is `origin`. Never set from a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialConfig {
+    /// The name a fill passes as `{kind: "credential", name}`.
+    pub name: String,
+    /// Exact origin of the field's page, such as `https://login.example.com`.
+    pub origin: String,
+    /// Program and arguments that print the secret on stdout.
+    pub command: Vec<String>,
 }
 
 /// MCP gateway presentation settings. Nothing here is an enforcement

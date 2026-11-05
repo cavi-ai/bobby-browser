@@ -136,6 +136,7 @@ async fn typed_values_never_reach_the_context_store() {
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         context: config::ContextConfig {
             dir: Some(context_dir.clone()),
             ..config::ContextConfig::default()

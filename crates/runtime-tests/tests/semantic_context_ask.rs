@@ -109,6 +109,7 @@ fn config(root: &Path, endpoint: &str) -> config::AppConfig {
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         context: config::ContextConfig::default(),
         nodes: BTreeMap::from([(
             "vision".to_owned(),

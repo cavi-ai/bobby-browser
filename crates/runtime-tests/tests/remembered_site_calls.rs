@@ -83,6 +83,7 @@ fn config(root: &Path) -> config::AppConfig {
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
+        credentials: Vec::new(),
         context: config::ContextConfig {
             dir: Some(root.join("context")),
             ..config::ContextConfig::default()

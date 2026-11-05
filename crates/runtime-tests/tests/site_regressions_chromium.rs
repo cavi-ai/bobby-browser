@@ -32,6 +32,14 @@ cases::every_case!(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn credential_fill_fills_only_on_its_origin() {
+    let fixture = cases::credential_fixture().await;
+    let rig = Rig::chromium_with_credentials(fixture.credentials.clone()).await;
+    cases::a_configured_credential_fills_its_password_field(&rig, &fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn password_manager_fill_clicks_the_managers_prompt() {
     let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
     let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;

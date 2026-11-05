@@ -1146,7 +1146,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "ControlActionKind".to_owned(),
         json!({
             "type":"object",
-            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:activate}, or {kind:passwordManagerFill} (executionPolicy.passwordManager)."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:activate}, {kind:passwordManagerFill}, or {kind:credential,name:string} (both executionPolicy.passwordManager)."
         }),
     );
     patched.insert(
@@ -1160,7 +1160,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "FillValue".to_owned(),
         json!({
             "type":"object",
-            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, or {kind:passwordManagerFill} (executionPolicy.passwordManager)."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:passwordManagerFill}, or {kind:credential,name:string} (both executionPolicy.passwordManager)."
         }),
     );
     patched.insert(
@@ -2029,7 +2029,8 @@ fn definitions() -> Value {
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]}
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"credential"},"name":string(1,128)},"required":["kind","name"]}
         ]},
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
@@ -2415,6 +2416,7 @@ fn fill_values() -> Vec<Value> {
         ),
         tagged_fields("clear", json!({}), &[]),
         tagged_fields("passwordManagerFill", json!({}), &[]),
+        tagged_fields("credential", json!({"name":string(1, 128)}), &["name"]),
     ]
 }
 
@@ -2565,29 +2567,30 @@ fn primitive_commands() -> Vec<Value> {
             "controlAction",
             object(
                 json!({
-                    "target": {
-                        "type":"object",
-                        "additionalProperties":false,
-                        "properties":{
-                            "role":string(1,128),
-                            "accessibleName":string(1,2048),
-                            "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
-                            "framePath":array(any_value(),8),
-                            "shadowPath":array(any_value(),8)
+                        "target": {
+                            "type":"object",
+                            "additionalProperties":false,
+                            "properties":{
+                                "role":string(1,128),
+                                "accessibleName":string(1,2048),
+                                "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                                "framePath":array(any_value(),8),
+                                "shadowPath":array(any_value(),8)
+                            },
+                            "required":["role","accessibleName","ordinal","framePath","shadowPath"]
                         },
-                        "required":["role","accessibleName","ordinal","framePath","shadowPath"]
-                    },
-                    "action": {"oneOf":[
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]}
-                    ]}
-                }),
+                        "action": {"oneOf":[
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
+                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]},
+                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"credential"},"name":string(1,128)},"required":["kind","name"]}
+                        ]}
+                    }),
                 &["target", "action"],
             ),
         ),

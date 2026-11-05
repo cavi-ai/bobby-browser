@@ -68,6 +68,12 @@ credential field is never clicked, focused or typed
 into, and the value never comes back. Never click or type into a credential
 field yourself. Without the opt-in the outcome is `policyDenied`.
 
+A sign-in with a configured credential: with `"executionPolicy":
+{"passwordManager": True}`, submit `{"kind": "intent", "input": {"kind":
+"fill", "input": {"purpose": "Sign in", "hints": <password field hints>,
+"value": {"kind": "credential", "name": <name>}}}}`. The secret is filled only
+on its configured origin and never comes back.
+
 Pass `RequestOptions(idempotency_key=...)` on mutating calls that may retry.
 
 This SDK ships primitives only: there are no `intent_*` helpers. Build a raw
