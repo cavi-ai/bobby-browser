@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.23.0 - 2026-11-04
+
 ### Added
 
+- The README shows a first form workflow in a walkthrough video.
 - `[vision].python` and `bobby vision connect --python` (or `bobby vision-proxy --python` and `BOBBY_VISION_PYTHON`) set the interpreter that runs the MLX and text-tier vision servers.
 - `intent_enter_code` enters a one-time code on a code step (one field or one character per box) and submits it, and `intent_submit_and_verify` fails `verificationCodeRequired` with the code field targets, code length and the page's destination hint when a submit lands on such a step.
 - `[[credentials]]` names a command that prints a secret for one origin, and the fill value `{kind: "credential", name}` fills it into a password field on that origin without focusing the field or returning, logging or journaling the secret.
@@ -14,6 +17,12 @@
 - An MLX vision `model` can be a local model directory.
 - `bobby install` copies the vision server scripts beside the installed `bobby`, and a `bobby` reached through a symlink finds them.
 - MCP `intent_detect_challenge` and `intent_solve_challenge` calls no longer crash the gateway and close the connection.
+- On Chromium, `passwordManagerFill` presses 1Password's own sign-in prompt directly; vision still finds any other manager's prompt and the prompt on Firefox.
+
+### Changed
+
+- CI runs on a `v*` tag or by hand, with every job under 15 minutes; the `browser test` workflow runs chosen real-browser tests on demand.
+- The Homebrew formula installs 0.22.1.
 
 ## 0.22.1 - 2026-11-03
 
