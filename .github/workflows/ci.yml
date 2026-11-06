@@ -1,8 +1,9 @@
 name: CI
 
-# Release gate: runs on a release tag or by hand. Every job finishes within 15
-# minutes; a check that cannot does not belong here.
+# Runs on every pull request, a release tag, or by hand. Every job finishes
+# within 15 minutes; a check that cannot does not belong here.
 on:
+  pull_request:
   push:
     tags: ["v*"]
   workflow_dispatch:
