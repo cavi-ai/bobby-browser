@@ -121,6 +121,43 @@ async fn close_session_pages(pages: Vec<Page>) {
     futures::future::join_all(closing).await;
 }
 
+/// Makes the user's Google Chrome native-messaging host manifests resolvable
+/// from a durable profile, which Chrome reads under its own user-data dir.
+/// Best-effort: existing entries are kept and failures are ignored.
+fn link_native_messaging_hosts(source_dir: &Path, profile_dir: &Path) {
+    #[cfg(unix)]
+    {
+        let Ok(entries) = std::fs::read_dir(source_dir) else {
+            return;
+        };
+        let target_dir = profile_dir.join("NativeMessagingHosts");
+        if std::fs::create_dir_all(&target_dir).is_err() {
+            return;
+        }
+        for entry in entries.flatten() {
+            let link = target_dir.join(entry.file_name());
+            if link.symlink_metadata().is_err() {
+                let _ = std::os::unix::fs::symlink(entry.path(), link);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (source_dir, profile_dir);
+}
+
+/// The user's Google Chrome native-messaging host directory, when the
+/// platform has one.
+fn chrome_native_messaging_hosts_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"))
+    } else if cfg!(target_os = "linux") {
+        Some(home.join(".config/google-chrome/NativeMessagingHosts"))
+    } else {
+        None
+    }
+}
+
 /// Connects to the Chrome serving `profile_dir`, starting one when none
 /// answers. The Chrome it starts is detached, so it outlives every session
 /// and this runtime; any later runtime attaches to it the same way.
@@ -408,6 +445,11 @@ impl WorkerFactory for ChromiumWorkerFactory {
 
         let config = self.chromium_config(&profile_dir)?;
         let shared_browser = self.durable_profile_dir.is_some();
+        if shared_browser {
+            if let Some(source) = chrome_native_messaging_hosts_dir() {
+                link_native_messaging_hosts(&source, &profile_dir);
+            }
+        }
         let (mut browser, mut handler) = if shared_browser {
             let _attaching = self.shared_browser_attach.lock().await;
             attach_or_launch_shared_browser(&config, &profile_dir).await?
@@ -4697,6 +4739,46 @@ fn chromium_modifier_bits(modifiers: &[types::ClickModifier]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_profile_resolves_chrome_native_messaging_manifests() {
+        let source = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("com.1password.1password.json"),
+            r#"{"name":"com.1password.1password"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("com.other.host.json"),
+            "{\"name\":\"other\"}",
+        )
+        .unwrap();
+        let hosts = profile.path().join("NativeMessagingHosts");
+        std::fs::create_dir_all(&hosts).unwrap();
+        std::fs::write(hosts.join("com.other.host.json"), "{\"name\":\"kept\"}").unwrap();
+
+        super::link_native_messaging_hosts(source.path(), profile.path());
+        super::link_native_messaging_hosts(source.path(), profile.path());
+
+        assert_eq!(
+            std::fs::read_to_string(hosts.join("com.1password.1password.json")).unwrap(),
+            r#"{"name":"com.1password.1password"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(hosts.join("com.other.host.json")).unwrap(),
+            "{\"name\":\"kept\"}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_native_messaging_source_leaves_profile_untouched() {
+        let profile = tempfile::tempdir().unwrap();
+        super::link_native_messaging_hosts(&profile.path().join("absent"), profile.path());
+        assert!(!profile.path().join("NativeMessagingHosts").exists());
+    }
 
     #[test]
     fn iframe_lookup_counts_only_owners_in_the_parent_document() {
