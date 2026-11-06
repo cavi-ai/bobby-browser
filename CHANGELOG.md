@@ -5,6 +5,7 @@
 ### Fixed
 
 - After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
+- `bobby install` keeps an existing `[vision].collect_training_data = true` unless `--no-collect-training-data` is passed.
 
 ## 0.23.0 - 2026-11-04
 
