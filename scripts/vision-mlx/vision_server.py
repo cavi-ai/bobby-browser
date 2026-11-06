@@ -12,16 +12,22 @@ Usage:
 """
 
 import argparse
+import errno
 import json
 import logging
 import os
 import sys
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from providers import create_provider
 
 log = logging.getLogger("vision-server")
+
+# A restarted runtime spawns its server while the previous one still holds the
+# address on its way out; the bind waits that long before giving up.
+BIND_WAIT_SECONDS = 15.0
 
 
 class VisionHandler(BaseHTTPRequestHandler):
@@ -75,6 +81,18 @@ class VisionHandler(BaseHTTPRequestHandler):
         log.debug(fmt % args)
 
 
+def bind_server(host: str, port: int, wait_seconds: float = BIND_WAIT_SECONDS) -> HTTPServer:
+    """Bind the address, retrying while another process still holds it."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            return HTTPServer((host, port), VisionHandler)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+
+
 def exit_when_stdin_closes():
     def watch():
         sys.stdin.buffer.read()
@@ -108,7 +126,7 @@ def main():
 
     host, port = args.bind.split(":")
     VisionHandler.provider = provider
-    server = HTTPServer((host, int(port)), VisionHandler)
+    server = bind_server(host, int(port))
     log.info("vision server listening on http://%s", args.bind)
     try:
         server.serve_forever()

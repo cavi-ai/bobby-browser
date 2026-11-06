@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
+
 ## 0.23.0 - 2026-11-04
 
 ### Added
