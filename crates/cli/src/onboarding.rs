@@ -1439,6 +1439,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let mut model_selected = vision_model.is_some();
     if (configure_vision || interactive) && config_path.exists() {
         let existing = config::AppConfig::load(&config_path)?;
+        vision_state.collect_training_data = existing.vision.collect_training_data;
         if let Some((provider, profile)) = existing.vision.selected_provider() {
             vision_state.provider = provider.to_owned();
             vision_state.profile = profile.clone();
@@ -2150,6 +2151,31 @@ mod install_tests {
         let (_, profile) = loaded.vision.selected_provider().unwrap();
         assert_eq!(profile.model, "my-vision:Q4_K_M");
         assert_eq!(profile.base_url, "http://127.0.0.1:9");
+    }
+
+    #[test]
+    fn install_keeps_existing_training_collection() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[vision]\nprovider = \"ollama\"\ncollect_training_data = true\n[vision.providers.ollama]\nbase_url = \"http://127.0.0.1:9\"\nmodel = \"my-vision:Q4_K_M\"\n",
+        )
+        .unwrap();
+        run_install(
+            &dir.path().join("bootstrap.env"),
+            InstallOptions {
+                vision: true,
+                yes: true,
+                config: Some(config_path.clone()),
+                training_data_dir: dir.path().join("training"),
+                ..InstallOptions::default()
+            },
+        )
+        .unwrap();
+        let loaded = config::AppConfig::load(&config_path).unwrap();
+        assert!(loaded.vision.collect_training_data);
     }
 
     #[test]
