@@ -377,6 +377,18 @@ pub(in crate::doctor) fn record_operational_slos(
                         degraded.join(", ")
                     ),
                 );
+            } else if let Some(failing) = modes.iter().find(|mode| mode.consecutive_failures > 0) {
+                report.warn(
+                    "provider-health",
+                    format!(
+                        "failing: {} (last {} call(s) failed; unhealthy at {}; {} ok / {} failed)",
+                        failing.provider_mode,
+                        failing.consecutive_failures,
+                        failing.failure_threshold,
+                        failing.successes,
+                        failing.failures
+                    ),
+                );
             } else {
                 report.ok(
                     "provider-health",
@@ -661,6 +673,26 @@ mod slo_tests {
         assert_eq!(
             report.check("provider-health").unwrap().status,
             DoctorStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_provider_whose_last_calls_failed_warns() {
+        let mut report = DoctorReport::default();
+        let mut snapshot = health_snapshot(types::ProviderHealthStatus::Healthy, 0);
+        snapshot.successes = 0;
+        snapshot.failures = 1;
+        snapshot.consecutive_failures = 1;
+        let info = runtime_info(
+            Some(vec![snapshot]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        let check = report.check("provider-health").unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert_eq!(
+            check.detail,
+            "failing: http (last 1 call(s) failed; unhealthy at 3; 0 ok / 1 failed)"
         );
     }
 

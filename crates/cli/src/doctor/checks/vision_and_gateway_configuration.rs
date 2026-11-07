@@ -361,7 +361,19 @@ pub(in crate::doctor) fn check_vision_tiers(vision: &VisionConfig) -> Vec<Doctor
                 .and_then(Path::file_name)
                 .map(|name| format!(" + adapter {}", name.to_string_lossy()))
                 .unwrap_or_default();
+            let python = crate::vision_python(vision.python.as_deref());
+            let importable = !crate::vision_child::text_tier_is_local(tier)
+                || interpreter_imports(&python, "mlx_lm");
             match crate::vision_readiness::hugging_face_weight_bytes(&tier.model) {
+                _ if !importable => DoctorCheck {
+                    status: DoctorStatus::Fail,
+                    name: "vision-tier-text".to_string(),
+                    detail: format!(
+                        "{}{adapter} · {python} cannot import mlx_lm · fix: {python} -m pip install mlx-lm",
+                        tier.model,
+                        python = python.display()
+                    ),
+                },
                 Some(bytes) => DoctorCheck {
                     status: DoctorStatus::Ok,
                     name: "vision-tier-text".to_string(),
@@ -410,6 +422,20 @@ pub(in crate::doctor) fn check_vision_tiers(vision: &VisionConfig) -> Vec<Doctor
         });
     }
     checks
+}
+
+/// Whether `python` finds `module` on its import path, without importing it.
+fn interpreter_imports(python: &Path, module: &str) -> bool {
+    std::process::Command::new(python)
+        .arg("-c")
+        .arg(format!(
+            "import importlib.util, sys; sys.exit(importlib.util.find_spec({module:?}) is None)"
+        ))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn gigabytes(bytes: u64) -> String {
@@ -894,9 +920,74 @@ mod cdp_port_tests {
         assert_eq!(name, "engine-satisfiability");
     }
 
+    /// A `python3 -S` wrapper: no site-packages, so it imports only what
+    /// `packages` holds.
+    #[cfg(unix)]
+    fn interpreter(dir: &Path, packages: Option<&Path>) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let (name, env) = match packages {
+            Some(packages) => (
+                "python-with",
+                format!("PYTHONPATH='{}' ", packages.display()),
+            ),
+            None => ("python-without", String::new()),
+        };
+        let script = dir.join(name);
+        std::fs::write(&script, format!("#!/bin/sh\n{env}exec python3 -S \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn interpreter_with_mlx_lm(dir: &Path) -> std::path::PathBuf {
+        let packages = dir.join("site");
+        std::fs::create_dir_all(packages.join("mlx_lm")).unwrap();
+        std::fs::write(packages.join("mlx_lm/__init__.py"), "").unwrap();
+        interpreter(dir, Some(&packages))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_text_tier_fails_when_its_interpreter_cannot_import_mlx_lm() {
+        let dir = tempfile::tempdir().unwrap();
+        let without = interpreter(dir.path(), None);
+        let mut vision = VisionConfig {
+            text_tier: Some(config::VisionTextTierConfig {
+                base_url: "http://127.0.0.1:9102".into(),
+                model: "org/never-downloaded-text-model".into(),
+                adapter: None,
+            }),
+            python: Some(without.clone()),
+            ..VisionConfig::default()
+        };
+        let row = &check_vision_tiers(&vision)[0];
+        assert_eq!(row.status, DoctorStatus::Fail, "{}", row.detail);
+        assert_eq!(
+            row.detail,
+            format!(
+                "org/never-downloaded-text-model · {python} cannot import mlx_lm · fix: {python} -m pip install mlx-lm",
+                python = without.display()
+            )
+        );
+
+        vision.python = Some(interpreter_with_mlx_lm(dir.path()));
+        let row = &check_vision_tiers(&vision)[0];
+        assert_eq!(row.status, DoctorStatus::Warn, "{}", row.detail);
+
+        vision.python = Some(without);
+        vision.text_tier.as_mut().unwrap().base_url = "https://text.example/vision".into();
+        let row = &check_vision_tiers(&vision)[0];
+        assert_eq!(row.status, DoctorStatus::Warn, "{}", row.detail);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn vision_tiers_name_each_model_and_its_memory() {
-        let mut vision = VisionConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut vision = VisionConfig {
+            python: Some(interpreter_with_mlx_lm(dir.path())),
+            ..VisionConfig::default()
+        };
         let rows = check_vision_tiers(&vision);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "vision-tier-text");
