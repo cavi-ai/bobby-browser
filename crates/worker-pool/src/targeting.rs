@@ -659,27 +659,28 @@ impl ResolvedTarget {
         self.eval(page, &script).await
     }
 
-    /// Chooses the option of an ARIA combobox whose text is `value` (ignoring
-    /// case and spacing): opens the combobox, types `value` to filter it when
-    /// it takes text, waits for that exact option to show, clicks it, and
-    /// returns the option text once the combobox shows it.
+    /// Chooses the option of an ARIA combobox, menu button or text box whose
+    /// text is `value` (ignoring case and spacing): types `value` to filter it
+    /// when it takes text, else opens it, waits for that option (or, with no
+    /// option roles, a newly shown element reading `value`), presses it, and
+    /// returns the option text once the control or its menu shows it. With no
+    /// such option the error lists every option the control offers.
     pub async fn select_combobox_option(
         &self,
         page: &Page,
         value: &str,
     ) -> Result<String, CommandError> {
-        if self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await? {
+        let takes_text = self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await?;
+        self.eval::<bool>(page, COMBOBOX_MARK_SCRIPT).await?;
+        if takes_text {
             self.type_text(page, value, true).await?;
         } else {
             self.click(page).await?;
         }
-        let wanted = serde_json::to_string(value).map_err(|error| {
-            target_error(
-                ErrorCode::InvalidRequest,
-                format!("invalid option value: {error}"),
-            )
-        })?;
-        let find = format!("const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_OPTION_FOUND}");
+        let wanted = option_json(value)?;
+        let find = format!(
+            "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
+        );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
         let option = loop {
             let found: ComboboxOption = self.eval(page, &find).await?;
@@ -689,34 +690,36 @@ impl ResolvedTarget {
             tokio::time::sleep(COMBOBOX_POLL).await;
         };
         let Some(text) = option.text else {
+            let offered = if takes_text {
+                self.offered_options(page).await?
+            } else {
+                Vec::new()
+            };
             return Err(target_error(
                 ErrorCode::TargetNotFound,
                 format!(
-                    "no option of the combobox reads {value:?}; options shown: {:?}",
-                    option.shown
+                    "no option of the combobox reads {value:?}; options: {:?}",
+                    if offered.is_empty() {
+                        option.shown
+                    } else {
+                        offered
+                    }
                 ),
             ));
         };
-        // A trusted press where the point is in the top-level viewport; an
-        // option inside a frame takes the page's own event sequence.
-        match (option.x, option.y) {
-            (Some(x), Some(y)) if self.frame_path.is_empty() && self.frame_owners.is_empty() => {
-                page.click(Point { x, y }).await.map_err(cdp_error)?;
-            }
-            _ => {
-                let press =
-                    format!("const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_OPTION_PRESS}");
-                self.eval::<bool>(page, &press).await?;
-            }
-        }
+        self.press_option(page, option.x.zip(option.y), &wanted, COMBOBOX_ROLELESS)
+            .await?;
         let shows = format!(
             "const chosen={}; {COMBOBOX_SHOWS_SCRIPT}",
-            serde_json::to_string(&text).unwrap_or_default()
+            option_json(&text)?
         );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
         loop {
             let shown: ComboboxShown = self.eval(page, &shows).await?;
             if shown.chosen {
+                if !takes_text {
+                    self.close_menu(page).await?;
+                }
                 return Ok(text);
             }
             if Instant::now() >= deadline {
@@ -730,6 +733,127 @@ impl ResolvedTarget {
             }
             tokio::time::sleep(COMBOBOX_POLL).await;
         }
+    }
+
+    /// Sets the checked items of a menu button's menu to exactly `values`,
+    /// one press at a time, reopening the menu when a press closes it; closes
+    /// the menu and returns the checked item texts.
+    pub async fn select_combobox_options(
+        &self,
+        page: &Page,
+        values: &[String],
+    ) -> Result<Vec<String>, CommandError> {
+        let chosen = serde_json::to_string(values).map_err(|error| {
+            target_error(
+                ErrorCode::InvalidRequest,
+                format!("invalid option values: {error}"),
+            )
+        })?;
+        let read = format!("const chosen={chosen}; {COMBOBOX_OPTIONS} {COMBOBOX_ITEMS_STATE}");
+        let mut opens = 0;
+        let mut presses = 0;
+        loop {
+            let mut state: ComboboxItems = self.eval(page, &read).await?;
+            if state.items.is_empty() {
+                if opens > values.len() + 1 {
+                    return Err(target_error(
+                        ErrorCode::TargetNotFound,
+                        "the menu shows no items",
+                    ));
+                }
+                self.click(page).await?;
+                opens += 1;
+                let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
+                while state.items.is_empty() && Instant::now() < deadline {
+                    tokio::time::sleep(COMBOBOX_POLL).await;
+                    state = self.eval(page, &read).await?;
+                }
+                continue;
+            }
+            if !state.missing.is_empty() {
+                return Err(target_error(
+                    ErrorCode::TargetNotFound,
+                    format!(
+                        "no item of the menu reads {:?}; items: {:?}",
+                        state.missing, state.items
+                    ),
+                ));
+            }
+            let Some(next) = state.next else {
+                self.close_menu(page).await?;
+                return Ok(state.checked);
+            };
+            presses += 1;
+            if presses > state.items.len() * 2 {
+                return Err(target_error(
+                    ErrorCode::VerificationFailed,
+                    format!("the menu keeps {:?} checked", state.checked),
+                ));
+            }
+            let was = state.checked.contains(&next);
+            self.press_option(page, state.x.zip(state.y), &option_json(&next)?, "")
+                .await?;
+            // The next read waits for the press to land, so an item is never
+            // pressed twice.
+            let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
+            loop {
+                tokio::time::sleep(COMBOBOX_POLL).await;
+                let after: ComboboxItems = self.eval(page, &read).await?;
+                if after.items.is_empty()
+                    || after.checked.contains(&next) != was
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A trusted press where the point is in the top-level viewport; an
+    /// option inside a frame takes the page's own event sequence.
+    async fn press_option(
+        &self,
+        page: &Page,
+        point: Option<(f64, f64)>,
+        wanted: &str,
+        roleless: &str,
+    ) -> Result<(), CommandError> {
+        match point {
+            Some((x, y)) if self.frame_path.is_empty() && self.frame_owners.is_empty() => {
+                page.click(Point { x, y }).await.map_err(cdp_error)?;
+            }
+            _ => {
+                let press = format!(
+                    "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_PRESS}"
+                );
+                self.eval::<bool>(page, &press).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Empties the text that filtered the options and reads every option the
+    /// control then offers.
+    async fn offered_options(&self, page: &Page) -> Result<Vec<String>, CommandError> {
+        self.clear_editable(page).await?;
+        let read =
+            format!("const wanted=''; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_OFFERED}");
+        let deadline = Instant::now() + COMBOBOX_OPTION_WAIT / 2;
+        loop {
+            let offered: Vec<String> = self.eval(page, &read).await?;
+            if !offered.is_empty() || Instant::now() >= deadline {
+                return Ok(offered);
+            }
+            tokio::time::sleep(COMBOBOX_POLL).await;
+        }
+    }
+
+    /// Closes the menu a menu button left open after a choice.
+    async fn close_menu(&self, page: &Page) -> Result<(), CommandError> {
+        if self.eval::<bool>(page, COMBOBOX_MENU_OPEN_SCRIPT).await? {
+            self.click(page).await?;
+        }
+        Ok(())
     }
 
     pub async fn select_options(
@@ -886,25 +1010,70 @@ struct ComboboxShown {
     value: String,
 }
 
+#[derive(Deserialize)]
+struct ComboboxItems {
+    items: Vec<String>,
+    missing: Vec<String>,
+    checked: Vec<String>,
+    next: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+fn option_json(value: &str) -> Result<String, CommandError> {
+    serde_json::to_string(value).map_err(|error| {
+        target_error(
+            ErrorCode::InvalidRequest,
+            format!("invalid option value: {error}"),
+        )
+    })
+}
+
 /// Function body with `el` bound: whether the combobox is a text field.
 const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
 
-/// Shared by the option scripts, with `el` and `wanted` bound: the visible,
-/// enabled options of the combobox's own listbox (`aria-controls` or
-/// `aria-owns`), else of its document, and the one whose text is `wanted`.
-const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"]')]).filter(o=>visible(o)&&enabled(o)); let options=of(ids.map(id=>doc.getElementById(id)).filter(Boolean)); if(!options.length) options=of([doc]); const exact=options.filter(o=>norm(o.textContent)===norm(wanted)); const match=(exact.length?exact:options.filter(o=>norm(o.textContent).toLowerCase()===norm(wanted).toLowerCase()))[0];";
+/// Function body with `el` bound: records the elements shown before the
+/// control is typed into or opened, so suggestions without option roles can
+/// be told apart from the page around them.
+const COMBOBOX_MARK_SCRIPT: &str = "const shown=new WeakSet(); for(const node of el.ownerDocument.body?.querySelectorAll('*')||[]) if(node.getClientRects().length) shown.add(node); el[Symbol.for('bobby.shownBeforeOptions')]=shown; return true;";
 
-/// After [`COMBOBOX_OPTIONS`]: the matching option's text and viewport
-/// center, or the texts of the options shown.
+/// Shared by the option scripts, with `el` bound: the visible, enabled
+/// options and menu items of the control's own popup (`aria-controls` or
+/// `aria-owns`), else of its document.
+const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]')]).filter(o=>visible(o)&&enabled(o)); let options=of(ids.map(id=>doc.getElementById(id)).filter(Boolean)); if(!options.length) options=of([doc]);";
+
+/// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
+/// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
+const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&row(n)); }";
+
+/// With `wanted` bound, after the option lists: the option whose text is
+/// `wanted`, exactly, else ignoring case.
+const COMBOBOX_PICK: &str = "const exact=options.filter(o=>norm(o.textContent)===norm(wanted)); const match=(exact.length?exact:options.filter(o=>norm(o.textContent).toLowerCase()===norm(wanted).toLowerCase()))[0];";
+
+/// After [`COMBOBOX_PICK`]: the matching option's text and viewport center,
+/// or the texts of the options shown.
 const COMBOBOX_OPTION_FOUND: &str = "if(!match) return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80))}; match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
 
-/// After [`COMBOBOX_OPTIONS`]: presses the matching option with the pointer
+/// After [`COMBOBOX_PICK`]: presses the matching option with the pointer
 /// and mouse events a person's click fires.
 const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); for(const type of ['pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{bubbles:true,cancelable:true,composed:true,view:doc.defaultView}))} return true;";
 
-/// Function body with `el` and `chosen` bound: whether the combobox, or the
-/// nearest of its ancestors that holds no option, shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector('[role=\"option\"]')) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+/// After the option lists: the texts of every option offered.
+const COMBOBOX_OFFERED: &str =
+    "return options.slice(0,50).map(o=>norm(o.textContent).slice(0,120));";
+
+/// With `chosen` bound, after [`COMBOBOX_OPTIONS`]: the menu's items, the
+/// chosen values no item reads, the checked items, and the first item whose
+/// checked state differs from `chosen`, with its viewport center.
+const COMBOBOX_ITEMS_STATE: &str = "const key=s=>norm(s).toLowerCase(); const want=new Set(chosen.map(key)); const on=o=>o.getAttribute('aria-checked')==='true'||o.getAttribute('aria-selected')==='true'; const items=options.map(o=>({o,text:norm(o.textContent),on:on(o)})); const missing=items.length?chosen.filter(v=>!items.some(i=>key(i.text)===key(v))):[]; const next=items.find(i=>want.has(key(i.text))!==i.on); let x=null,y=null; if(next){next.o.scrollIntoView({block:'nearest'}); const r=next.o.getBoundingClientRect(); x=r.left+r.width/2; y=r.top+r.height/2;} return {items:items.slice(0,50).map(i=>i.text.slice(0,120)), missing, checked:items.filter(i=>i.on).map(i=>i.text), next:next?next.text:null, x, y};";
+
+/// Function body with `el` bound: whether the control's menu is still open.
+const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='false') return false; const visible=o=>{const r=o.getBoundingClientRect(); return r.width>0&&r.height>0&&getComputedStyle(o).visibility!=='hidden'}; return [...el.ownerDocument.querySelectorAll('[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"],[role=\"option\"]')].some(visible);";
+
+/// Function body with `el` and `chosen` bound: whether the control, a menu
+/// item checked for the chosen text, or the nearest ancestor of the control
+/// that holds no option shows the chosen text.
+const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
 
 /// Function body with `el` bound: whether `el` takes typed text. Checked
 /// before any key is dispatched.

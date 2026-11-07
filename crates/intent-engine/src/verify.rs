@@ -107,7 +107,13 @@ pub fn summarize_target(target: &types::TargetSpec) -> String {
 pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
     let is_file_input = is_file_input(candidate);
     let role = candidate.role.as_deref().unwrap_or("");
-
+    // A button that opens a menu or listbox chooses among its items.
+    if role == "button" && candidate.attributes.contains_key("aria-haspopup") {
+        return matches!(
+            value,
+            ControlAction::SelectOne { .. } | ControlAction::SelectMany { .. }
+        ) || compatible_role(value, role, is_file_input);
+    }
     compatible_role(value, role, is_file_input)
 }
 
@@ -117,7 +123,10 @@ pub(crate) fn compatible_role(value: &ControlAction, role: &str, is_file_input: 
         ControlAction::SetText { .. } => {
             !is_file_input && matches!(role, "textbox" | "searchbox" | "spinbutton")
         }
-        ControlAction::SelectOne { .. } => !is_file_input && matches!(role, "combobox" | "listbox"),
+        // A text box takes the suggestion that reads the value.
+        ControlAction::SelectOne { .. } => {
+            !is_file_input && matches!(role, "combobox" | "listbox" | "textbox" | "searchbox")
+        }
         ControlAction::SelectMany { .. } => !is_file_input && role == "listbox",
         ControlAction::SetChecked { .. } => matches!(role, "checkbox" | "radio"),
         ControlAction::PasswordManagerFill => {
@@ -262,7 +271,7 @@ fn verify_cleared(evidence: &[Evidence]) -> Result<(), String> {
         FormControlState::Redacted { present } if !present => Ok(()),
         FormControlState::Checked { checked } if !checked => Ok(()),
         FormControlState::Selection { values } if values.is_empty() => Ok(()),
-        FormControlState::Files { count } if *count == 0 => Ok(()),
+        FormControlState::Files { count, .. } if *count == 0 => Ok(()),
         state => Err(format!("clear did not produce an empty state: {state:?}")),
     }
 }

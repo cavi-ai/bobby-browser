@@ -2814,7 +2814,10 @@ fn file_snapshot_control(id: &str, role: &str, accessible_name: &str) -> types::
         description: None,
         placeholder: None,
         autocomplete: None,
-        state: types::FormControlState::Files { count: 0 },
+        state: types::FormControlState::Files {
+            count: 0,
+            names: Vec::new(),
+        },
         constraints: types::FormControlConstraints::default(),
         validity: types::FormControlValidity {
             will_validate: true,

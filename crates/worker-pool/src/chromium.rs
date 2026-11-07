@@ -2675,9 +2675,21 @@ impl crate::InputEngine for ChromiumWorker {
                 ));
             }
         }
-        let resolved = self
+        let resolved = match self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
-            .await?;
+            .await
+        {
+            Err(error) if error.code == ErrorCode::TargetAmbiguous => {
+                match command.target.as_ref().and_then(crate::textbox_target) {
+                    Some(textbox) => self
+                        .resolve_target(page_id, &page, &command.selector, Some(&textbox))
+                        .await
+                        .map_err(|_| error)?,
+                    None => return Err(error),
+                }
+            }
+            resolved => resolved?,
+        };
         ensure_editable_control(&page, &resolved).await?;
         self.bring_page_to_front(&page).await;
         let mut humanization_evidence = None;
@@ -2813,6 +2825,10 @@ impl crate::InputEngine for ChromiumWorker {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        if let Some(encoded) = resolved.form_control(&page).await? {
+            let control = crate::decode_form_control(&encoded, unnamed_control_target())?;
+            refuse_shown_files(&control.state, &path_strings)?;
+        }
         upload_cache.commit(resolved_uploads);
         resolved.set_files(&page, path_strings.clone()).await?;
         Ok(vec![
@@ -2881,23 +2897,30 @@ impl crate::InputEngine for ChromiumWorker {
                 resolved.set_checked(&page, *checked).await?;
             }
             ControlAction::SelectOne { value } => {
-                committed = Some(vec![if before_control.control_kind
-                    == types::FormControlKind::Combobox
-                {
-                    resolved.select_combobox_option(&page, value).await?
-                } else {
-                    resolved.select_option(&page, value).await?
-                }]);
+                committed = Some(vec![
+                    if crate::presses_options(before_control.control_kind) {
+                        resolved.select_combobox_option(&page, value).await?
+                    } else {
+                        resolved.select_option(&page, value).await?
+                    },
+                ]);
             }
             ControlAction::SelectMany { values } => {
-                committed = Some(resolved.select_options(&page, values).await?);
+                committed = Some(
+                    if before_control.control_kind == types::FormControlKind::Combobox {
+                        resolved.select_combobox_options(&page, values).await?
+                    } else {
+                        resolved.select_options(&page, values).await?
+                    },
+                );
             }
             ControlAction::SetFiles { paths } => {
                 let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-                let paths = resolve_upload_paths(&self.upload_roots, &requested)?
+                let paths: Vec<String> = resolve_upload_paths(&self.upload_roots, &requested)?
                     .into_iter()
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect();
+                refuse_shown_files(&before_control.state, &paths)?;
                 resolved.set_files(&page, paths).await?;
             }
             ControlAction::Clear => match before_control.control_kind {
@@ -4110,6 +4133,35 @@ fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError 
         message: error.to_string(),
         layer: ErrorLayer::Driver,
         retryable: driver_error_is_retryable(code),
+    }
+}
+
+/// A target for a control read outside a control action.
+fn unnamed_control_target() -> types::FormControlTarget {
+    types::FormControlTarget {
+        attributes: Default::default(),
+        role: String::new(),
+        accessible_name: String::new(),
+        ordinal: None,
+        frame_path: Vec::new(),
+        shadow_path: Vec::new(),
+    }
+}
+
+/// An upload into a file control that already holds or shows other files
+/// would replace them: it is refused until the control is cleared.
+fn refuse_shown_files(
+    state: &types::FormControlState,
+    paths: &[String],
+) -> Result<(), CommandError> {
+    match crate::other_files_shown(state, paths) {
+        Some(names) => Err(driver_error(
+            ErrorCode::IntentActionMismatch,
+            format!(
+                "the file control already holds {names:?}; clear it before uploading another file"
+            ),
+        )),
+        None => Ok(()),
     }
 }
 

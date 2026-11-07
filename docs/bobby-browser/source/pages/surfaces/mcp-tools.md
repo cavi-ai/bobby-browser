@@ -156,7 +156,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 
 `download_url` saves under the configured downloads directory. `saveAs` is relative to it or an absolute path inside it. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
 
-`selectOne` and `selectMany` match an option's value first, then its visible label.
+`selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu, and `selectOne` on a text box types the value and clicks the suggestion that reads it. A value no option reads fails with the options offered.
 
 Boundary tools (`click_and_wait_for_*`, `intent_follow` with `boundary`, `intent_submit_and_verify`) accept `autoCheckpoint` to checkpoint around a page-changing step. `click` and the `click_and_wait_for_*` tools accept pinned `commandId` and `attemptId`.
 

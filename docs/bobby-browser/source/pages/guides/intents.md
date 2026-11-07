@@ -98,8 +98,8 @@ Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, 
 | Kind | Shape | Notes |
 |---|---|---|
 | `setText` | `{value, clearFirst?}` | `clearFirst` defaults to true |
-| `selectOne` | `{value}` | Matches option value first, then visible label |
-| `selectMany` | `{values}` | Multi-select |
+| `selectOne` | `{value}` | Matches option value first, then visible label. A text box takes the suggestion that reads the value |
+| `selectMany` | `{values}` | Multi-select, or a menu button's checkbox items |
 | `setChecked` | `{checked}` | Checkbox or radio. A radio cannot be unchecked |
 | `setFiles` | `{paths}` | Needs `file:upload` |
 | `clear` | none | Empties the field |

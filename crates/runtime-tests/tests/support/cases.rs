@@ -6408,3 +6408,328 @@ pub async fn complete_form_honors_a_field_ordinal(rig: &Rig) {
     assert!(page_text_contains(&page, "Titles: |Engineer||"), "{page}");
     live.close().await;
 }
+
+/// Menus opened by a button take selectOne (a radio item) and selectMany
+/// (checkbox items), and close once the choice is made.
+pub async fn button_menus_take_select_one_and_select_many(rig: &Rig) {
+    let body = r#"<form>
+        <div id="mode-label">Work mode</div>
+        <button type="button" id="mode" aria-haspopup="menu" aria-expanded="false" aria-labelledby="mode-label">Select...</button>
+        <div id="mode-menu" role="menu" hidden>
+          <div role="menuitemradio" aria-checked="false" tabindex="-1">Remote</div>
+          <div role="menuitemradio" aria-checked="false" tabindex="-1">Hybrid</div>
+          <div role="menuitemradio" aria-checked="false" tabindex="-1">On site</div>
+        </div>
+        <div id="langs-label">Languages</div>
+        <button type="button" id="langs" aria-haspopup="menu" aria-expanded="false" aria-labelledby="langs-label">Select...</button>
+        <div id="langs-menu" role="menu" hidden>
+          <div role="menuitemcheckbox" aria-checked="false" tabindex="-1">English</div>
+          <div role="menuitemcheckbox" aria-checked="true" tabindex="-1">French</div>
+          <div role="menuitemcheckbox" aria-checked="false" tabindex="-1">German</div>
+        </div>
+        </form><p id="picked"></p>
+        <script>
+          const menus = [["mode", "mode-menu"], ["langs", "langs-menu"]].map(([b, m]) =>
+            [document.getElementById(b), document.getElementById(m)]);
+          const checked = (menu) => [...menu.children]
+            .filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent);
+          const show = () => {
+            document.getElementById("picked").textContent =
+              `Work mode: ${checked(menus[0][1]).join(", ")}; Languages: ${checked(menus[1][1]).join(", ")}; ` +
+              `open: ${menus.filter(([, menu]) => !menu.hidden).length}`;
+          };
+          for (const [button, menu] of menus) {
+            button.addEventListener("click", () => {
+              menu.hidden = !menu.hidden;
+              button.setAttribute("aria-expanded", String(!menu.hidden));
+              show();
+            });
+            for (const item of menu.children) {
+              item.addEventListener("click", () => {
+                if (item.getAttribute("role") === "menuitemradio") {
+                  for (const other of menu.children) other.setAttribute("aria-checked", "false");
+                  item.setAttribute("aria-checked", "true");
+                  button.textContent = item.textContent;
+                  menu.hidden = true;
+                  button.setAttribute("aria-expanded", "false");
+                } else {
+                  item.setAttribute("aria-checked", String(item.getAttribute("aria-checked") !== "true"));
+                  button.textContent = checked(menu).join(", ") || "Select...";
+                }
+                show();
+              });
+            }
+          }
+          show();
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/menus", Route::Html(page("Menus", body)))]).await;
+    let live = Live::open(rig, &site.url("/menus")).await;
+    let filled = live
+        .call(
+            "intent_complete_form",
+            json!({"purpose":"Fill the preferences",
+                   "fields":[
+                     {"name":"Work mode","purpose":"work mode",
+                      "value":{"kind":"selectOne","value":"Hybrid"},
+                      "hints":{"role":"button","accessibleName":"Work mode"}},
+                     {"name":"Languages","purpose":"spoken languages",
+                      "value":{"kind":"selectMany","values":["English","German"]},
+                      "hints":{"role":"button","accessibleName":"Languages"}}]}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(
+            &page,
+            "Work mode: Hybrid; Languages: English, German; open: 0"
+        ),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// A text box whose suggestions carry no role takes selectOne: the suggestion
+/// reading the value is pressed, so the field keeps it after it loses focus.
+pub async fn text_boxes_pick_a_suggestion_without_a_role(rig: &Rig) {
+    let body = r#"<form><label for="city">Current location</label>
+        <input id="city" type="text" autocomplete="off"><input type="hidden" id="place">
+        <div id="results"></div></form><p id="picked"></p>
+        <script>
+          const input = document.getElementById("city");
+          const place = document.getElementById("place");
+          const results = document.getElementById("results");
+          const places = ["Springfield, Region One", "Springfield Heights, Region Two", "Shelbyville, Region One"];
+          const show = () => {
+            document.getElementById("picked").textContent = `Location: ${input.value} (${place.value || "none"})`;
+          };
+          input.addEventListener("input", () => {
+            place.value = "";
+            results.innerHTML = "";
+            const query = input.value.toLowerCase();
+            places.forEach((name, index) => {
+              if (!query || !name.toLowerCase().includes(query)) return;
+              const row = document.createElement("div");
+              row.textContent = name;
+              row.style.padding = "4px";
+              row.addEventListener("click", () => {
+                input.value = name;
+                place.value = `place-${index}`;
+                results.innerHTML = "";
+                show();
+              });
+              results.append(row);
+            });
+          });
+          input.addEventListener("blur", () => setTimeout(() => {
+            if (!place.value) { input.value = ""; results.innerHTML = ""; }
+            show();
+          }, 300));
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/place", Route::Html(page("Place", body)))]).await;
+    let live = Live::open(rig, &site.url("/place")).await;
+    let filled = live
+        .call(
+            "intent_complete_form",
+            json!({"purpose":"Set the location",
+                   "fields":[{"name":"Current location","purpose":"current location",
+                              "value":{"kind":"selectOne","value":"Springfield Heights, Region Two"},
+                              "hints":{"role":"textbox","accessibleName":"Current location"}}]}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    let blurred = live
+        .call("click", json!({"target":{"css":"#picked"}}))
+        .await;
+    assert_eq!(blurred["status"], "completed", "{blurred}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Location: Springfield Heights, Region Two (place-1)"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// When typing the value leaves no option of a combobox, the failure lists
+/// every option it offers, and one of them can then be chosen.
+pub async fn a_combobox_without_the_value_lists_its_options(rig: &Rig) {
+    let body = r#"<label id="area-label" for="area">Area</label>
+        <input id="area" role="combobox" aria-labelledby="area-label" aria-autocomplete="list" aria-controls="area-list" autocomplete="off">
+        <div id="area-list" role="listbox"></div><p id="picked"></p>
+        <script>
+          const input = document.getElementById("area");
+          const list = document.getElementById("area-list");
+          const areas = ["North Region", "East Region", "Another region in the country", "Other"];
+          const render = () => {
+            const query = input.value.toLowerCase();
+            const matches = areas.filter((area) => area.toLowerCase().includes(query));
+            list.innerHTML = matches.length ? "" : '<div class="empty">No options</div>';
+            for (const area of matches) {
+              const option = document.createElement("div");
+              option.setAttribute("role", "option");
+              option.textContent = area;
+              option.addEventListener("mousedown", (event) => {
+                event.preventDefault();
+                input.value = area;
+                list.innerHTML = "";
+                document.getElementById("picked").textContent = `Area: ${area}`;
+              });
+              list.append(option);
+            }
+          };
+          input.addEventListener("input", render);
+          input.addEventListener("focus", render);
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/area", Route::Html(page("Area", body)))]).await;
+    let live = Live::open(rig, &site.url("/area")).await;
+    let missed = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the area",
+                   "hints":{"role":"combobox","accessibleName":"Area"},
+                   "value":{"kind":"selectOne","value":"Southern Region"}}),
+        )
+        .await;
+    assert_ne!(missed["status"], "completed", "{missed}");
+    let message = missed.to_string();
+    for area in [
+        "North Region",
+        "East Region",
+        "Another region in the country",
+        "Other",
+    ] {
+        assert!(message.contains(area), "{area} is not listed: {missed}");
+    }
+    let picked = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the area",
+                   "hints":{"role":"combobox","accessibleName":"Area"},
+                   "value":{"kind":"selectOne","value":"Another region in the country"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Area: Another region in the country"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+const FILE_SLOTS: &str = r#"<form>
+    <div class="slot"><label for="resume">Resume</label><input type="file" id="resume"><span class="shown"></span></div>
+    <div class="slot"><label for="cover">Cover letter</label><input type="file" id="cover"><span class="shown"></span></div>
+    </form><p id="echo"></p>
+    <script>
+      for (const input of document.querySelectorAll('input[type="file"]')) {
+        input.addEventListener("change", () => {
+          const name = input.files[0]?.name;
+          if (!name) return;
+          input.parentElement.querySelector(".shown").textContent = name;
+          input.value = "";
+          document.getElementById("echo").textContent += ` ${input.id}=${name}`;
+        });
+      }
+    </script>"#;
+
+/// A file control whose widget takes the file and empties the input reports
+/// the file name the widget shows.
+pub async fn a_file_control_reports_the_file_its_widget_shows(rig: &Rig, dir: &std::path::Path) {
+    let resume = dir.join("first-resume.txt");
+    std::fs::write(&resume, "resume-bytes").expect("write resume");
+    let site = FixtureSite::spawn(vec![("/slots", Route::Html(page("Slots", FILE_SLOTS)))]).await;
+    let live = Live::open(rig, &site.url("/slots")).await;
+    let uploaded = live
+        .call(
+            "upload_files",
+            json!({"selector":"#resume","paths":[resume.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut files = Vec::new();
+    controls_of_kind(&snapshot, "file", &mut files);
+    let resume_slot = files
+        .iter()
+        .find(|control| control["accessibleName"] == "Resume")
+        .unwrap_or_else(|| panic!("no Resume file control: {snapshot}"));
+    assert_eq!(
+        resume_slot["state"]["names"],
+        json!(["first-resume.txt"]),
+        "{resume_slot}"
+    );
+    let cover_slot = files
+        .iter()
+        .find(|control| control["accessibleName"] == "Cover letter")
+        .unwrap_or_else(|| panic!("no Cover letter file control: {snapshot}"));
+    assert!(cover_slot["state"].get("names").is_none(), "{cover_slot}");
+    live.close().await;
+}
+
+/// An upload addressed by a slot's label lands in that slot, and one whose
+/// slot already shows another file is refused instead of replacing it.
+pub async fn uploads_by_label_refuse_a_slot_that_shows_a_file(rig: &Rig, dir: &std::path::Path) {
+    let first = dir.join("first-resume.txt");
+    let second = dir.join("second-resume.txt");
+    let cover = dir.join("cover.txt");
+    for path in [&first, &second, &cover] {
+        std::fs::write(path, "bytes").expect("write upload");
+    }
+    let path = |path: &std::path::Path| path.to_str().expect("utf8 path").to_owned();
+    let site = FixtureSite::spawn(vec![("/slots", Route::Html(page("Slots", FILE_SLOTS)))]).await;
+    let live = Live::open(rig, &site.url("/slots")).await;
+    for (slot, file) in [("Resume", &first), ("Cover letter", &cover)] {
+        let uploaded = live
+            .call(
+                "upload_files",
+                json!({"target":{"role":"button","accessibleName":slot},"paths":[path(file)]}),
+            )
+            .await;
+        assert_eq!(uploaded["status"], "completed", "{slot}: {uploaded}");
+    }
+    let refused = live
+        .call(
+            "upload_files",
+            json!({"target":{"role":"button","accessibleName":"Resume"},"paths":[path(&second)]}),
+        )
+        .await;
+    assert_ne!(refused["status"], "completed", "{refused}");
+    assert!(
+        refused.to_string().contains("first-resume.txt"),
+        "the refusal names the file the slot shows: {refused}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "resume=first-resume.txt cover=cover.txt\""),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// type_text with a css target that also matches the editable's wrappers
+/// types into the editable node.
+pub async fn type_text_css_prefers_the_editable_node(rig: &Rig) {
+    let body = r#"<div aria-label="Links" style="padding:4px">
+        <div aria-label="Links" style="padding:4px">
+          <div aria-label="Links" contenteditable="true" style="min-height:20px;border:1px solid"></div>
+        </div></div><p id="echo"></p>
+        <script>
+          document.addEventListener("input", (event) => {
+            document.getElementById("echo").textContent = "Links: " + event.target.innerText;
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/links", Route::Html(page("Links", body)))]).await;
+    let live = Live::open(rig, &site.url("/links")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"css":"[aria-label=\"Links\"]"},"value":"portfolio link"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "{typed}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Links: portfolio link"), "{page}");
+    live.close().await;
+}

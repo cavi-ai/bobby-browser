@@ -594,9 +594,32 @@ fn compatible_matches_worker_candidate_signals() {
         &ControlAction::SelectOne { value: "CA".into() },
         &combobox("State")
     ));
-    assert!(!compatible(
+    // A text box takes the suggestion that reads the value.
+    assert!(compatible(
         &ControlAction::SelectOne { value: "CA".into() },
         &textbox("Email")
+    ));
+    assert!(!compatible(
+        &ControlAction::SelectOne { value: "CA".into() },
+        &file_input("Resume")
+    ));
+    let menu_button = candidate(
+        "mode",
+        Some("button"),
+        "Work mode",
+        BTreeMap::from([("aria-haspopup".to_owned(), "menu".to_owned())]),
+    );
+    assert!(compatible(
+        &ControlAction::SelectMany {
+            values: vec!["English".into()],
+        },
+        &menu_button
+    ));
+    assert!(!compatible(
+        &ControlAction::SelectMany {
+            values: vec!["English".into()],
+        },
+        &candidate("save", Some("button"), "Save", BTreeMap::new())
     ));
     assert!(compatible(
         &ControlAction::SetChecked { checked: true },
