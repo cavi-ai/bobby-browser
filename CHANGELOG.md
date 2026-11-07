@@ -16,6 +16,7 @@
 - After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
 - `bobby install` keeps an existing `[vision].collect_training_data = true` unless `--no-collect-training-data` is passed.
 - A target's `accessibleName` resolves when it differs from the control's name only by a trailing required marker or whitespace.
+- `hints.accessibleName` accepts names up to 2048 characters, the same limit as a target.
 
 ## 0.23.0 - 2026-11-04
 

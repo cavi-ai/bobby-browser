@@ -2366,7 +2366,8 @@ fn intent_hints() -> Value {
     object(
         json!({
             "role":nullable(string(0, 256)),
-            "accessibleName":nullable(string(0, 256)),
+            // Same limit as a target, so a hint can carry any name a snapshot emits.
+            "accessibleName":nullable(string(0, 2048)),
             "nearText":nullable(json!({"$ref":"#/$defs/TextMatch"})),
             "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
             "framePath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),
@@ -3619,6 +3620,39 @@ mod tests {
         jsonschema::validator_for(schema)
             .expect("schema compiles")
             .is_valid(instance)
+    }
+
+    #[test]
+    fn hints_take_any_accessible_name_a_target_can_carry() {
+        let limit = definitions()["ControlTarget"]["properties"]["accessibleName"]["maxLength"]
+            .as_u64()
+            .expect("target name limit") as usize;
+        let hints = json!({"role":"checkbox","accessibleName":"n".repeat(limit)});
+        let scope = json!({
+            "sessionId":"10000000-0000-4000-8000-000000000001",
+            "pageId":"10000000-0000-4000-8000-000000000002"
+        });
+        let mut form = json!({
+            "sessionId":scope["sessionId"],
+            "pageId":scope["pageId"],
+            "purpose":"answer the consent question",
+            "fields":[{"name":"consent","purpose":"consent","value":{"kind":"setChecked","checked":true},"hints":hints}]
+        });
+        validate_tool_arguments("intent_complete_form", &form).expect("form hints validate");
+        form["fields"][0]["revealedBy"] = form["fields"][0]["hints"].clone();
+        validate_tool_arguments("intent_complete_form", &form).expect("revealedBy validates");
+        let fill = json!({
+            "sessionId":scope["sessionId"],
+            "pageId":scope["pageId"],
+            "purpose":"consent",
+            "value":{"kind":"setChecked","checked":true},
+            "hints":form["fields"][0]["hints"].clone()
+        });
+        validate_tool_arguments("intent_fill", &fill).expect("fill hints validate");
+        form["fields"][0]["hints"]["accessibleName"] = json!("n".repeat(limit + 1));
+        let violation = validate_tool_arguments("intent_complete_form", &form)
+            .expect_err("a name past the target limit is rejected");
+        assert_eq!(violation.pointer, "/fields/0/hints/accessibleName");
     }
 
     #[test]
