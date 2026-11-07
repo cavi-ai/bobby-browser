@@ -3417,6 +3417,10 @@ impl crate::CaptureEngine for ChromiumWorker {
                 )
             }
         };
+        let bytes = command
+            .max_edge
+            .and_then(|edge| artifact_store::image::shrink_png(&bytes, edge))
+            .unwrap_or(bytes);
         let record = self
             .artifacts
             .put_png(&self.session_id, page_id, &bytes)

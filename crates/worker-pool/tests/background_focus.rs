@@ -68,6 +68,7 @@ async fn a_screenshot_of_a_visible_page_sends_no_target_activation() {
             &page_id,
             &CaptureScreenshotCommand {
                 mode: ScreenshotMode::Viewport,
+                max_edge: None,
             },
         )
         .await

@@ -8,6 +8,7 @@
 - `[vision].assist_profiles` names browser profiles whose sessions always run with vision assist, so their escalations reach the vision corpus.
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 - `[vision].model_server` sends the managed MLX vision server's requests to an OpenAI-compatible server that holds the model, such as one `mlx-agent serve` started; `bobby install` sets it with `--vision-model-server` or from its vision menu.
+- `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
 
 ### Changed
 

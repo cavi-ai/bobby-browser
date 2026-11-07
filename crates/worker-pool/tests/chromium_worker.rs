@@ -3029,7 +3029,13 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
     ];
     for mode in modes {
         let evidence = worker_pool::capture_or_default(worker.capture())
-            .capture_screenshot(&page_id, &CaptureScreenshotCommand { mode })
+            .capture_screenshot(
+                &page_id,
+                &CaptureScreenshotCommand {
+                    mode,
+                    max_edge: None,
+                },
+            )
             .await
             .unwrap();
         let artifact_id = match &evidence[0] {
@@ -3055,6 +3061,76 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
             .join(format!("{artifact_id}.png"))
             .is_file());
     }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_capture_with_a_max_edge_stores_the_shrunk_image() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<main><h1>Shrink me</h1></main>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker_pool::capture_or_default(worker.capture())
+        .capture_screenshot(
+            &page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+                max_edge: Some(200),
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::Screenshot {
+        artifact_id,
+        width,
+        height,
+        ..
+    } = &evidence[0]
+    else {
+        panic!("unexpected evidence: {evidence:?}");
+    };
+    let stored = std::fs::read(
+        root.path()
+            .join("artifacts")
+            .join(session_id.0.to_string())
+            .join(artifact_id)
+            .join(format!("{artifact_id}.png")),
+    )
+    .unwrap();
+    assert_eq!(
+        artifact_store::image::png_size(&stored),
+        Some((*width, *height))
+    );
+    assert_eq!((*width).max(*height), 200, "{width}x{height}");
     worker.close().await.unwrap();
 }
 

@@ -61,6 +61,7 @@ fn classifies_the_required_command_matrix() {
     assert_chromium(
         PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
             mode: ScreenshotMode::Viewport,
+            max_edge: None,
         }),
         ExecutionReason::IneligibleCommand,
     );

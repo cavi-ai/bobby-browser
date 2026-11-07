@@ -192,7 +192,10 @@ impl CdpConnection {
                 page_id: Some(page_id),
                 deadline: Utc::now() + Duration::seconds(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(
-                    CaptureScreenshotCommand { mode },
+                    CaptureScreenshotCommand {
+                        mode,
+                        max_edge: None,
+                    },
                 )),
             };
             match self.runtime.submit(ctx, envelope).await {

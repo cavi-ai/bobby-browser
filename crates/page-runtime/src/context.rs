@@ -793,6 +793,7 @@ mod tests {
             primitive(PrimitiveCommand::CaptureScreenshot(
                 CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )),
         ] {

@@ -128,6 +128,7 @@ A fill succeeds only with postcondition evidence. It also reads the browser's co
 - `fields` has 1 to 128 entries. Each `name` is unique and labels the evidence. If `name` is a `controlId` from `form_snapshot` and a field has no hints, bobby uses that control.
 - Execution stops at the first failed field. The evidence keeps the fields already filled, so retry only the rest.
 - Success evidence is compact by default and lists `revealedControls` with usable targets. Pass `evidenceDetail: "full"` to debug.
+- `screenshot: true` adds `screenshot` evidence on success: the viewport, at most 1280 px on its longest side. `intent_submit_and_verify` takes it too. Unset follows [`success_screenshots`](configuration.md#mcp).
 - The MCP tool accepts top-level `hints` only when `fields` has exactly one entry without its own hints. Otherwise it fails with `hintsPerField`.
 
 ## Submit and verify

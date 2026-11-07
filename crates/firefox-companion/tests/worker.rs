@@ -851,6 +851,7 @@ async fn typed_capture_domain_preserves_firefox_unsupported_mode() {
         &PageId::new(),
         &types::CaptureScreenshotCommand {
             mode: types::ScreenshotMode::FullPage,
+            max_edge: None,
         },
     )
     .await
