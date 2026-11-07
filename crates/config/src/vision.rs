@@ -130,12 +130,18 @@ pub enum VisionAuthKind {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VisionAcpProfile {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     pub auth: VisionAuthKind,
+    /// Environment set on the harness process, over the runtime's own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Sent as `_meta` on every `session/new`; the harness reads its own keys.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub session_meta: toml::Table,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

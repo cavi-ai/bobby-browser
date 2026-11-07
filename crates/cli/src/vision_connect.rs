@@ -102,6 +102,8 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
                 command: command.to_owned(),
                 args: opts.args,
                 auth,
+                env: Default::default(),
+                session_meta: Default::default(),
             },
         )
         .map_err(|error| anyhow!("{error}"))?;

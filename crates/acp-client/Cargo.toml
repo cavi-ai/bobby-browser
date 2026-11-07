@@ -24,4 +24,6 @@ types.workspace = true
 
 [dev-dependencies]
 auth-broker.workspace = true
+config.workspace = true
+node-registry.workspace = true
 tempfile.workspace = true

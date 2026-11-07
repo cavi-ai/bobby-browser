@@ -73,13 +73,27 @@ impl ResolvedNode {
 pub struct NodeRegistry {
     nodes: BTreeMap<String, NodeConfig>,
     acp_profiles: BTreeMap<String, VisionAcpProfile>,
+    /// One provider per ACP profile; its clones share one harness process.
+    acp_vision: BTreeMap<String, acp_client::AcpVisionAssist>,
 }
 
 impl NodeRegistry {
     pub fn new(nodes: BTreeMap<String, NodeConfig>) -> Self {
+        Self::with_acp_profiles(nodes, BTreeMap::new())
+    }
+
+    fn with_acp_profiles(
+        nodes: BTreeMap<String, NodeConfig>,
+        acp_profiles: BTreeMap<String, VisionAcpProfile>,
+    ) -> Self {
+        let acp_vision = acp_profiles
+            .iter()
+            .map(|(name, profile)| (name.clone(), acp_vision_assist(name, profile)))
+            .collect();
         Self {
             nodes,
-            acp_profiles: BTreeMap::new(),
+            acp_profiles,
+            acp_vision,
         }
     }
 
@@ -97,10 +111,10 @@ impl NodeRegistry {
             );
         }
         if !config.nodes.is_empty() {
-            return Self {
-                nodes: config.nodes.clone(),
-                acp_profiles: config.vision.acp_profiles.clone(),
-            };
+            return Self::with_acp_profiles(
+                config.nodes.clone(),
+                config.vision.acp_profiles.clone(),
+            );
         }
         let mut nodes = BTreeMap::new();
         if let Some(endpoint_url) = config.vision.endpoint_url.clone() {
@@ -114,10 +128,7 @@ impl NodeRegistry {
                 },
             );
         }
-        Self {
-            nodes,
-            acp_profiles: config.vision.acp_profiles.clone(),
-        }
+        Self::with_acp_profiles(nodes, config.vision.acp_profiles.clone())
     }
 
     /// True when both a legacy `[vision].endpoint_url` and a non-empty
@@ -218,12 +229,9 @@ impl NodeRegistry {
     /// error, which the intent engine's deny-by-default double gate turns into
     /// a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
-        if let Some(profile) = self.acp_profiles.get(name) {
-            let assist =
-                acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
-                    .with_auth_strategy(vision_auth_strategy(profile.auth));
+        if let Some(assist) = self.acp_vision.get(name) {
             tracing::debug!(node = name, "node.vision.acp_resolved");
-            return Ok(Arc::new(assist));
+            return Ok(Arc::new(assist.clone()));
         }
         let resolved = self.resolve(name, NodeKind::Vision)?;
         let node = self.nodes.get(name).expect("resolve found it");
@@ -253,10 +261,10 @@ impl NodeRegistry {
             .acp_profiles
             .get(name)
             .ok_or_else(|| NodeError::Unknown(name.to_owned()))?;
-        Ok(acp_client::AcpAuthDriver::new(
-            profile.command.clone(),
-            profile.args.clone(),
-        ))
+        Ok(
+            acp_client::AcpAuthDriver::new(profile.command.clone(), profile.args.clone())
+                .with_env(profile.env.clone()),
+        )
     }
 
     pub fn auth_strategy(&self, name: &str) -> Result<AuthStrategy, NodeError> {
@@ -270,6 +278,20 @@ impl NodeRegistry {
 
 /// The name a legacy `[vision]` endpoint is carried forward under.
 pub const LEGACY_VISION_NODE: &str = "vision";
+
+fn acp_vision_assist(name: &str, profile: &VisionAcpProfile) -> acp_client::AcpVisionAssist {
+    let session_meta = match serde_json::to_value(&profile.session_meta) {
+        Ok(serde_json::Value::Object(meta)) => meta,
+        _ => {
+            tracing::warn!(node = name, "node.vision.acp_session_meta_ignored");
+            serde_json::Map::new()
+        }
+    };
+    acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
+        .with_auth_strategy(vision_auth_strategy(profile.auth))
+        .with_env(profile.env.clone())
+        .with_session_meta(session_meta)
+}
 
 pub fn vision_auth_strategy(kind: VisionAuthKind) -> AuthStrategy {
     match kind {

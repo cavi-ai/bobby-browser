@@ -38,6 +38,13 @@ impl AcpAuthDriver {
         self
     }
 
+    /// Environment set on the harness process, over the caller's own.
+    #[must_use]
+    pub fn with_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.launch = self.launch.envs(env);
+        self
+    }
+
     pub fn capabilities_from_auth_methods(methods: &[AuthMethod]) -> AuthCapabilities {
         let mut strategies = BTreeSet::from([AuthStrategy::None]);
         if !methods.is_empty() {

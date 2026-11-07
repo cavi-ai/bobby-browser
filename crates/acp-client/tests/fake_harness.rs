@@ -220,6 +220,17 @@ fn client_for_mode(log: &std::path::Path, mode: &str) -> AcpHarnessClient {
 }
 
 #[tokio::test]
+async fn harness_warnings_stay_out_of_the_structured_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let reply = client_for_mode(&log, "warning")
+        .delegate(packet())
+        .await
+        .expect("a harness warning must not corrupt the result");
+    assert_eq!(reply.result.evidence_digest, "a".repeat(64));
+}
+
+#[tokio::test]
 async fn unsupported_image_capability_is_rejected_before_child_creation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let log = temp.path().join("lifecycle.log");

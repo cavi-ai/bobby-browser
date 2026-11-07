@@ -1,11 +1,19 @@
-use std::{fs::OpenOptions, io::Write as _, path::PathBuf};
+use std::{
+    fs::OpenOptions,
+    io::Write as _,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use agent_client_protocol::{
     schema::v1::{
         AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
         CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk, InitializeRequest,
-        InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
-        PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, Notice, NoticeSeverity,
+        PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
         RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, TextContent,
         ToolCallUpdate, ToolCallUpdateFields,
     },
@@ -26,10 +34,13 @@ async fn main() -> agent_client_protocol::Result<()> {
     let log = PathBuf::from(std::env::args().nth(1).expect("lifecycle log path"));
     let mode = std::env::args().nth(2).unwrap_or_else(|| "success".into());
     let initialize_mode = mode.clone();
+    let initialize_log = log.clone();
     let authenticate_mode = mode.clone();
     let authenticate_log = log.clone();
     let new_log = log.clone();
     let close_log = log;
+    let client_takes_notices = Arc::new(AtomicBool::new(false));
+    let notices_at_initialize = Arc::clone(&client_takes_notices);
     Agent
         .builder()
         .on_receive_request(
@@ -37,6 +48,17 @@ async fn main() -> agent_client_protocol::Result<()> {
                 if initialize_mode == "initialize-disconnect" {
                     std::process::exit(0);
                 }
+                if let Ok(probe) = std::env::var("FAKE_ACP_PROBE") {
+                    record(&initialize_log, &format!("initialize:{probe}"));
+                }
+                notices_at_initialize.store(
+                    request
+                        .client_capabilities
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.notices.is_some()),
+                    Ordering::Relaxed,
+                );
                 let mut response = InitializeResponse::new(request.protocol_version)
                     .agent_capabilities(AgentCapabilities::new().prompt_capabilities(
                         PromptCapabilities::new().image(initialize_mode != "no-image"),
@@ -83,8 +105,14 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_request: NewSessionRequest, responder, _connection| {
-                record(&new_log, "new");
+            async move |request: NewSessionRequest, responder, _connection| {
+                match request.meta {
+                    Some(meta) => record(
+                        &new_log,
+                        &format!("new:{}", serde_json::Value::Object(meta)),
+                    ),
+                    None => record(&new_log, "new"),
+                }
                 responder.respond(NewSessionResponse::new("vision-child"))
             },
             agent_client_protocol::on_receive_request!(),
@@ -123,6 +151,23 @@ async fn main() -> agent_client_protocol::Result<()> {
                         _ => None,
                     })
                     .expect("packet evidence digest");
+                if mode == "warning" {
+                    // A client without `session.notices` gets the warning as message text.
+                    let update = if client_takes_notices.load(Ordering::Relaxed) {
+                        SessionUpdate::Notice(Notice::new(
+                            NoticeSeverity::Warning,
+                            "harness warning",
+                        ))
+                    } else {
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("Warning: harness warning\n\n"),
+                        )))
+                    };
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        update,
+                    ))?;
+                }
                 let body = match mode.as_str() {
                     "malformed" => "not-json".to_owned(),
                     "oversized" => "x".repeat(65 * 1024),
