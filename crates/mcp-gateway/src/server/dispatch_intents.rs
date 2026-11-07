@@ -169,6 +169,16 @@ impl Server {
                     .map(|outcome| {
                         project_complete_form_outcome(outcome, evidence_detail, &field_names)
                     });
+                let result = self
+                    .attach_success_screenshot(
+                        result,
+                        observe_context.clone(),
+                        session_id.clone(),
+                        page_id.clone(),
+                        handle,
+                        input.screenshot,
+                    )
+                    .await;
                 self.attach_post_state(result, observe_context, session_id, page_id, handle)
                     .await
             }
@@ -297,6 +307,16 @@ impl Server {
                 }
                 let result =
                     result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail));
+                let result = self
+                    .attach_success_screenshot(
+                        result,
+                        observe_context.clone(),
+                        session_id.clone(),
+                        page_id.clone(),
+                        handle,
+                        input.screenshot,
+                    )
+                    .await;
                 self.attach_post_state(result, observe_context, session_id, page_id, handle)
                     .await
             }
@@ -795,7 +815,7 @@ mod tests {
                 "condition": {"kind": "document", "ready": "commit"},
                 "timeoutMs": 1000
             }),
-            "autoCheckpoint" | "boundary" | "reSubmit" => json!(true),
+            "autoCheckpoint" | "boundary" | "reSubmit" | "screenshot" => json!(true),
             "condition" => json!({"kind": "document", "ready": "commit"}),
             "timeoutMs" => json!(1000),
             other => panic!(

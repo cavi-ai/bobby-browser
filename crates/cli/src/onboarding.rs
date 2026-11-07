@@ -910,6 +910,8 @@ pub struct InstallOptions {
     pub collect_training_data: bool,
     pub no_collect_training_data: bool,
     pub training_data_dir: PathBuf,
+    /// `[mcp].success_screenshots` to write; `None` leaves it as configured.
+    pub success_screenshots: Option<bool>,
     pub config: Option<PathBuf>,
     pub force: bool,
     pub yes: bool,
@@ -939,6 +941,7 @@ fn use_install_defaults(options: &InstallOptions) -> bool {
         && !options.download_vision_model
         && !options.collect_training_data
         && !options.no_collect_training_data
+        && options.success_screenshots.is_none()
         && !options.force
 }
 
@@ -1426,12 +1429,14 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         collect_training_data,
         no_collect_training_data,
         training_data_dir,
+        success_screenshots,
         config,
         force,
         yes,
         restart_runtime,
         disconnect_agents,
     } = &options;
+    let success_screenshots_flag = *success_screenshots;
     let hosts = hosts.as_slice();
     let extension = extension.as_deref();
     let skill = *skill;
@@ -1476,6 +1481,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         && !companion
         && !cli
         && !vision_named
+        && success_screenshots_flag.is_none()
         && !force;
     if no_vision
         && (vision_provider.is_some()
@@ -1505,6 +1511,12 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     };
     let config_path = crate::resolve_config_path(config.clone());
     let mut model_selected = vision_model.is_some();
+    let mut success_shots = success_screenshots_flag.unwrap_or(false);
+    if interactive && config_path.exists() {
+        success_shots = config::AppConfig::load(&config_path)?
+            .mcp
+            .success_screenshots;
+    }
     if (configure_vision || interactive) && config_path.exists() {
         let existing = config::AppConfig::load(&config_path)?;
         vision_state.collect_training_data = existing.vision.collect_training_data;
@@ -1791,8 +1803,13 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                     ""
                 }
             ));
+            labels.push(
+                "Success screenshots: attach a 1280 px screenshot to completed form and submit intents"
+                    .to_owned(),
+            );
             let mut defaults: Vec<bool> = items.iter().map(|item| item.enabled).collect();
             defaults.push(vision_state.enabled);
+            defaults.push(success_shots);
             let Some(selected) = MultiSelect::with_theme(&ColorfulTheme::default())
                 .with_prompt("bobby install — ↑/↓ move, space toggles, enter continues (esc quits)")
                 .items(&labels)
@@ -1806,6 +1823,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                 item.enabled = selected.contains(&index);
             }
             let vision_index = items.len();
+            success_shots = selected.contains(&(vision_index + 1));
             if !selected.contains(&vision_index) {
                 vision_state.enabled = false;
                 break;
@@ -1877,6 +1895,16 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         println!(
             "applied: {}",
             apply_vision_install(&config_path, &vision_state)?
+        );
+        ran += 1;
+    }
+    if interactive || success_screenshots_flag.is_some() {
+        config::set_success_screenshots(&config_path, success_shots)
+            .map_err(|error| anyhow!("{error}"))?;
+        println!(
+            "applied: success screenshots {} in {}",
+            if success_shots { "on" } else { "off" },
+            config_path.display()
         );
         ran += 1;
     }

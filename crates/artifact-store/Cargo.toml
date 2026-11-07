@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 hex = { workspace = true }
 anyhow.workspace = true
+png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

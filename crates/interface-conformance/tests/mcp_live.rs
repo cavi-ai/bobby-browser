@@ -742,6 +742,7 @@ async fn run_mcp_sample(
                 CommandId::new(),
                 PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 }),
             ),
         )

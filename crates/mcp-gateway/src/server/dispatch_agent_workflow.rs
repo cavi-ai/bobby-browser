@@ -398,6 +398,63 @@ impl Server {
         })
     }
 
+    /// Appends a viewport screenshot, at most
+    /// [`artifact_store::image::COMPACT_MAX_EDGE`] px on its longest side, to
+    /// a completed outcome when `requested` (or, unset, the server default)
+    /// asks for one. A failed capture leaves the outcome as it was.
+    pub(super) async fn attach_success_screenshot(
+        &self,
+        result: interface_core::InterfaceResult<Value>,
+        context: types::RequestContext,
+        session_id: types::SessionId,
+        page_id: types::PageId,
+        handle: Option<&str>,
+        requested: Option<bool>,
+    ) -> interface_core::InterfaceResult<Value> {
+        let mut outcome = result?;
+        if !requested.unwrap_or(self.success_screenshots) || outcome["status"] != "completed" {
+            return Ok(outcome);
+        }
+        let workflow_id = outcome
+            .get("workflowId")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
+        let context = types::RequestContext {
+            idempotency_key: None,
+            ..context
+        };
+        let (context, envelope) = primitive_envelope(
+            context,
+            session_id,
+            Some(page_id),
+            workflow_id,
+            types::PrimitiveCommand::CaptureScreenshot(types::CaptureScreenshotCommand {
+                mode: types::ScreenshotMode::Viewport,
+                max_edge: Some(artifact_store::image::COMPACT_MAX_EDGE),
+            }),
+        );
+        let Ok(shot) = self
+            .submit_envelope(context, envelope, handle, "screenshot")
+            .await
+        else {
+            return Ok(outcome);
+        };
+        if shot["status"] == "completed" {
+            if let (Some(evidence), Some(captured)) = (
+                outcome["evidence"].as_array_mut(),
+                shot["evidence"].as_array(),
+            ) {
+                evidence.extend(
+                    captured
+                        .iter()
+                        .filter(|item| item["kind"] == "screenshot")
+                        .cloned(),
+                );
+            }
+        }
+        Ok(outcome)
+    }
+
     /// Appends `postState` to a completed action or a landed follow/submit
     /// whose verification failed: the same compact
     /// observation `workflow_observe` would return for this handle's page

@@ -76,6 +76,7 @@ Useful `bobby install` flags:
 | `--skill`, `--skill-claude`, `--skill-openclaw`, `--skill-hermes` | Install the agent skill for the named agent |
 | `--vision`, `--vision-provider <name>` | Enable [vision assist](../guides/configuration.md#vision) |
 | `--vision-model-server <url>` | Run the `mlx` provider's model on an OpenAI-compatible server, such as one `mlx-agent serve` started; `--vision-model` names the model it serves, and an empty URL clears it. The interactive vision menu offers the same choice |
+| `--success-screenshots`, `--no-success-screenshots` | Set [`success_screenshots`](../guides/configuration.md#mcp). The interactive checklist toggles it too |
 | `--force` | Regenerate the bootstrap credential |
 | `--restart-runtime` | Stop the running runtime so the next agent connection starts the new build. Add `--disconnect-agents` to skip the prompt when agents are attached |
 

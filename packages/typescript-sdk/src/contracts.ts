@@ -279,7 +279,7 @@ export interface ClickAndWaitForPopupCommand { selector: string; target?: Target
 export interface ClickAndWaitForDownloadCommand { selector: string; target?: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
 export type ScreenshotMode = { kind: "viewport" | "fullPage" } | { kind: "element"; target: TargetSpec } | { kind: "clip"; x: number; y: number; width: number; height: number };
-export interface CaptureScreenshotCommand { mode: ScreenshotMode; }
+export interface CaptureScreenshotCommand { mode: ScreenshotMode; maxEdge?: number; }
 export interface SetFocusEmulationCommand { enabled: boolean; }
 export interface SetEmulatedMediaCommand { media: string; features: Record<string, string>; }
 export interface EvaluateJavaScriptCommand { expression: string; timeoutMs: number; awaitPromise?: boolean; }
