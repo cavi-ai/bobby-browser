@@ -394,7 +394,7 @@ pub(crate) fn intent_submit_and_verify_schema() -> (Value, Vec<&'static str>) {
             "expectedState":{"$ref":"#/$defs/WaitForCommand"},
             "evidenceDetail":{"type":"string","enum":["compact","full"]},
             "autoCheckpoint":{"type":"boolean"},
-            "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."},
+            "reSubmit":{"type":"boolean","description":"Submit again despite boundaryAlreadyExecuted."},
             "screenshot":{"type":"boolean"}
         })),
         intent_required(&["purpose"]),
