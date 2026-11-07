@@ -93,6 +93,10 @@ calls. Rules that govern every call:
   `revealedBy` hints naming the control to click first (defaults to
   `role: "button"`); the runtime clicks it and waits for the field before
   filling it — no separate submit-then-refill round trip.
+- Repeated jobs: `workflow_run` runs `fillForm` (fill, then submit when
+  `submit` is set), `extractPage` (named fields) or `collectLinks` (a list's
+  links across `maxPages` pages) in one call. On failure `stoppedAt` names the
+  step; fix it as for that tool and rerun.
 - Submit: `intent_submit_and_verify` with an `expectedState` that only holds
   after the submit (a confirmation id, status change, or new element). Check
   validation evidence, then inspect an available `postState` for the confirmation
@@ -244,6 +248,7 @@ precise repair for their failure modes and win over this table.
 - Blind-retrying after `verificationFailed` or any `needsReconciliation`.
 - Inventing CSS/XPath selectors instead of snapshot targets.
 - One `intent_fill` per field where `intent_complete_form` would do.
+- A script of tool calls where a `workflow_run` workflow would do.
 - Re-logging into sites every session instead of using the operator's durable
   profile (disposable Chromium profiles keep no cookies — see below).
 - Hand-authoring `evidenceRefs` or forging artifact digests.

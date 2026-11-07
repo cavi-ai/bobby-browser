@@ -7217,3 +7217,226 @@ pub async fn a_shadow_combobox_takes_its_options_and_text(rig: &Rig) {
     assert!(page_text_contains(&page, "town=Ogdenville"), "{page}");
     live.close().await;
 }
+
+/// A page that prints the query string it was opened with.
+fn echo_page() -> String {
+    page(
+        "Sent",
+        r#"<main><h1>Sent</h1><p id="echo"></p></main>
+        <script>document.getElementById("echo").textContent =
+          "echo " + decodeURIComponent(location.search.slice(1)).replaceAll("+", " ");</script>"#,
+    )
+}
+
+/// The tools a workflow result says it ran, in order.
+fn workflow_tools(result: &Value) -> Vec<String> {
+    result["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step["tool"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `fillForm` opens the form, fills every field and stops before submitting
+/// unless asked to; with `submit` it presses the button and verifies the
+/// page. A field it cannot fill stops it before the submit.
+pub async fn a_fill_form_workflow_fills_and_submits(rig: &Rig) {
+    let form = page(
+        "Form",
+        r#"<form action="/sent"><label>Name <input name="name"></label>
+        <label>Email <input name="email" type="email"></label>
+        <button type="submit">Send</button></form>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/form", Route::Html(form)),
+        ("/sent", Route::Html(echo_page())),
+    ])
+    .await;
+    let fields = json!([
+        {"name":"Name","purpose":"name","value":{"kind":"setText","value":"Ada"},
+         "hints":{"role":"textbox","accessibleName":"Name"}},
+        {"name":"Email","purpose":"email","value":{"kind":"setText","value":"ada@example.com"},
+         "hints":{"role":"textbox","accessibleName":"Email"}}
+    ]);
+    let live = Live::open(rig, &site.url("/sent")).await;
+
+    let filled = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"fillForm","url":site.url("/form"),"fields":fields,"screenshot":true}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    assert_eq!(
+        workflow_tools(&filled),
+        ["navigate", "intent_complete_form"],
+        "{filled}"
+    );
+    assert!(
+        filled["evidence"]
+            .as_array()
+            .is_some_and(|evidence| evidence.iter().any(|item| item["kind"] == "screenshot")),
+        "{filled}"
+    );
+    assert_eq!(site.hits("/sent"), 1, "the form was submitted unasked");
+
+    let sent = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"fillForm","fields":fields,
+                   "submit":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"},
+                             "expectedState":{"condition":{"kind":"url",
+                                 "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}}),
+        )
+        .await;
+    assert_eq!(sent["status"], "completed", "{sent}");
+    assert_eq!(
+        workflow_tools(&sent),
+        ["intent_complete_form", "intent_submit_and_verify"],
+        "{sent}"
+    );
+    let echoed = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&echoed, "echo name=Ada&email=ada@example.com"),
+        "{echoed}"
+    );
+
+    let stopped = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"fillForm","url":site.url("/form"),
+                   "fields":[{"name":"Phone","purpose":"phone","value":{"kind":"setText","value":"5"},
+                              "hints":{"role":"textbox","accessibleName":"Phone"}}],
+                   "submit":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"}}}),
+        )
+        .await;
+    assert_eq!(stopped["status"], "failed", "{stopped}");
+    assert_eq!(stopped["stoppedAt"], "intent_complete_form", "{stopped}");
+    assert!(stopped["error"]["code"].is_string(), "{stopped}");
+    assert_eq!(
+        workflow_tools(&stopped),
+        ["navigate", "intent_complete_form"],
+        "{stopped}"
+    );
+    assert_eq!(site.hits("/sent"), 2, "a failed fill went on to submit");
+    live.close().await;
+}
+
+/// `extractPage` opens a page and reads its named fields in the same call.
+pub async fn an_extract_page_workflow_reads_the_fields(rig: &Rig) {
+    let posting = page(
+        "Posting",
+        r#"<main><h1>Platform Engineer</h1>
+        <a href="/apply/42" data-req="42">Apply now</a></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(page("Start", "<main>Start</main>"))),
+        ("/posting", Route::Html(posting)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/start")).await;
+    let read = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"extractPage","url":site.url("/posting"),
+            "fields":[
+                {"name":"apply","purpose":"apply link",
+                 "hints":{"role":"link","accessibleName":"Apply now"},"value":{"kind":"href"}},
+                {"name":"req","purpose":"requisition",
+                 "hints":{"role":"link","accessibleName":"Apply now"},
+                 "value":{"kind":"attribute","attribute":"data-req"}}
+            ]}),
+        )
+        .await;
+    assert_eq!(read["status"], "completed", "{read}");
+    assert_eq!(
+        workflow_tools(&read),
+        ["navigate", "intent_extract"],
+        "{read}"
+    );
+    let extracted = |field: &str| {
+        read["steps"][1]["result"]["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["kind"] == "extraction" && item["field"] == field)
+            .map(|item| item["value"].clone())
+    };
+    assert!(
+        extracted("apply").is_some_and(|value| value
+            .as_str()
+            .is_some_and(|href| href.ends_with("/apply/42"))),
+        "{read}"
+    );
+    assert_eq!(extracted("req"), Some(json!("42")), "{read}");
+    live.close().await;
+}
+
+/// `collectLinks` gathers the links of one list across pages, following the
+/// next control until it is gone, without links from outside the list.
+pub async fn a_collect_links_workflow_reads_every_page(rig: &Rig) {
+    let results = |items: &str, next: &str| {
+        page(
+            "Results",
+            &format!(
+                r#"<header><a href="/home">Home</a></header>
+                <main><ul aria-label="Results">{items}</ul>{next}</main>"#
+            ),
+        )
+    };
+    let site = FixtureSite::spawn(vec![
+        (
+            "/results",
+            Route::Html(results(
+                r#"<li><a href="/jobs/1">Job one</a></li><li><a href="/jobs/2">Job two</a></li>"#,
+                r#"<a href="/results-2">Next</a>"#,
+            )),
+        ),
+        (
+            "/results-2",
+            Route::Html(results(
+                r#"<li><a href="/jobs/2">Job two</a></li><li><a href="/jobs/3">Job three</a></li>"#,
+                "",
+            )),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/results")).await;
+    let collected = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"collectLinks","maxPages":5,
+                   "list":{"role":"list","accessibleName":"Results"},
+                   "next":{"purpose":"next page","hints":{"role":"link","accessibleName":"Next"}}}),
+        )
+        .await;
+    assert_eq!(collected["status"], "completed", "{collected}");
+    assert_eq!(collected["pages"], 2, "{collected}");
+    let links = collected["links"]
+        .as_array()
+        .map(|links| {
+            links
+                .iter()
+                .map(|link| {
+                    let url = link["url"].as_str().unwrap_or_default();
+                    let path = url.find("/jobs/").map_or(url, |at| &url[at..]);
+                    (
+                        link["name"].as_str().unwrap_or_default().to_owned(),
+                        path.to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        links,
+        [
+            ("Job one".to_owned(), "/jobs/1".to_owned()),
+            ("Job two".to_owned(), "/jobs/2".to_owned()),
+            ("Job three".to_owned(), "/jobs/3".to_owned()),
+        ],
+        "{collected}"
+    );
+    live.close().await;
+}

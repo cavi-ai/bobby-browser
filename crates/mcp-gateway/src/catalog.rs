@@ -357,6 +357,12 @@ tools! {
     workflow_recover { order: 53, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
+    workflow_run { order: 55, title: "Run a named workflow", description: "fillForm: intent_complete_form, then intent_submit_and_verify if submit. extractPage: intent_extract. collectLinks: links in list, following next. Requires browser:mutate and intent:execute. On failure stoppedAt names the failed step.",
+        capabilities: &[
+            types::Capability::BrowserMutate,
+            types::Capability::IntentExecute,
+        ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: workflow_run_schema, args: WorkflowRunArgs,
+        phases: INTENT, scope: SessionPageWorkflow, group: AgentWorkflow, hints: (false, true, false, true) }
     workflow_start { order: 51, title: "Start retained workflow", description: "Create a session/page/workflow; optionally navigate. includePostState adds initial state. On failure inspect session_list. Requires session:read/write, page:write.",
         capabilities: WORKFLOW_START_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_START_OPERATION), schema: workflow_start_schema, args: WorkflowStartArgs,
         phases: ALWAYS, group: AgentWorkflow, page_derived: true, hints: (false, false, false, true) }

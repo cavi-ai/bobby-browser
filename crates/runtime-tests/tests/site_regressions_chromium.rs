@@ -49,7 +49,10 @@ cases::every_case!(
     element_screenshots_show_the_element,
     screenshots_name_their_session_and_page,
     nested_shadow_controls_act_from_their_targets,
-    a_shadow_combobox_takes_its_options_and_text
+    a_shadow_combobox_takes_its_options_and_text,
+    a_fill_form_workflow_fills_and_submits,
+    an_extract_page_workflow_reads_the_fields,
+    a_collect_links_workflow_reads_every_page
 );
 
 #[tokio::test(flavor = "multi_thread")]
