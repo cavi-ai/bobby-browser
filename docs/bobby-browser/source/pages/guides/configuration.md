@@ -319,6 +319,7 @@ CODEX_HOME = "/path/to/vision-codex-home"
 | Key | Default | Meaning |
 |---|---|---|
 | `corpus_dir` | unset | Write privacy-reduced records of vision escalations to `vision-corpus.jsonl` here |
+| `assist_profiles` | `[]` | Browser profiles whose sessions always run with vision assist while a vision provider is configured |
 | `collect_training_data` | `false` | Save proxy request and proposal pairs when a masked screenshot is present |
 | `training_data_dir` | `vision-training-data` | Destination for `collect_training_data` |
 

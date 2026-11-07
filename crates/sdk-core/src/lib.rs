@@ -84,6 +84,8 @@ pub struct RuntimeService {
     /// `visionAssistFailed` repairs diverge on exactly this).
     vision_assist_configured: bool,
     vision_provider_configured: bool,
+    /// The operator's `[vision].assist_profiles`.
+    vision_assist_profiles: Arc<Vec<String>>,
     collect_training_data: bool,
     /// The operator's `[vision].propose_budget_ms`, echoed on `runtime_info`
     /// so a caller can judge the metrics latency histogram against the
@@ -128,6 +130,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            vision_assist_profiles: Arc::default(),
             collect_training_data: false,
             vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
@@ -152,6 +155,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            vision_assist_profiles: Arc::default(),
             collect_training_data: false,
             vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
@@ -172,6 +176,12 @@ impl RuntimeService {
     fn with_vision_state(mut self, assist: bool, provider: bool) -> Self {
         self.vision_assist_configured = assist;
         self.vision_provider_configured = provider;
+        self
+    }
+
+    /// Browser profiles whose sessions run with vision assist whatever the caller asked.
+    pub fn with_vision_assist_profiles(mut self, profiles: Vec<String>) -> Self {
+        self.vision_assist_profiles = Arc::new(profiles);
         self
     }
 
@@ -463,6 +473,7 @@ impl RuntimeService {
             .with_workers(workers)
             .with_nodes(nodes)
             .with_vision_state(vision_assist_present, provider_present)
+            .with_vision_assist_profiles(config.vision.assist_profiles.clone())
             .with_training_data_collection(config.vision.collect_training_data)
             .with_vision_propose_budget(config.vision.propose_budget_ms)
             .with_operational_metrics(operational_metrics))
@@ -523,8 +534,12 @@ impl RuntimeService {
 
     pub async fn create_session(
         &self,
-        req: CreateSessionRequest,
+        mut req: CreateSessionRequest,
     ) -> Result<SessionState, RuntimeError> {
+        // A listed profile runs with vision assist, so its escalations reach the vision corpus.
+        if self.vision_provider_configured && self.vision_assist_profiles.contains(&req.profile) {
+            req.execution_policy.vision_assist = true;
+        }
         if req.execution_policy.vision_assist && !self.vision_provider_configured {
             return Err(RuntimeError::InvalidRequest(
                 "executionPolicy.visionAssist requires a configured vision provider; run `bobby vision connect` and start with managed vision enabled"
