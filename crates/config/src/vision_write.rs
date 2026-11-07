@@ -238,6 +238,21 @@ pub fn upsert_vision_python(path: &Path, python: &Path) -> Result<(), ConfigWrit
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
+/// Sets `[mcp].success_screenshots`, keeping every other setting.
+pub fn set_success_screenshots(path: &Path, enabled: bool) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    let mcp = ensure_table(doc.as_table_mut(), "mcp")?;
+    mcp["success_screenshots"] = value(enabled);
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
+}
+
 fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {
     if parent.contains_key(key) && !parent[key].is_table() {
         return Err(ConfigWriteError::Invalid(format!(
@@ -255,6 +270,28 @@ fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, C
 mod tests {
     use super::*;
     use crate::AppConfig;
+
+    #[test]
+    fn success_screenshots_round_trip_and_leave_the_provider_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let provider = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "image-model".into(),
+            api_key_env: None,
+        };
+        upsert_vision_platform(&path, DEFAULT_LOOPBACK_ENDPOINT, "TOKEN", "mlx", &provider)
+            .unwrap();
+        assert!(!AppConfig::load(&path).unwrap().mcp.success_screenshots);
+
+        set_success_screenshots(&path, true).unwrap();
+        let loaded = AppConfig::load(&path).unwrap();
+        assert!(loaded.mcp.success_screenshots);
+        assert_eq!(loaded.vision.selected_provider(), Some(("mlx", &provider)));
+
+        set_success_screenshots(&path, false).unwrap();
+        assert!(!AppConfig::load(&path).unwrap().mcp.success_screenshots);
+    }
 
     #[test]
     fn the_text_tier_round_trips_and_leaves_the_provider_alone() {

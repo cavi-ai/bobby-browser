@@ -103,6 +103,7 @@ macro_rules! every_case {
             a_submit_landing_on_a_code_field_asks_for_the_code,
             a_split_code_takes_one_character_per_box,
             a_wrong_code_fails_without_echoing_it,
+            a_completed_form_and_submit_attach_a_compact_screenshot,
             $($extra,)*
         }
     };
@@ -111,6 +112,70 @@ macro_rules! every_case {
 pub(crate) use every_case;
 
 const HIDDEN_NODES: usize = 3000;
+
+/// A completed form fill or submit that asks for a screenshot carries one,
+/// at most 1280 px on its longest side; one that does not ask carries none.
+pub async fn a_completed_form_and_submit_attach_a_compact_screenshot(rig: &Rig) {
+    let form = page(
+        "Form",
+        r#"<form method="post" action="/sent"><label>Name <input id="name"></label>
+        <button type="submit">Send</button></form>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/form", Route::Html(form)),
+        (
+            "/sent",
+            Route::Html(page("Sent", "<main><h1>Sent</h1></main>")),
+        ),
+    ])
+    .await;
+    let screenshots = |result: &Value| -> Vec<Value> {
+        result["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["kind"] == "screenshot")
+            .cloned()
+            .collect()
+    };
+    let compact = |result: &Value| {
+        assert_eq!(result["status"], "completed", "{result}");
+        let shots = screenshots(result);
+        assert_eq!(shots.len(), 1, "{result}");
+        let (width, height) = (
+            shots[0]["width"].as_u64().unwrap_or(0),
+            shots[0]["height"].as_u64().unwrap_or(0),
+        );
+        assert!(
+            width > 0 && height > 0 && width.max(height) <= 1280,
+            "{width}x{height}"
+        );
+    };
+    let fill = |screenshot: bool| {
+        json!({"purpose":"enter the name","screenshot":screenshot,
+               "fields":[{"name":"Name","purpose":"name",
+                          "value":{"kind":"setText","value":"Ada"},
+                          "hints":{"role":"textbox","accessibleName":"Name"}}]})
+    };
+    let live = Live::open(rig, &site.url("/form")).await;
+
+    let plain = live.call("intent_complete_form", fill(false)).await;
+    assert_eq!(plain["status"], "completed", "{plain}");
+    assert!(screenshots(&plain).is_empty(), "{plain}");
+    compact(&live.call("intent_complete_form", fill(true)).await);
+    compact(
+        &live
+            .call(
+                "intent_submit_and_verify",
+                json!({"purpose":"send the form","screenshot":true,
+                       "hints":{"role":"button","accessibleName":"Send"},
+                       "expectedState":{"condition":{"kind":"url",
+                           "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}),
+            )
+            .await,
+    );
+    live.close().await;
+}
 
 pub async fn form_labels_exclude_their_own_control_contents(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/labels", Route::Html(page("Labels", r#"

@@ -248,6 +248,7 @@ pub struct AppState {
     mcp_servers: mcp_http::McpServers,
     mcp_resources: mcp_gateway::ArtifactResources,
     mcp_startup_toolset: Option<mcp_gateway::toolset::Toolset>,
+    mcp_success_screenshots: bool,
     scheduler: Arc<JobScheduler>,
     gateway_lifecycle: gateway::Lifecycle,
     job_idempotency: Arc<IdempotencyStore<JobSubmitOutcome>>,
@@ -276,6 +277,7 @@ impl AppState {
             mcp_servers: mcp_http::McpServers::default(),
             mcp_resources: mcp_gateway::ArtifactResources::default(),
             mcp_startup_toolset: None,
+            mcp_success_screenshots: false,
             scheduler: Arc::new(jobs::memory_scheduler()),
             gateway_lifecycle: gateway::Lifecycle::default(),
             job_idempotency: Arc::new(jobs::job_idempotency_store()),
@@ -793,6 +795,7 @@ where
         .startup_toolset
         .as_deref()
         .and_then(mcp_gateway::toolset::Toolset::parse);
+    state.mcp_success_screenshots = config.mcp.success_screenshots;
     let gateway_lifecycle = state.gateway_lifecycle.clone();
     let app = router(state);
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;

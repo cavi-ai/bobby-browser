@@ -512,6 +512,7 @@ async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
         PrimitiveCommand::Inspect(InspectCommand::default()),
         PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
             mode: ScreenshotMode::Viewport,
+            max_edge: None,
         }),
     ]
     .into_iter()
@@ -615,6 +616,7 @@ async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
             35,
             PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
                 mode: ScreenshotMode::Viewport,
+                max_edge: None,
             }),
         ),
     ] {

@@ -6201,6 +6201,10 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
+        let bytes = command
+            .max_edge
+            .and_then(|edge| artifact_store::image::shrink_png(&bytes, edge))
+            .unwrap_or(bytes);
         let record = artifacts
             .put_png(session_id, page_id, &bytes)
             .await

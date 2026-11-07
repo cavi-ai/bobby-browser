@@ -238,6 +238,7 @@ intent_args!(IntentCompleteFormArgs {
     hints: Option<types::IntentHints>,
     fields: Vec<types::CompleteFormField>,
     evidence_detail: Option<EvidenceDetail>,
+    screenshot: Option<bool>,
 });
 
 intent_args!(IntentSubmitAndVerifyArgs {
@@ -250,6 +251,7 @@ intent_args!(IntentSubmitAndVerifyArgs {
     // anyway. Absent/false: a second Boundary submit against the same
     // workflow is refused with `boundaryAlreadyExecuted`.
     re_submit: Option<bool>,
+    screenshot: Option<bool>,
 });
 
 intent_args!(IntentWaitForStateArgs {
@@ -393,6 +395,7 @@ page_scoped_args!(InspectArgs {
 
 page_scoped_args!(ScreenshotArgs {
     mode: Option<types::ScreenshotMode>,
+    max_edge: Option<u32>,
 });
 
 page_scoped_args!(WaitForArgs {

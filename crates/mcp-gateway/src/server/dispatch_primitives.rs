@@ -248,6 +248,7 @@ impl Server {
                     input.workflow_id,
                     types::PrimitiveCommand::CaptureScreenshot(types::CaptureScreenshotCommand {
                         mode: input.mode.unwrap_or(types::ScreenshotMode::Viewport),
+                        max_edge: input.max_edge,
                     }),
                 );
                 self.submit_envelope(context, envelope, handle, call.name.as_str())

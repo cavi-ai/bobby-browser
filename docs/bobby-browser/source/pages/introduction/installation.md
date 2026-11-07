@@ -75,6 +75,7 @@ Useful `bobby install` flags:
 | `--cli` | Copy `bobby`, `mcp-gateway` and `acp-gateway` onto `PATH` |
 | `--skill`, `--skill-claude`, `--skill-openclaw`, `--skill-hermes` | Install the agent skill for the named agent |
 | `--vision`, `--vision-provider <name>` | Enable [vision assist](../guides/configuration.md#vision) |
+| `--success-screenshots`, `--no-success-screenshots` | Set [`success_screenshots`](../guides/configuration.md#mcp). The interactive checklist toggles it too |
 | `--force` | Regenerate the bootstrap credential |
 | `--restart-runtime` | Stop the running runtime so the next agent connection starts the new build. Add `--disconnect-agents` to skip the prompt when agents are attached |
 

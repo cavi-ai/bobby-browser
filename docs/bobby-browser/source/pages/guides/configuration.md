@@ -84,6 +84,7 @@ Every limit must be positive. See [Limits](../concepts/context-graph.md#limits).
 | Key | Default | Meaning |
 |---|---|---|
 | `startup_toolset` | unset (`explore`) | Toolset a connection starts with: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
+| `success_screenshots` | `false` | A completed `intent_complete_form` or `intent_submit_and_verify` attaches a viewport screenshot, at most 1280 px on its longest side. A call's `screenshot` argument overrides it |
 
 A smaller starting set shrinks the `tools/list` an agent downloads at connect. It only changes what is advertised; hidden tools stay callable. An invalid `startup_toolset` stops startup, while an invalid `BOBBY_MCP_TOOLSET` is ignored with a warning. See [MCP tools](../surfaces/mcp-tools.md#toolsets).
 

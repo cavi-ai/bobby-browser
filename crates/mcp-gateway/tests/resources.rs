@@ -538,6 +538,7 @@ async fn execute_screenshot(server: &Server) -> Value {
         command: RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(
             CaptureScreenshotCommand {
                 mode: types::ScreenshotMode::Viewport,
+                max_edge: None,
             },
         )),
     };
