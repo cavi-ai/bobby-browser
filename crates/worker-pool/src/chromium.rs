@@ -166,9 +166,13 @@ fn chrome_native_messaging_hosts_dir() -> Option<PathBuf> {
 async fn attach_or_launch_shared_browser(
     config: &ChromiumConfig,
     profile_dir: &Path,
+    require_headless: bool,
 ) -> Result<(Browser, Handler), CommandError> {
     if let Some(attached) = connect_profile_browser(config, profile_dir).await {
         return Ok(attached);
+    }
+    if require_headless {
+        verify_profile_can_launch(profile_dir)?;
     }
     spawn_detached_chrome(config)?;
     let deadline = tokio::time::Instant::now() + CHROME_LAUNCH_TIMEOUT;
@@ -189,6 +193,66 @@ async fn attach_or_launch_shared_browser(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// A second Chrome launch can notify or terminate a profile's singleton
+/// owner before CDP connects. Never delegate an unknown conflict to Chrome.
+fn verify_profile_can_launch(profile_dir: &Path) -> Result<(), CommandError> {
+    let mut occupied = false;
+    for marker in [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        "lockfile",
+    ] {
+        match std::fs::symlink_metadata(profile_dir.join(marker)) {
+            Ok(_) => occupied = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(unverified_profile_owner()),
+        }
+    }
+    if occupied && !profile_owner_is_proven_dead(profile_dir) {
+        return Err(unverified_profile_owner());
+    }
+    Ok(())
+}
+
+fn unverified_profile_owner() -> CommandError {
+    driver_error(
+        ErrorCode::BrowserLaunchFailed,
+        "headless profile launch refused: the profile owner cannot be verified; \
+         release the existing browser before starting this profile",
+    )
+}
+
+#[cfg(unix)]
+fn profile_owner_is_proven_dead(profile_dir: &Path) -> bool {
+    let Ok(owner) = std::fs::read_link(profile_dir.join("SingletonLock")) else {
+        return false;
+    };
+    let Some((host, pid)) = owner.to_str().and_then(|value| value.rsplit_once('-')) else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return false;
+    }
+    let mut local_host = [0_u8; 256];
+    // SAFETY: gethostname writes at most the supplied buffer length.
+    if unsafe { libc::gethostname(local_host.as_mut_ptr().cast(), local_host.len()) } != 0 {
+        return false;
+    }
+    let Ok(local_host) = std::ffi::CStr::from_bytes_until_nul(&local_host) else {
+        return false;
+    };
+    local_host.to_bytes() == host.as_bytes() && !process_registry::owner_is_alive(pid)
+}
+
+#[cfg(not(unix))]
+fn profile_owner_is_proven_dead(_profile_dir: &Path) -> bool {
+    false
 }
 
 /// The Chrome named by the profile's `DevToolsActivePort`, when it answers.
@@ -520,7 +584,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
         }
         let (mut browser, mut handler) = if shared_browser {
             let _attaching = self.shared_browser_attach.lock().await;
-            attach_or_launch_shared_browser(&config, &profile_dir).await?
+            attach_or_launch_shared_browser(&config, &profile_dir, self.config.headless).await?
         } else {
             Browser::launch(config)
                 .await
@@ -4887,6 +4951,76 @@ fn chromium_modifier_bits(modifiers: &[types::ClickModifier]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn headless_profile_conflicts_refuse_before_launch_or_notification() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let launcher = root.path().join("chrome-launcher");
+        std::fs::write(&launcher, "#!/bin/sh\n: > \"$0.invoked\"\n").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = super::ChromiumConfig::builder()
+            .chrome_executable(&launcher)
+            .build()
+            .unwrap();
+        let mut host = [0_u8; 256];
+        assert_eq!(
+            unsafe { libc::gethostname(host.as_mut_ptr().cast(), host.len()) },
+            0
+        );
+        let host = std::ffi::CStr::from_bytes_until_nul(&host)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let live = format!("{host}-{}", std::process::id());
+        let remote = format!("remote-{host}-{}", std::process::id());
+        for (index, (marker, owner)) in [
+            ("SingletonLock", live.as_str()),
+            ("SingletonLock", remote.as_str()),
+            ("SingletonLock", "malformed-owner"),
+            ("SingletonSocket", "missing-socket"),
+            ("SingletonCookie", "missing-cookie"),
+            ("lockfile", "unknown-owner"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let profile = root.path().join(format!("profile-{index}"));
+            std::fs::create_dir(&profile).unwrap();
+            let marker_path = profile.join(marker);
+            symlink(owner, &marker_path).unwrap();
+            let socket_path = root.path().join(format!("owner-{index}.sock"));
+            let socket = tokio::net::UnixListener::bind(&socket_path).unwrap();
+            if marker == "SingletonLock" {
+                symlink(&socket_path, profile.join("SingletonSocket")).unwrap();
+            }
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                super::attach_or_launch_shared_browser(&config, &profile, true),
+            )
+            .await
+            .expect("profile conflict must fail before Chrome launch");
+            let error = match result {
+                Ok(_) => panic!("unverified profile owner was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, types::ErrorCode::BrowserLaunchFailed);
+            assert!(error.message.contains("profile owner"));
+            assert!(!launcher.with_extension("invoked").exists());
+            assert_eq!(
+                std::fs::read_link(marker_path).unwrap(),
+                std::path::Path::new(owner)
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(25), socket.accept())
+                    .await
+                    .is_err(),
+                "profile owner received a notification"
+            );
+        }
+    }
 
     #[derive(Clone, Default)]
     struct TraceCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
