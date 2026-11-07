@@ -1499,6 +1499,15 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Interpreter that runs the managed vision servers: the configured one, else
+/// `BOBBY_VISION_PYTHON`, else `python3` from PATH.
+pub(crate) fn vision_python(configured: Option<&Path>) -> PathBuf {
+    configured
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("BOBBY_VISION_PYTHON").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
 /// Spawn the canonical Python vision server for `provider` as a managed child.
 /// The child is killed when it goes out of scope.
 fn spawn_vision_server(
@@ -1526,12 +1535,7 @@ fn spawn_vision_server(
         })
         .unwrap_or_else(|| "127.0.0.1:9101".to_string());
 
-    // The interpreter must have the server's dependencies; PATH's python3 is
-    // only the fallback when none is configured.
-    let python = python
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("BOBBY_VISION_PYTHON").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("python3"));
+    let python = vision_python(python);
     let mut cmd = std::process::Command::new(&python);
     cmd.arg(&script)
         .arg("--bind")

@@ -575,6 +575,7 @@ fn repair_command(name: &str) -> &'static str {
         "firefox-enrollment" => "bobby install --companion",
         "cli-path" => "put the install dir first on PATH",
         "vision-readiness" => "bobby doctor --fix",
+        "vision-tier-text" => "install mlx-lm into [vision].python",
         "bootstrap-capabilities" => "bobby doctor --fix",
         "config" => "fix config.toml",
         "context-store" => "bobby context verify",
@@ -638,6 +639,25 @@ mod recovery_guidance_tests {
         let mut report = DoctorReport::default();
         report.fail("storage-checkpoints-dir", "directory missing".into());
         assert_eq!(report.next_action().unwrap().command, "bobby doctor --fix");
+    }
+
+    #[test]
+    fn a_text_tier_interpreter_without_mlx_lm_points_at_the_package_not_doctor_fix() {
+        let mut report = DoctorReport::default();
+        report.fail(
+            "vision-tier-text",
+            "model · python cannot import mlx_lm · fix: python -m pip install mlx-lm".into(),
+        );
+        assert_eq!(
+            report.next_action().unwrap().command,
+            "install mlx-lm into [vision].python"
+        );
+        let mut output = Vec::new();
+        report
+            .render_to(&mut output, DoctorColorMode::Never)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("bobby doctor --fix"), "{text}");
     }
 
     #[test]
