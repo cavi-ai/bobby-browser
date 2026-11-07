@@ -19,7 +19,7 @@ interface FormSnapshot {
 }
 ```
 
-Every control has a snapshot-local ID, its form and group, a normalized `controlKind`, typed current state, constraints, validity, options and `supportedOperations`. A control's target holds a role, accessible name, optional ordinal and bounded frame or shadow paths. If a safe target cannot be produced, the target is absent.
+Every control has an ID, its form and group, a normalized `controlKind`, typed current state, constraints, validity, options and `supportedOperations`. bobby stamps the control's number on its element as `data-bobby-control`, so the ID stays with that control in later snapshots of the page, even after the page inserts controls before it. A control's target holds a role, accessible name, optional ordinal and bounded frame or shadow paths. An unnamed control's target has an empty `accessibleName` and `attributes: {"data-bobby-control": "<number>"}`, which identifies the element. If a safe target cannot be produced, the target is absent.
 
 A snapshot is limited to 64 forms and 512 controls. `truncated: true` means discovery hit a limit. Unknown fields and unsupported schema versions are rejected.
 

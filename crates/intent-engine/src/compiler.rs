@@ -140,7 +140,12 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 // it. Only a hint that names the control itself
                 // (`accessibleName` or `nearText`) supersedes the field name.
                 let mut hints = field.hints.clone();
-                if hints.accessible_name.is_none() && hints.near_text.is_none() {
+                let positional = hints.role.is_some() && hints.ordinal.is_some();
+                if hints.accessible_name.is_none()
+                    && hints.near_text.is_none()
+                    && !positional
+                    && hints.attributes.is_empty()
+                {
                     hints.accessible_name = Some(field.name.trim().to_owned());
                 }
                 let hints = &hints;
@@ -284,6 +289,7 @@ fn compile_target_with_purpose_fallback(
 ) -> Result<TargetSpec, CompileError> {
     let mut target = TargetSpec {
         role: hints.role.clone(),
+        attributes: hints.attributes.clone(),
         ordinal: hints.ordinal,
         frame_path: hints.frame_path.iter().cloned().map(Box::new).collect(),
         shadow_path: hints.shadow_path.iter().cloned().map(Box::new).collect(),
@@ -312,7 +318,12 @@ fn compile_target_with_purpose_fallback(
         // Locate purposes may be descriptive prose and use semantic token
         // overlap later. Other intents historically use purpose as the exact
         // control name; dropping that fallback makes ordinary forms ambiguous.
-        None if hints.role.is_some() && purpose_names_role_target => {
+        // An ordinal or attributes already pick the control.
+        None if hints.role.is_some()
+            && purpose_names_role_target
+            && hints.ordinal.is_none()
+            && hints.attributes.is_empty() =>
+        {
             target.accessible_name = Some(purpose.to_owned());
         }
         None if hints.role.is_some() => {}

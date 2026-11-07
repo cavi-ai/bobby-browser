@@ -152,6 +152,7 @@ fn looks_like_control_id(value: &str) -> bool {
 /// `accessibleName` itself as the possible control id.
 fn hints_locator_empty_besides_name(hints: &types::IntentHints) -> bool {
     hints.role.is_none()
+        && hints.attributes.is_empty()
         && hints.near_text.is_none()
         && hints.ordinal.is_none()
         && hints.frame_path.is_empty()
@@ -222,6 +223,7 @@ fn control_target_from_snapshot(
 fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpec) {
     hints.role = target.role;
     hints.accessible_name = target.accessible_name;
+    hints.attributes = target.attributes;
     hints.ordinal = target.ordinal;
     hints.frame_path = target
         .frame_path

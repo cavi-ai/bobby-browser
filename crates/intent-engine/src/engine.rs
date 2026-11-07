@@ -1647,6 +1647,11 @@ async fn execute_fill(
         };
     }
 
+    let candidate = if matches!(value, ControlAction::SetText { .. }) {
+        candidate
+    } else {
+        Box::new(with_control_stamp(page_id, browser, *candidate, &target).await)
+    };
     let fingerprint = fingerprint(page_id, &candidate);
     let resolution = Evidence::Resolution {
         target: Box::new(target.clone()),
@@ -2145,21 +2150,45 @@ fn form_control_target(
             ordinal: target.ordinal,
         })
     };
+    let name = candidate.name.clone().filter(|name| !name.is_empty());
+    let stamp = candidate
+        .attributes
+        .get(dom_engine::CONTROL_STAMP_ATTRIBUTE)
+        .cloned();
+    // The intent's ordinal counts controls with the intent's own name, so it
+    // carries over only to a target with that name; otherwise the stamp
+    // identifies the control.
+    let (accessible_name, attributes, ordinal) = match (name, stamp) {
+        (Some(name), _) if names_by_intent(candidate, intent_target) => {
+            (name, Default::default(), intent_target.ordinal)
+        }
+        (_, Some(stamp)) => (
+            String::new(),
+            [(dom_engine::CONTROL_STAMP_ATTRIBUTE.to_owned(), stamp)]
+                .into_iter()
+                .collect(),
+            None,
+        ),
+        (Some(name), None) if intent_target.ordinal.is_none() => (name, Default::default(), None),
+        _ => {
+            return Err(CommandError {
+                code: ErrorCode::IntentActionMismatch,
+                message: "resolved form control has no accessible name".into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })
+        }
+    };
     Ok(FormControlTarget {
-        attributes: Default::default(),
+        attributes: Box::new(attributes),
         role: candidate.role.clone().ok_or_else(|| CommandError {
             code: ErrorCode::IntentActionMismatch,
             message: "resolved form control has no semantic role".into(),
             layer: ErrorLayer::Page,
             retryable: false,
         })?,
-        accessible_name: candidate.name.clone().ok_or_else(|| CommandError {
-            code: ErrorCode::IntentActionMismatch,
-            message: "resolved form control has no accessible name".into(),
-            layer: ErrorLayer::Page,
-            retryable: false,
-        })?,
-        ordinal: intent_target.ordinal,
+        accessible_name,
+        ordinal,
         // An explicit frame path on the intent wins; otherwise the one the
         // gather stamped when it found the control inside a frame.
         frame_path: if intent_target.frame_path.is_empty() {
@@ -2176,6 +2205,46 @@ fn form_control_target(
             .map(|target| segment(target))
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+/// The intent asked for the control by the name it has.
+fn names_by_intent(candidate: &Candidate, intent_target: &TargetSpec) -> bool {
+    intent_target
+        .accessible_name
+        .as_deref()
+        .is_some_and(|name| !name.is_empty())
+        && candidate
+            .name
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+}
+
+/// A control the intent did not pick by its name is acted on by the stamp a
+/// form snapshot puts on it. One snapshot stamps a control that has none,
+/// then the same element is read back from a fresh gather.
+async fn with_control_stamp(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    mut candidate: Candidate,
+    intent_target: &TargetSpec,
+) -> Candidate {
+    if candidate
+        .attributes
+        .contains_key(dom_engine::CONTROL_STAMP_ATTRIBUTE)
+        || names_by_intent(&candidate, intent_target)
+        || !matches!(browser.form_snapshot(page_id).await, Ok(Some(_)))
+    {
+        return candidate;
+    }
+    if let Some(gathered) = browser
+        .collect_candidates(page_id, intent_target)
+        .await
+        .ok()
+        .and_then(|gathered| gathered.into_iter().find(|item| item.id == candidate.id))
+    {
+        candidate.attributes = gathered.attributes;
+    }
+    candidate
 }
 
 fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, TargetSpec) {

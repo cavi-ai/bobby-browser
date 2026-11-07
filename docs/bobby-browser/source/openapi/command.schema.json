@@ -2014,6 +2014,13 @@
           ],
           "default": null
         },
+        "attributes": {
+          "description": "Attribute values the control carries, as a `form_snapshot` target\ngives them.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "ordinal": {
           "type": [
             "integer",

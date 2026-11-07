@@ -5705,6 +5705,133 @@ pub async fn select_one_picks_the_exact_option_of_an_aria_combobox(rig: &Rig) {
     live.close().await;
 }
 
+fn controls_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("controlKind").and_then(Value::as_str) == Some(kind) {
+                out.push(value);
+            }
+            map.values()
+                .for_each(|child| controls_of_kind(child, kind, out));
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|child| controls_of_kind(child, kind, out)),
+        _ => {}
+    }
+}
+
+/// Unnamed selects are addressed by their form snapshot control id and
+/// target, both of which stay on the same select after the form inserts
+/// another one before it; a role and ordinal alone address one by position.
+pub async fn control_ids_stay_on_unnamed_controls_when_the_form_grows(rig: &Rig) {
+    let body = r#"<form><div id="rows">
+        <p>How did you hear about us?</p>
+        <select id="hear"><option value="">Choose</option><option>Search</option>
+        <option>AI tool - Other</option><option>Other</option></select>
+        <p>Are you authorized to work here?</p>
+        <select id="auth"><option value="">Choose</option><option>Yes</option><option>No</option></select>
+        <p>Do you need sponsorship?</p>
+        <select id="visa"><option value="">Choose</option><option>Yes</option><option>No</option></select>
+        </div><button type="button" id="add">Add location</button></form>
+        <p id="picked"></p>
+        <script>
+          const show = () => { document.getElementById("picked").textContent = "Picked: " +
+            [...document.querySelectorAll("select")].map((s) => s.id + "=" + s.value).join(", "); };
+          document.addEventListener("change", show);
+          document.getElementById("add").addEventListener("click", () => {
+            const location = document.createElement("select");
+            location.id = "location";
+            location.innerHTML = '<option value="">Choose</option><option>Other</option><option>Yes</option>';
+            document.getElementById("rows").prepend(location);
+            show();
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/form", Route::Html(page("Form", body))),
+        ("/fresh", Route::Html(page("Form", body))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/form")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut selects = Vec::new();
+    controls_of_kind(&snapshot, "selectOne", &mut selects);
+    let [hear, auth, _] = selects.as_slice() else {
+        panic!("three selects in the form snapshot: {snapshot}");
+    };
+    let (hear_id, auth_target) = (hear["id"].clone(), auth["target"].clone());
+    assert!(
+        auth_target.is_object(),
+        "an unnamed select has a target: {auth}"
+    );
+
+    let added = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Add location"}}),
+        )
+        .await;
+    assert_eq!(added["status"], "completed", "{added}");
+    let by_id = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"How did you hear about us?","hints":{"accessibleName":hear_id},
+                   "value":{"kind":"selectOne","value":"Other"}}),
+        )
+        .await;
+    assert_eq!(by_id["status"], "completed", "by control id: {by_id}");
+    let by_target = live
+        .call(
+            "control_action",
+            json!({"target":auth_target,"action":{"kind":"selectOne","value":"Yes"}}),
+        )
+        .await;
+    assert_eq!(
+        by_target["status"], "completed",
+        "by snapshot target: {by_target}"
+    );
+    let by_ordinal = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Do you need sponsorship?","hints":{"role":"combobox","ordinal":3},
+                   "value":{"kind":"selectOne","value":"No"}}),
+        )
+        .await;
+    assert_eq!(
+        by_ordinal["status"], "completed",
+        "by role and ordinal: {by_ordinal}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string()
+            .contains("Picked: location=, hear=Other, auth=Yes, visa=No"),
+        "{page}"
+    );
+
+    // No snapshot has stamped this page's selects.
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/fresh")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "{navigated}");
+    let first = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Are you authorized to work here?","hints":{"role":"combobox","ordinal":1},
+                   "value":{"kind":"selectOne","value":"Yes"}}),
+        )
+        .await;
+    assert_eq!(
+        first["status"], "completed",
+        "first call on a fresh page: {first}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string().contains("Picked: hear=, auth=Yes, visa="),
+        "{page}"
+    );
+    live.close().await;
+}
+
 /// A submit with no expected state is verified by the page: a required field
 /// left empty fails naming it with nothing sent, the corrected submit passes
 /// on the URL change, an in-place step passes on its new fields, a code step

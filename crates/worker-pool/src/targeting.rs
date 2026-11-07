@@ -1008,7 +1008,8 @@ fn validate_target_spec_hop(target: &TargetSpec, is_frame_hop: bool) -> Result<(
                 && value.is_empty();
             let unnamed_file = field == "accessibleName"
                 && value.is_empty()
-                && dom_engine::is_unnamed_file_target(target);
+                && (dom_engine::is_unnamed_file_target(target)
+                    || dom_engine::is_stamped_control_target(target));
             if value.trim().is_empty() && !unnamed_frame_hop && !unnamed_file {
                 return Err(target_error(
                     ErrorCode::InvalidRequest,
@@ -1606,6 +1607,7 @@ async fn align_with_accessibility(
         return Ok(candidates);
     };
     if dom_engine::is_unnamed_file_target(target)
+        || dom_engine::is_stamped_control_target(target)
         || accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal)
     {
         return Ok(candidates);

@@ -12,6 +12,8 @@
 
 - An ACP vision harness starts once and serves every task in its own session, instead of one harness process per task.
 - `intent_submit_and_verify` no longer requires `expectedState`: without one it verifies a URL change, the submit control leaving or new form fields, and a submit the page rejects with invalid fields fails naming them without counting toward `boundaryAlreadyExecuted`.
+- A `form_snapshot` control ID stays with its control in later snapshots of the page, and an unnamed control gets a target that `controlId`, `control_action` and intent `hints.attributes` accept.
+- Intent hints with a `role` and an `ordinal` but no name pick the control by position among that role instead of using `purpose` as its name.
 
 ### Fixed
 
@@ -31,6 +33,7 @@
 - `intent_enter_code` fills split code boxes when only the first box has a name, typing the code from it and reading every box back.
 - On Chromium, `selectOne` on an ARIA combobox, including a text combobox that filters as it is typed in, clicks the option whose text is the value.
 - An `intent_extract` vision fallback goes to the image provider with the screenshot, never to the text tier, which cannot read the value.
+- An unlabeled select is not named by the text of its options.
 
 ## 0.23.0 - 2026-11-04
 

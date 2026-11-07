@@ -387,7 +387,12 @@ fn score<'a>(
         score += 30;
         reasons.push("exactRole".into());
     }
-    if let Some(wanted) = target.accessible_name.as_ref() {
+    // A stamped control's name is whatever the page derives; its stamp decides.
+    let name = target
+        .accessible_name
+        .as_ref()
+        .filter(|_| !crate::is_stamped_control_target(target));
+    if let Some(wanted) = name {
         if comparable_name(candidate.name.as_deref().unwrap_or_default()) != comparable_name(wanted)
         {
             return None;

@@ -644,11 +644,12 @@ fn validate_target(target: Option<&FormControlTarget>) -> Result<(), String> {
         return Ok(());
     };
     validate_text(&target.role, MAX_FORM_ID_BYTES, "target role", false)?;
+    // An unnamed control's target names it by its attributes.
     validate_text(
         &target.accessible_name,
         MAX_FORM_TEXT_BYTES,
         "target accessible name",
-        target.attributes.get("type").map(String::as_str) == Some("file"),
+        !target.attributes.is_empty(),
     )?;
     if target.attributes.len() > 32 {
         return Err("form target attributes exceed their bound".into());

@@ -82,9 +82,10 @@ to retry its wait.
 | Field | Meaning |
 |---|---|
 | `role` | Accessible role |
-| `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot` |
+| `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot`, including an unnamed control's |
+| `attributes` | Attribute values the control carries, as a `form_snapshot` target gives them |
 | `nearText` | `{kind: "exact" \| "contains" \| "regex", value}` matched against the control's own text, in place of `accessibleName` |
-| `ordinal` | Zero-based index among peers with the same role and name |
+| `ordinal` | Zero-based index among peers with the same role and name; with a `role` and no name hint, among controls with that role |
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |
 

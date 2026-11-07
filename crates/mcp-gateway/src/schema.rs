@@ -2015,8 +2015,9 @@ fn definitions() -> Value {
         // Extracted from the inline schema that alone made control_action the
         // largest entry in tools/list.
         "ControlTarget": object(json!({
+            "attributes":{"type":"object","maxProperties":32,"propertyNames":string(1,128),"additionalProperties":string(0,2048)},
             "role":string(1,128),
-            "accessibleName":string(1,2048),
+            "accessibleName":string(0,2048),
             "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
             "framePath":array(any_value(),8),
             "shadowPath":array(any_value(),8)
@@ -2368,6 +2369,7 @@ fn intent_hints() -> Value {
             "role":nullable(string(0, 256)),
             // Same limit as a target, so a hint can carry any name a snapshot emits.
             "accessibleName":nullable(string(0, 2048)),
+            "attributes":{"type":"object","maxProperties":32,"propertyNames":string(1,128),"additionalProperties":string(0,2048)},
             "nearText":nullable(json!({"$ref":"#/$defs/TextMatch"})),
             "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
             "framePath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),

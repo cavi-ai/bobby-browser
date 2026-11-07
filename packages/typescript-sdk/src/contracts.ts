@@ -321,6 +321,8 @@ export interface IntentHints {
    * `nearText`; setting both to different values is refused.
    */
   accessibleName?: string | null;
+  /** Attribute values the control carries, as a `form_snapshot` target gives them. */
+  attributes?: Record<string, string>;
   nearText?: TextMatch | null;
   ordinal?: number | null;
   framePath?: TargetSpec[];

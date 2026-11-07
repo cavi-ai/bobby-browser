@@ -85,6 +85,10 @@ pub struct RawFormControl {
     pub options: Vec<RawFormOption>,
     pub frame_path: Vec<SemanticTargetSegment>,
     pub shadow_path: Vec<SemanticTargetSegment>,
+    /// The number the snapshot stamped on the element; an element keeps it
+    /// across snapshots.
+    #[serde(default)]
+    pub stamp: Option<u32>,
 }
 
 pub fn normalize_form_snapshot(
@@ -119,7 +123,10 @@ pub fn normalize_form_snapshot(
     let control_ids = retained
         .iter()
         .enumerate()
-        .map(|(index, control)| (control.key.clone(), format!("control-{}", index + 1)))
+        .map(|(index, control)| {
+            let number = control.stamp.map_or(index + 1, |stamp| stamp as usize);
+            (control.key.clone(), format!("control-{number}"))
+        })
         .collect::<BTreeMap<_, _>>();
 
     let mut target_totals = BTreeMap::new();
@@ -281,13 +288,28 @@ fn normalize_control(
     let role = control_role(&raw);
     let target = role
         .zip(
-            raw.accessible_name
-                .clone()
-                .or_else(|| (kind == FormControlKind::File).then(String::new)),
+            raw.accessible_name.clone().or_else(|| {
+                (kind == FormControlKind::File || raw.stamp.is_some()).then(String::new)
+            }),
         )
         .and_then(|(role, name)| {
             if name.is_empty() && kind != FormControlKind::File {
-                return None;
+                // An unnamed control is addressed by the number stamped on it.
+                return raw.stamp.map(|stamp| FormControlTarget {
+                    attributes: Box::new(
+                        [(
+                            dom_engine::CONTROL_STAMP_ATTRIBUTE.to_owned(),
+                            stamp.to_string(),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    role,
+                    accessible_name: String::new(),
+                    ordinal: None,
+                    frame_path: raw.frame_path.clone(),
+                    shadow_path: raw.shadow_path.clone(),
+                });
             }
             let key = target_key(role.clone(), name.clone(), &raw);
             let seen = target_seen.entry(key.clone()).or_default();
@@ -717,6 +739,7 @@ pub fn form_snapshot_expression_with_limit(_page_id: &PageId, max_controls: usiz
             dom_engine::control_label_function(),
         )
         .replace("__CONTROL_SELECTOR__", CONTROL_SELECTOR)
+        .replace("__CONTROL_STAMP__", dom_engine::CONTROL_STAMP_ATTRIBUTE)
         .replace("__MAX_CONTROLS__", &max_controls.to_string())
 }
 
@@ -775,7 +798,9 @@ const groupKeys=new Map(groupElements.map((group,index)=>[group,`raw-group-${ind
 const controlElements=[];for(const {root,framePath,shadowPath} of roots){for(const element of root.querySelectorAll('__CONTROL_SELECTOR__')){if(controlElements.length>=LIMIT){truncated=true;break}if(element.getClientRects().length===0&&!(element.tagName==='INPUT'&&element.type==='file'))continue;if(!controlElements.some(item=>item.element===element))controlElements.push({element,framePath,shadowPath})}}
 const forms=formElements.map((form,index)=>{const scope=roots.find(item=>item.root===form.getRootNode())||{framePath:[],shadowPath:[]};return{key:formKeys.get(form),accessibleName:text(form.getAttribute('aria-label'))||text(resolveRefs(form,'aria-labelledby').join(' '))||text(form.getAttribute('name')),description:text(resolveRefs(form,'aria-describedby').join(' '))||text(form.getAttribute('aria-description')),framePath:scope.framePath,shadowPath:scope.shadowPath}});
 const groups=groupElements.map(group=>({key:groupKeys.get(group),formKey:formKeys.get(group.closest('form')),label:text(group.querySelector(':scope > legend')?.textContent),description:text(resolveRefs(group,'aria-describedby').join(' '))||text(group.getAttribute('aria-description'))})).filter(group=>group.formKey);
-const controls=controlElements.map(({element:e,framePath,shadowPath},index)=>{if(e.options?.length>512)truncated=true;return rawControl(e,framePath,shadowPath,index,formKeys,groupKeys)});
+const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');let next=isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1;for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){const v=el.getAttribute(stampKey);if(isStamp(v))next=Math.max(next,Number(v)+1)}const used=new Set();
+const controls=controlElements.map(({element:e,framePath,shadowPath},index)=>{if(e.options?.length>512)truncated=true;const own=e.getAttribute(stampKey);let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}used.add(stamp);const raw=rawControl(e,framePath,shadowPath,index,formKeys,groupKeys);raw.stamp=stamp;return raw});
+if(docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
 return{forms,groups,controls,truncated};})())"#;
 
 const _LEGACY_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -842,6 +867,7 @@ mod tests {
             options: Vec::new(),
             frame_path: Vec::new(),
             shadow_path: Vec::new(),
+            stamp: None,
         }
     }
 
