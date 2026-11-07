@@ -105,6 +105,7 @@ impl IntentBrowser for FakeBrowser {
                 height: 800,
                 bytes: 11,
                 sha256: "0".repeat(64),
+                origin: Default::default(),
             }],
         ))
     }

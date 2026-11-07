@@ -114,6 +114,13 @@ pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
             ControlAction::SelectOne { .. } | ControlAction::SelectMany { .. }
         ) || compatible_role(value, role, is_file_input);
     }
+    // A combobox built on a text input takes typed text.
+    if role == "combobox"
+        && matches!(value, ControlAction::SetText { .. })
+        && matches!(candidate.tag.as_deref(), Some("input" | "textarea"))
+    {
+        return true;
+    }
     compatible_role(value, role, is_file_input)
 }
 
@@ -489,6 +496,7 @@ mod upload_tests {
         vec![Evidence::Upload {
             selector: "#file".into(),
             paths,
+            sha256: Vec::new(),
         }]
     }
 
@@ -506,7 +514,7 @@ mod upload_tests {
         ] {
             assert!(verify_upload_paths(
                 &[source],
-                &upload(vec![format!("upload://sha256/{digest}")])
+                &upload(vec![format!("upload://source/{digest}")])
             )
             .is_ok());
         }
@@ -532,8 +540,8 @@ mod upload_tests {
         assert!(verify_upload_paths(&expected, &[]).is_err());
         for observed in [
             vec![],
-            vec!["upload://sha256/not-a-digest".into()],
-            vec![format!("upload://sha256/{}", "0".repeat(64))],
+            vec!["upload://source/not-a-digest".into()],
+            vec![format!("upload://source/{}", "0".repeat(64))],
         ] {
             assert!(verify_upload_paths(&expected, &upload(observed)).is_err());
         }
@@ -548,7 +556,7 @@ mod upload_tests {
             format!("artifact://{}", "a".repeat(64)),
         ];
         let first =
-            "upload://sha256/547015d2bd89ec8f12aa216850c3b51612399c11464982827840ff0b4f6ca70a"
+            "upload://source/547015d2bd89ec8f12aa216850c3b51612399c11464982827840ff0b4f6ca70a"
                 .to_owned();
         assert!(verify_upload_paths(&expected, &upload(vec![first.clone(), first])).is_err());
     }

@@ -1707,6 +1707,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "behavioral-engine",
+ "chrono",
  "companion-core",
  "companion-protocol",
  "config",

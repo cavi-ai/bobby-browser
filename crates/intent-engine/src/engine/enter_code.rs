@@ -55,9 +55,11 @@ pub(super) fn target_spec(target: &FormControlTarget) -> TargetSpec {
             ..TargetSpec::default()
         })
     };
+    // An unnamed box is told apart by the stamp in its attributes.
     TargetSpec {
         role: Some(target.role.clone()),
         accessible_name: Some(target.accessible_name.clone()),
+        attributes: (*target.attributes).clone(),
         ordinal: target.ordinal,
         frame_path: target.frame_path.iter().map(segment).collect(),
         shadow_path: target.shadow_path.iter().map(segment).collect(),

@@ -182,6 +182,7 @@ impl worker_pool::CaptureEngine for ScreenshotWorker {
                 height: record.height,
                 bytes: record.bytes,
                 sha256: record.sha256,
+                origin: Default::default(),
             });
         }
         Ok(evidence)
@@ -635,6 +636,43 @@ async fn an_oversized_screenshot_inlines_a_downscaled_preview() {
         "the result must name the preview scale {scale}: {captured}"
     );
     assert!(content.iter().any(|item| item["type"] == "resource_link"));
+}
+
+/// Screenshots that together outgrow one frame inline only what fits; the
+/// result still arrives, with a link to every screenshot.
+#[tokio::test]
+async fn screenshots_past_the_frame_limit_stay_links() {
+    let (width, height) = (300u32, 500u32);
+    let mut state = 0x9e37_79b9_u32;
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    assert!(png.len() * 4 / 3 <= 768 * 1024);
+    assert!(3 * png.len() * 4 / 3 > mcp_gateway::protocol::MAX_FRAME_BYTES);
+
+    let (server, _root) = fixture_capturing(3, 8, png, 16 * 1024 * 1024).await;
+    let captured = execute_screenshot(&server).await;
+    let frame = serde_json::to_vec(&captured).unwrap().len();
+    assert!(
+        frame <= mcp_gateway::protocol::MAX_FRAME_BYTES,
+        "frame is {frame} bytes"
+    );
+    let content = captured["result"]["content"].as_array().unwrap();
+    let count = |kind: &str| content.iter().filter(|item| item["type"] == kind).count();
+    assert_eq!(count("resource_link"), 3, "{content:?}");
+    assert!(count("image") >= 1, "{content:?}");
 }
 
 #[tokio::test]

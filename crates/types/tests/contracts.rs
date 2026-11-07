@@ -315,6 +315,7 @@ fn resolution_wait_and_screenshot_evidence_are_typed() {
         height: 600,
         bytes: 42,
         sha256: "abc".into(),
+        origin: Default::default(),
     };
     assert_eq!(
         serde_json::to_value(evidence).unwrap()["kind"],

@@ -710,8 +710,9 @@ impl ResolvedTarget {
         self.press_option(page, option.x.zip(option.y), &wanted, COMBOBOX_ROLELESS)
             .await?;
         let shows = format!(
-            "const chosen={}; {COMBOBOX_SHOWS_SCRIPT}",
-            option_json(&text)?
+            "const chosen={}; {} {COMBOBOX_SHOWS_SCRIPT}",
+            option_json(&text)?,
+            crate::form_snapshot::SHOWN_VALUE_FUNCTION
         );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
         loop {
@@ -885,24 +886,27 @@ impl ResolvedTarget {
 
     pub async fn screenshot(&self, page: &Page) -> Result<Vec<u8>, CommandError> {
         let page = self.execution_page(page);
-        if let Some(element) = &self.native {
-            return element
-                .screenshot(CaptureScreenshotFormat::Png)
-                .await
-                .map_err(cdp_error);
-        }
-        let rect: Rect = self
-            .eval(
-                page,
-                "const r=el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}",
+        let rect: Rect = match &self.native {
+            Some(element) => serde_json::from_value(
+                element
+                    .call_js_fn_by_value(
+                        format!("function() {{ const el=this; {ELEMENT_SHOT_SCRIPT} }}"),
+                        false,
+                    )
+                    .await
+                    .map_err(cdp_error)?,
             )
-            .await?;
+            .map_err(|error| target_error(ErrorCode::ScreenshotCaptureFailed, error))?,
+            None => self.eval(page, ELEMENT_SHOT_SCRIPT).await?,
+        };
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Err(target_error(
                 ErrorCode::ScreenshotCaptureFailed,
                 "resolved target has no visible screenshot bounds",
             ));
         }
+        // Page coordinates, captured past the viewport so a tall element
+        // comes back whole.
         page.screenshot(
             ScreenshotParams::builder()
                 .format(CaptureScreenshotFormat::Png)
@@ -913,6 +917,7 @@ impl ResolvedTarget {
                     height: rect.height,
                     scale: 1.0,
                 })
+                .capture_beyond_viewport(true)
                 .build(),
         )
         .await
@@ -943,7 +948,7 @@ impl ResolvedTarget {
             .map_err(cdp_error)?;
             return Ok(());
         }
-        let expression = locator_expression(&self.locator, "return el")?;
+        let expression = locator_expression(&self.locator, FILE_INPUT_OF_SCRIPT)?;
         let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
         let backend_node_id = page
             .execute(DescribeNodeParams::builder().object_id(object_id).build())
@@ -1040,7 +1045,7 @@ const COMBOBOX_MARK_SCRIPT: &str = "const shown=new WeakSet(); for(const node of
 /// Shared by the option scripts, with `el` bound: the visible, enabled
 /// options and menu items of the control's own popup (`aria-controls` or
 /// `aria-owns`), else of its document.
-const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]')]).filter(o=>visible(o)&&enabled(o)); let options=of(ids.map(id=>doc.getElementById(id)).filter(Boolean)); if(!options.length) options=of([doc]);";
+const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]')]).filter(o=>visible(o)&&enabled(o)); const home=el.getRootNode(); const owner=home.getElementById?home:doc; let options=of(ids.map(id=>owner.getElementById(id)).filter(Boolean)); if(!options.length) options=of(home===doc?[doc]:[home,doc]);";
 
 /// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
 /// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
@@ -1073,7 +1078,17 @@ const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='
 /// Function body with `el` and `chosen` bound: whether the control, a menu
 /// item checked for the chosen text, or the nearest ancestor of the control
 /// that holds no option shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); if(!norm(own)&&shown&&words(shown).every(w=>words(norm(chosen)).includes(w))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+
+/// Function body with `el` bound: the page rectangle to capture for `el`,
+/// scrolled into view. An element under 4 px a side (a hidden file input)
+/// stands for the nearest of four ancestors that is larger.
+const ELEMENT_SHOT_SCRIPT: &str = "const tiny=n=>{const r=n.getBoundingClientRect(); return r.width<4||r.height<4}; let node=el; for(let hop=0; tiny(node)&&node.parentElement&&hop<4; hop++) node=node.parentElement; node.scrollIntoView({block:'nearest',inline:'nearest'}); const r=node.getBoundingClientRect(); return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height};";
+
+/// Function body with `el` bound: the file input `el` stands for. A file
+/// input is itself; a label, its control; a button or slot, the one file
+/// input inside it or inside the nearest of four ancestors holding just one.
+const FILE_INPUT_OF_SCRIPT: &str = "const isFile=n=>n instanceof HTMLInputElement&&n.type==='file'; if(isFile(el)) return el; if(isFile(el.control)) return el.control; const inside=n=>[...n.querySelectorAll('input[type=\"file\"]')]; const own=inside(el); if(own.length===1) return own[0]; for(let node=el.parentElement,hop=0; node&&hop<4; node=node.parentElement,hop++){ const found=inside(node); if(found.length===1) return found[0]; if(found.length>1) break; } return el;";
 
 /// Function body with `el` bound: whether `el` takes typed text. Checked
 /// before any key is dispatched.
@@ -1491,19 +1506,31 @@ async fn open_target_scope(
             Some(element) => LocatorScope::ClosedRoot(Arc::clone(element)),
             None => LocatorScope::Context(context_id),
         };
-        let raw = match &scope_ref {
-            LocatorScope::Context(_) => {
-                collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id, true)
-                    .await?
+        // A host is looked for in the current root first, then in the roots
+        // nested under it, so a nested host of the same name does not compete.
+        let mut resolved = None;
+        for pierce in [false, true] {
+            let raw = match &scope_ref {
+                LocatorScope::Context(_) => {
+                    collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id, pierce)
+                        .await?
+                }
+                LocatorScope::ClosedRoot(element) => {
+                    let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
+                    collect_candidates_within(element, &shadow_hosts, nested_scope, pierce).await?
+                }
+            };
+            let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+            match dom_engine::resolve_shadow_segment(host_target, &candidates) {
+                Err(error) if !pierce && error.code == ErrorCode::ShadowRootUnavailable => {}
+                outcome => {
+                    resolved = Some(outcome?);
+                    break;
+                }
             }
-            LocatorScope::ClosedRoot(element) => {
-                let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-                collect_candidates_within(element, &shadow_hosts, nested_scope, true).await?
-            }
-        };
-        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        }
         let (candidate, evidence, _) =
-            dom_engine::resolve_shadow_segment(host_target, &candidates)?;
+            resolved.ok_or_else(|| dom_engine::shadow_probe_error("host-missing").unwrap())?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
         let has_root: bool = eval_scoped(

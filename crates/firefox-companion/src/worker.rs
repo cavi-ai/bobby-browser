@@ -5464,6 +5464,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let digests = worker_pool::upload::content_digests(paths)?;
         upload_cache.commit(resolved_uploads);
         self.transport
             .send(
@@ -5499,6 +5500,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             Evidence::Upload {
                 selector: command.selector.clone(),
                 paths: opaque,
+                sha256: digests,
             },
             self.evidence(InteractionPath::EngineNative),
         ])
@@ -6163,6 +6165,26 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
             )
         })?;
         let context = self.context(page_id).await?;
+        let captured_at = chrono::Utc::now();
+        let url = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": "globalThis.location.href",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await
+            .ok()
+            .and_then(|response| {
+                response
+                    .pointer("/result/value")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
         let response = self
             .transport
             .send(
@@ -6218,6 +6240,13 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
             height: record.height,
             bytes: record.bytes,
             sha256: record.sha256,
+            origin: types::ScreenshotOrigin {
+                session_id: Some(session_id.clone()),
+                workflow_id: None,
+                page_id: Some(page_id.clone()),
+                url,
+                captured_at: Some(captured_at),
+            },
         }])
     }
 

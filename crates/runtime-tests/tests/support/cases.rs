@@ -6798,3 +6798,422 @@ pub async fn type_text_css_prefers_the_editable_node(rig: &Rig) {
     assert!(page_text_contains(&page, "Links: portfolio link"), "{page}");
     live.close().await;
 }
+
+/// The single control of `kind` named `name` in a form snapshot.
+fn snapshot_control<'a>(snapshot: &'a Value, kind: &str, name: &str) -> &'a Value {
+    let mut controls = Vec::new();
+    controls_of_kind(snapshot, kind, &mut controls);
+    let named = controls
+        .into_iter()
+        .filter(|control| control["accessibleName"] == name)
+        .collect::<Vec<_>>();
+    let [control] = named.as_slice() else {
+        panic!("one {kind} control named {name:?}: {snapshot}");
+    };
+    control
+}
+
+/// A telephone field is a text box in the form snapshot.
+pub async fn a_phone_field_is_a_text_box(rig: &Rig) {
+    let body = r#"<form><label for="phone">Phone</label><input type="tel" id="phone"></form>"#;
+    let site = FixtureSite::spawn(vec![("/phone", Route::Html(page("Phone", body)))]).await;
+    let live = Live::open(rig, &site.url("/phone")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let phone = snapshot_control(&snapshot, "text", "Phone");
+    assert_eq!(phone["target"]["role"], "textbox", "{phone}");
+    live.close().await;
+}
+
+/// A custom select whose text input stays empty: the choice shows in a
+/// sibling element, in a short form of the option text.
+fn custom_select(id: &str, label: &str, options: &[(&str, &str)], chosen: Option<&str>) -> String {
+    let options_html = options
+        .iter()
+        .map(|(text, short)| format!(r#"<div role="option" data-short="{short}">{text}</div>"#))
+        .collect::<String>();
+    let shown = chosen.map_or_else(
+        || format!(r#"<div class="select__placeholder" id="{id}-placeholder">Select...</div>"#),
+        |short| format!(r#"<div class="select__single-value">{short}</div>"#),
+    );
+    format!(
+        r#"<label id="{id}-label" for="{id}">{label}</label>
+        <div class="select" data-select="{id}">
+          <div class="select__control">
+            <div class="select__value-container">{shown}
+              <div class="select__input-container"><input id="{id}" role="combobox" aria-autocomplete="list"
+                aria-expanded="false" aria-haspopup="true" aria-labelledby="{id}-label"
+                aria-controls="{id}-menu" autocomplete="off" value=""></div>
+            </div>
+            <div class="select__indicators"><span aria-hidden="true">v</span></div>
+          </div>
+          <div id="{id}-menu" role="listbox" hidden>{options_html}</div>
+        </div>"#
+    )
+}
+
+const CUSTOM_SELECT_SCRIPT: &str = r#"<script>
+  for (const select of document.querySelectorAll("[data-select]")) {
+    const input = select.querySelector("input");
+    const menu = select.querySelector("[role=listbox]");
+    const open = () => { menu.hidden = false; input.setAttribute("aria-expanded", "true"); };
+    input.addEventListener("focus", open);
+    input.addEventListener("mousedown", open);
+    input.addEventListener("input", () => {
+      open();
+      const typed = input.value.toLowerCase();
+      for (const option of menu.children) option.hidden = !option.textContent.toLowerCase().includes(typed);
+    });
+    for (const option of menu.children) {
+      option.addEventListener("click", () => {
+        const values = select.querySelector(".select__value-container");
+        values.querySelector(".select__placeholder, .select__single-value")?.remove();
+        const single = document.createElement("div");
+        single.className = "select__single-value";
+        single.textContent = option.dataset.short;
+        values.prepend(single);
+        input.value = "";
+        menu.hidden = true;
+        input.setAttribute("aria-expanded", "false");
+        document.getElementById("echo").textContent += ` ${input.id}=${option.textContent}`;
+      });
+    }
+  }
+</script>"#;
+
+/// A custom select reads as the value it shows, and choosing an option is
+/// verified against the short form the select shows.
+pub async fn a_custom_select_reads_and_verifies_its_shown_value(rig: &Rig) {
+    let codes = [
+        ("Canada +1", "+1"),
+        ("United States +1", "+1"),
+        ("Sweden +46", "+46"),
+    ];
+    let body = format!(
+        r#"<form>{}{}</form><p id="echo"></p>{CUSTOM_SELECT_SCRIPT}"#,
+        custom_select("home", "Home country", &codes, Some("+46")),
+        custom_select("dial", "Phone country", &codes, None),
+    );
+    let site = FixtureSite::spawn(vec![("/select", Route::Html(page("Select", &body)))]).await;
+    let live = Live::open(rig, &site.url("/select")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let home = snapshot_control(&snapshot, "combobox", "Home country");
+    assert_eq!(
+        home["state"],
+        json!({"kind":"text","value":"+46"}),
+        "{home}"
+    );
+    let dial = snapshot_control(&snapshot, "combobox", "Phone country");
+    assert_eq!(dial["state"], json!({"kind":"empty"}), "{dial}");
+
+    let picked = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the phone country",
+                   "hints":{"role":"combobox","accessibleName":"Phone country"},
+                   "value":{"kind":"selectOne","value":"United States +1"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "dial=United States +1"), "{page}");
+    live.close().await;
+}
+
+/// Checkboxes that share a name and are each marked required need only one
+/// checked: once one is, the form reports none of them missing.
+pub async fn a_checked_box_satisfies_its_required_group(rig: &Rig) {
+    let body = r#"<form><fieldset><legend>How did you hear about us?</legend>
+        <label><input type="checkbox" name="source[]" value="site" required> Company website</label>
+        <label><input type="checkbox" name="source[]" value="board" required> Job board</label>
+        <label><input type="checkbox" name="source[]" value="friend" required> A friend</label>
+        </fieldset></form>"#;
+    let site = FixtureSite::spawn(vec![("/group", Route::Html(page("Group", body)))]).await;
+    let live = Live::open(rig, &site.url("/group")).await;
+    let before = live.call("form_snapshot", json!({})).await;
+    assert_eq!(
+        before["forms"][0]["validity"]["invalidControlIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(3),
+        "{before}"
+    );
+    let checked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"checkbox","accessibleName":"Company website"},
+                   "action":{"kind":"setChecked","checked":true}}),
+        )
+        .await;
+    assert_eq!(checked["status"], "completed", "{checked}");
+    let after = live.call("form_snapshot", json!({})).await;
+    assert_eq!(after["forms"][0]["validity"]["valid"], true, "{after}");
+    let friend = snapshot_control(&after, "checkbox", "A friend");
+    assert_eq!(friend["validity"]["valid"], true, "{friend}");
+    live.close().await;
+}
+
+/// A file slot whose row shows a file the page already holds reports that
+/// file, though its input holds none.
+pub async fn a_file_slot_reports_the_file_its_row_shows(rig: &Rig) {
+    let body = r#"<form><div class="field" role="group" aria-labelledby="resume-label">
+        <div id="resume-label">Resume</div>
+        <div class="upload"><div class="buttons"><div class="inner"><button type="button">Attach</button>
+          <input type="file" id="resume" aria-labelledby="resume-label" style="position:absolute;left:-9999px"></div></div></div>
+        <div class="chosen"><span>stored-resume.pdf</span><button type="button" aria-label="Remove file">x</button></div>
+        </div></form>"#;
+    let site = FixtureSite::spawn(vec![("/slot", Route::Html(page("Slot", body)))]).await;
+    let live = Live::open(rig, &site.url("/slot")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let resume = snapshot_control(&snapshot, "file", "Resume");
+    assert_eq!(
+        resume["state"],
+        json!({"kind":"files","count":1,"names":["stored-resume.pdf"]}),
+        "{resume}"
+    );
+    live.close().await;
+}
+
+const ATTACH_SLOTS: &str = r#"<form>
+    <div class="field" role="group" aria-labelledby="resume-label"><div id="resume-label">Resume/CV</div>
+      <button type="button" class="attach">Attach</button>
+      <input type="file" id="resume" style="position:absolute;width:1px;height:1px;opacity:0"><span class="shown"></span></div>
+    <div class="field" role="group" aria-labelledby="cover-label"><div id="cover-label">Cover Letter</div>
+      <button type="button" class="attach">Attach</button>
+      <input type="file" id="cover" style="position:absolute;width:1px;height:1px;opacity:0"><span class="shown"></span></div>
+    </form><p id="echo"></p>
+    <script>
+      for (const button of document.querySelectorAll(".attach")) {
+        button.addEventListener("click", () => button.parentElement.querySelector("input").click());
+      }
+      for (const input of document.querySelectorAll('input[type="file"]')) {
+        input.addEventListener("change", () => {
+          document.getElementById("echo").textContent += ` ${input.id}=${input.files[0]?.name}`;
+        });
+      }
+    </script>"#;
+
+/// An upload addressed to a slot's Attach button lands in that slot's file
+/// input, and the upload evidence carries the file's content digest.
+pub async fn an_attach_button_uploads_into_its_slot(rig: &Rig, dir: &std::path::Path) {
+    use sha2::Digest;
+    let cover = dir.join("cover.txt");
+    std::fs::write(&cover, "cover-letter-bytes").expect("write cover");
+    let site =
+        FixtureSite::spawn(vec![("/attach", Route::Html(page("Attach", ATTACH_SLOTS)))]).await;
+    let live = Live::open(rig, &site.url("/attach")).await;
+    let uploaded = live
+        .call(
+            "upload_files",
+            json!({"target":{"role":"button","accessibleName":"Attach","ordinal":1},
+                   "paths":[cover.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let upload = uploaded["evidence"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["kind"] == "upload"))
+        .unwrap_or_else(|| panic!("no upload evidence: {uploaded}"));
+    assert_eq!(
+        upload["sha256"],
+        json!([hex::encode(sha2::Sha256::digest(b"cover-letter-bytes"))]),
+        "{upload}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "cover=cover.txt"), "{page}");
+    live.close().await;
+}
+
+/// The PNG an evidence item names, read from the session's artifact store.
+fn screenshot_png(rig: &Rig, live: &Live<'_>, result: &Value) -> (Value, Vec<u8>) {
+    let shot = result["evidence"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["kind"] == "screenshot"))
+        .unwrap_or_else(|| panic!("no screenshot evidence: {result}"))
+        .clone();
+    let session = serde_json::from_value(live.session_id.clone()).expect("session id");
+    let path = artifact_store::artifact_path(
+        &rig.storage_root().join("artifacts"),
+        &session,
+        shot["artifactId"].as_str().expect("artifact id"),
+    );
+    let png = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    (shot, png)
+}
+
+/// Whether any pixel of the PNG is close to pure red.
+fn shows_red(png: &[u8]) -> bool {
+    let (_, _, rgb) = artifact_store::image::decode_rgb(png).expect("decodes");
+    rgb.chunks(3)
+        .any(|pixel| pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 80)
+}
+
+/// An element screenshot of a group below the fold shows the group, and one
+/// of a hidden file input shows the slot around it.
+pub async fn element_screenshots_show_the_element(rig: &Rig) {
+    let body = r#"<div style="height:2400px">Top</div>
+        <fieldset style="background:#d00000;width:420px;height:160px"><legend>How did you hear about us?</legend></fieldset>
+        <div id="slot" style="background:#d00000;width:300px;height:80px;position:relative">Resume
+          <input type="file" id="resume" style="position:absolute;width:1px;height:1px;opacity:0"></div>"#;
+    let site = FixtureSite::spawn(vec![("/shots", Route::Html(page("Shots", body)))]).await;
+    let live = Live::open(rig, &site.url("/shots")).await;
+    let group = live
+        .call(
+            "screenshot",
+            json!({"mode":{"kind":"element","target":{"role":"group","accessibleName":"How did you hear about us?"}}}),
+        )
+        .await;
+    assert_eq!(group["status"], "completed", "{group}");
+    let (shot, png) = screenshot_png(rig, &live, &group);
+    assert!(shows_red(&png), "the group screenshot is blank: {shot}");
+
+    let hidden = live
+        .call(
+            "screenshot",
+            json!({"mode":{"kind":"element","target":{"css":"#resume"}}}),
+        )
+        .await;
+    assert_eq!(hidden["status"], "completed", "{hidden}");
+    let (shot, png) = screenshot_png(rig, &live, &hidden);
+    assert!(shot["width"].as_u64() > Some(100), "{shot}");
+    assert!(shows_red(&png), "the slot screenshot is blank: {shot}");
+    live.close().await;
+}
+
+/// A screenshot names the session, workflow, page and address it shows and
+/// when it was taken.
+pub async fn screenshots_name_their_session_and_page(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/shown",
+        Route::Html(page("Shown", "<main><h1>Shown</h1></main>")),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/shown")).await;
+    let result = live.call("screenshot", json!({})).await;
+    assert_eq!(result["status"], "completed", "{result}");
+    let (shot, _) = screenshot_png(rig, &live, &result);
+    assert_eq!(shot["sessionId"], live.session_id, "{shot}");
+    assert_eq!(shot["pageId"], live.page_id, "{shot}");
+    assert!(shot["workflowId"].is_string(), "{shot}");
+    assert_eq!(shot["url"], site.url("/shown"), "{shot}");
+    assert!(
+        shot["capturedAt"]
+            .as_str()
+            .is_some_and(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok()),
+        "{shot}"
+    );
+    live.close().await;
+}
+
+/// Custom elements nested two deep, beside another unnamed host: the form
+/// snapshot's target for a control inside reaches it, and so does a target
+/// without a shadow path.
+pub async fn nested_shadow_controls_act_from_their_targets(rig: &Rig) {
+    let body = r#"<x-badge></x-badge><x-app></x-app><p id="echo"></p>
+        <script>
+          customElements.define("x-badge", class extends HTMLElement {
+            connectedCallback() {
+              if (!this.shadowRoot) this.attachShadow({ mode: "open" }).innerHTML = "<span>New</span>";
+            }
+          });
+          customElements.define("x-app", class extends HTMLElement {
+            connectedCallback() {
+              if (!this.shadowRoot) this.attachShadow({ mode: "open" }).innerHTML = "<x-form></x-form>";
+            }
+          });
+          customElements.define("x-form", class extends HTMLElement {
+            connectedCallback() {
+              if (this.shadowRoot) return;
+              const root = this.attachShadow({ mode: "open" });
+              root.innerHTML = '<form><label for="email">Email</label><input id="email" type="email">' +
+                '<label for="phone">Phone</label><input id="phone" type="tel"></form>';
+              for (const input of root.querySelectorAll("input")) {
+                input.addEventListener("input", () => {
+                  document.getElementById("echo").textContent += ` ${input.id}=${input.value}`;
+                });
+              }
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/nested", Route::Html(page("Nested", body)))]).await;
+    let live = Live::open(rig, &site.url("/nested")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let email = snapshot_control(&snapshot, "email", "Email");
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":email["target"],"value":"ada@example.org"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "snapshot target: {typed}");
+    let unpathed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Phone"},"value":"5550100"}),
+        )
+        .await;
+    assert_eq!(
+        unpathed["status"], "completed",
+        "target without a path: {unpathed}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "email=ada@example.org"), "{page}");
+    assert!(page_text_contains(&page, "phone=5550100"), "{page}");
+    live.close().await;
+}
+
+/// A combobox inside a shadow root lists the options of its listbox in the
+/// same root, and its text box takes typed text.
+pub async fn a_shadow_combobox_takes_its_options_and_text(rig: &Rig) {
+    let body = r#"<x-city></x-city><p id="echo"></p>
+        <script>
+          customElements.define("x-city", class extends HTMLElement {
+            connectedCallback() {
+              if (this.shadowRoot) return;
+              const root = this.attachShadow({ mode: "open" });
+              root.innerHTML = '<form><label for="city">City</label>' +
+                '<input id="city" role="combobox" aria-controls="city-list" aria-expanded="false" autocomplete="off">' +
+                '<div id="city-list" role="listbox" hidden><div role="option">Springfield</div>' +
+                '<div role="option">Shelbyville</div></div>' +
+                '<label for="town">Town</label><input id="town" role="combobox" autocomplete="off"></form>';
+              const input = root.getElementById("city");
+              const list = root.getElementById("city-list");
+              input.addEventListener("input", () => { list.hidden = false; input.setAttribute("aria-expanded", "true"); });
+              input.addEventListener("focus", () => { list.hidden = false; });
+              for (const option of list.children) {
+                option.addEventListener("click", () => {
+                  input.value = option.textContent;
+                  list.hidden = true;
+                  document.getElementById("echo").textContent += ` city=${option.textContent}`;
+                });
+              }
+              root.getElementById("town").addEventListener("input", (event) => {
+                document.getElementById("echo").textContent += ` town=${event.target.value}`;
+              });
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/city", Route::Html(page("City", body)))]).await;
+    let live = Live::open(rig, &site.url("/city")).await;
+    let picked = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the city",
+                   "hints":{"role":"combobox","accessibleName":"City"},
+                   "value":{"kind":"selectOne","value":"Shelbyville"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "selectOne: {picked}");
+    let typed = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"type the town",
+                   "hints":{"role":"combobox","accessibleName":"Town"},
+                   "value":{"kind":"setText","value":"Ogdenville"}}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "setText: {typed}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "city=Shelbyville"), "{page}");
+    assert!(page_text_contains(&page, "town=Ogdenville"), "{page}");
+    live.close().await;
+}

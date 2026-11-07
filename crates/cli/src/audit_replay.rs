@@ -330,6 +330,7 @@ mod tests {
                 height: 1,
                 bytes: PNG.len() as u64,
                 sha256: String::new(),
+                origin: Default::default(),
             }],
         };
         let rejected = CommandOutcome::Failed {

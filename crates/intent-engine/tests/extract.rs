@@ -103,6 +103,7 @@ impl IntentBrowser for FakeBrowser {
                 height: 1,
                 bytes: self.screenshot_png.len() as u64,
                 sha256: "abc".into(),
+                origin: Default::default(),
             }],
         ))
     }

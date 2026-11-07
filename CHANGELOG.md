@@ -9,8 +9,9 @@
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 - `[vision].model_server` sends the managed MLX vision server's requests to an OpenAI-compatible server that holds the model, such as one `mlx-agent serve` started; `bobby install` sets it with `--vision-model-server` or from its vision menu.
 - On Chromium, a button that opens a menu or listbox takes `selectOne` and `selectMany`, which check its menu items and close the menu.
-- A `form_snapshot` file control's state lists `names`: the files it holds or, holding none, the file names its widget shows.
+- A `form_snapshot` file control's state lists `names`: the files it holds or, holding none, the file names its widget shows, and its `count` includes them.
 - `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
+- `screenshot` evidence names its `sessionId`, `workflowId`, `pageId`, `url` and `capturedAt`, and `upload` evidence lists each file's `sha256`; an upload's journaled source reads `upload://source/`, a digest of its path.
 
 ### Changed
 
@@ -36,7 +37,7 @@
 - A tool call whose `timeoutMs` reaches one minute reports its own timeout instead of `deadlineExceeded`.
 - A wait for an element to detach is satisfied when the element's document was replaced.
 - `boundaryAlreadyExecuted` guards a submit control on its own page only, so one workflow can submit the same control on another page.
-- A screenshot too large to inline returns a downscaled inline preview that names its scale; the artifact keeps the full image.
+- A screenshot too large to inline returns a downscaled inline preview that names its scale, and screenshots that together outgrow one MCP frame inline only those that fit instead of failing `resultTooLarge`; every artifact keeps its full image and resource link.
 - `intent_enter_code` fills split code boxes when only the first box has a name, typing the code from it and reading every box back.
 - On Chromium, `selectOne` on an ARIA combobox or a text box, including one that filters as it is typed in or whose suggestions have no option role, clicks the option whose text is the value; a value no option reads fails listing every option offered.
 - A role-less `type_text` target that also matches a text box's wrappers types into the text box.
@@ -45,7 +46,12 @@
 - A vision click lands on its control on a display with more than one device pixel per CSS pixel.
 - On Chromium, `setChecked` checks ARIA checkboxes and radios, which `form_snapshot` now lists.
 - `form_snapshot` lists every editable region, including `contenteditable="plaintext-only"`, and text typed into one reads back.
-- On Chromium, a `form_snapshot` target for a control inside a custom element's shadow root resolves through its host.
+- On Chromium, a `form_snapshot` target for a control inside a custom element's shadow root resolves through its host, including nested and same-named hosts, and a combobox in a shadow root lists its options and takes `setText`.
+- A custom select's shown value reads back in `form_snapshot` and verifies a `selectOne` whose option text contains it.
+- On Chromium, `upload_files` and `setFiles` on a label or an attach button upload into the file input of its own slot.
+- On Chromium, an element screenshot scrolls the element into view and captures all of it, and a hidden or tiny control shoots its visible wrapper.
+- `form_snapshot` reports a `tel` or `url` input as a text control.
+- A required checkbox group reads valid in `form_snapshot` once one of its boxes is checked.
 - A humanized click scrolls its target into view, including an option scrolled out of its list.
 - An intent hint `ordinal` picks among controls that share a name and have no id, in `intent_fill` and `intent_complete_form`.
 

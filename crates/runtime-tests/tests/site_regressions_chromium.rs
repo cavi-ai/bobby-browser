@@ -41,7 +41,15 @@ cases::every_case!(
     button_menus_take_select_one_and_select_many,
     text_boxes_pick_a_suggestion_without_a_role,
     a_combobox_without_the_value_lists_its_options,
-    type_text_css_prefers_the_editable_node
+    type_text_css_prefers_the_editable_node,
+    a_phone_field_is_a_text_box,
+    a_custom_select_reads_and_verifies_its_shown_value,
+    a_checked_box_satisfies_its_required_group,
+    a_file_slot_reports_the_file_its_row_shows,
+    element_screenshots_show_the_element,
+    screenshots_name_their_session_and_page,
+    nested_shadow_controls_act_from_their_targets,
+    a_shadow_combobox_takes_its_options_and_text
 );
 
 #[tokio::test(flavor = "multi_thread")]
@@ -50,6 +58,14 @@ async fn a_file_control_reports_the_file_its_widget_shows() {
     let dir = tempfile::tempdir().expect("upload dir");
     let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
     cases::a_file_control_reports_the_file_its_widget_shows(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn an_attach_button_uploads_into_its_slot() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::an_attach_button_uploads_into_its_slot(&rig, dir.path()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

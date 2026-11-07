@@ -181,6 +181,7 @@ impl ArtifactCatalog {
                     height,
                     bytes,
                     sha256,
+                    ..
                 } => artifact_store::ArtifactRecord {
                     artifact_id: artifact_id.clone(),
                     page_id: envelope.page_id.clone().ok_or(ArtifactCatalogFull)?,

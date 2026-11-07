@@ -213,6 +213,23 @@ pub async fn resolve_upload_sources(
     Ok(result)
 }
 
+/// The SHA-256 of each admitted file's content, as lowercase hex.
+pub fn content_digests(paths: &[PathBuf]) -> Result<Vec<String>, CommandError> {
+    paths
+        .iter()
+        .map(|path| {
+            // Admission bounded the files' total size.
+            let bytes = std::fs::read(path).map_err(|_| {
+                error(
+                    ErrorCode::PolicyDenied,
+                    "approved upload file is unavailable",
+                )
+            })?;
+            Ok(hex::encode(Sha256::digest(&bytes)))
+        })
+        .collect()
+}
+
 pub fn opaque_upload_paths(sources: &[String]) -> Vec<String> {
     sources
         .iter()

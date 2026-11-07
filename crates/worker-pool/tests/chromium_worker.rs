@@ -961,7 +961,7 @@ async fn drives_a_real_chromium_page() {
         .unwrap();
     let serialized = serde_json::to_value(&upload_evidence).unwrap();
     let reference = serialized[0]["paths"][0].as_str().unwrap();
-    let digest = reference.strip_prefix("upload://sha256/").unwrap();
+    let digest = reference.strip_prefix("upload://source/").unwrap();
     assert_eq!(digest.len(), 64);
     assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(!serialized.to_string().contains("resume.txt"));

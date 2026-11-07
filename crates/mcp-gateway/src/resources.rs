@@ -147,6 +147,7 @@ impl ArtifactResources {
                     height,
                     bytes,
                     sha256,
+                    ..
                 } => {
                     admission.attempted += 1;
                     let result = envelope

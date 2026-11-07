@@ -823,6 +823,7 @@ async fn artifact_registration_round_trips_through_the_fallback_output_schema() 
             height: 768,
             bytes: 4096,
             sha256: "a".repeat(64),
+            origin: Default::default(),
         }],
     })
     .unwrap();

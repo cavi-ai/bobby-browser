@@ -2871,7 +2871,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "upload",
-            json!({"selector":string(0,MAX_STRING_BYTES),"paths":array(string(1,MAX_STRING_BYTES),64)}),
+            json!({"selector":string(0,MAX_STRING_BYTES),"paths":array(string(1,MAX_STRING_BYTES),64),"sha256":array(sha256(),64)}),
             &["selector", "paths"],
         ),
         tagged_fields(
@@ -2927,7 +2927,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "screenshot",
-            json!({"artifactId":string(1,128),"mediaType":string(1,256),"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"bytes":{"type":"integer","minimum":1,"maximum":1073741824u64},"sha256":sha256()}),
+            json!({"artifactId":string(1,128),"mediaType":string(1,256),"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"bytes":{"type":"integer","minimum":1,"maximum":1073741824u64},"sha256":sha256(),"sessionId":id(),"workflowId":id(),"pageId":id(),"url":string(0,MAX_URL_BYTES),"capturedAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}}),
             &[
                 "artifactId",
                 "mediaType",

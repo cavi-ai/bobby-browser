@@ -147,7 +147,7 @@ export type Evidence =
   | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; pageDerived?: true }
   | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
-  | { kind: "upload"; selector: string; paths: string[] }
+  | { kind: "upload"; selector: string; paths: string[]; sha256?: string[] }
   | { kind: "page"; pageId: Id; url: string; title: string }
   | { kind: "pageGeneration"; pageId: Id; generation: number }
   | { kind: "pages"; pages: PageEvidence[] }
@@ -157,7 +157,7 @@ export type Evidence =
   | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }
   | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number; excludedClasses?: string[]; observed?: string }
-  | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
+  | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string; sessionId?: Id; workflowId?: Id; pageId?: Id; url?: string; capturedAt?: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean; pageDerived?: true }
