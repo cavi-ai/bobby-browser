@@ -243,7 +243,7 @@ intent_args!(IntentCompleteFormArgs {
 intent_args!(IntentSubmitAndVerifyArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
-    expected_state: types::WaitForCommand,
+    expected_state: Option<types::WaitForCommand>,
     evidence_detail: Option<EvidenceDetail>,
     auto_checkpoint: Option<bool>,
     // Acknowledge a prior completed submit for this workflow and submit

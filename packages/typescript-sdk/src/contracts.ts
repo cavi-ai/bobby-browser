@@ -321,6 +321,8 @@ export interface IntentHints {
    * `nearText`; setting both to different values is refused.
    */
   accessibleName?: string | null;
+  /** Attribute values the control carries, as a `form_snapshot` target gives them. */
+  attributes?: Record<string, string>;
   nearText?: TextMatch | null;
   ordinal?: number | null;
   framePath?: TargetSpec[];
@@ -331,7 +333,11 @@ export interface LocateIntent { purpose: string; hints?: IntentHints; }
 export interface FillIntent { purpose: string; hints?: IntentHints; value: ControlAction; }
 export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: ControlAction; }
 export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
-export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
+/**
+ * Submit once and verify. Without `expectedState` the page verifies it: a URL
+ * change, the submit control leaving, or other form fields.
+ */
+export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState?: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /**
  * Follow a control and wait for the expected destination.

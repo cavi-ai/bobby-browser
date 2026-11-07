@@ -1,5 +1,6 @@
 mod enter_code;
 mod locate;
+mod page_change;
 use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -1646,6 +1647,11 @@ async fn execute_fill(
         };
     }
 
+    let candidate = if matches!(value, ControlAction::SetText { .. }) {
+        candidate
+    } else {
+        Box::new(with_control_stamp(page_id, browser, *candidate, &target).await)
+    };
     let fingerprint = fingerprint(page_id, &candidate);
     let resolution = Evidence::Resolution {
         target: Box::new(target.clone()),
@@ -2144,21 +2150,45 @@ fn form_control_target(
             ordinal: target.ordinal,
         })
     };
+    let name = candidate.name.clone().filter(|name| !name.is_empty());
+    let stamp = candidate
+        .attributes
+        .get(dom_engine::CONTROL_STAMP_ATTRIBUTE)
+        .cloned();
+    // The intent's ordinal counts controls with the intent's own name, so it
+    // carries over only to a target with that name; otherwise the stamp
+    // identifies the control.
+    let (accessible_name, attributes, ordinal) = match (name, stamp) {
+        (Some(name), _) if names_by_intent(candidate, intent_target) => {
+            (name, Default::default(), intent_target.ordinal)
+        }
+        (_, Some(stamp)) => (
+            String::new(),
+            [(dom_engine::CONTROL_STAMP_ATTRIBUTE.to_owned(), stamp)]
+                .into_iter()
+                .collect(),
+            None,
+        ),
+        (Some(name), None) if intent_target.ordinal.is_none() => (name, Default::default(), None),
+        _ => {
+            return Err(CommandError {
+                code: ErrorCode::IntentActionMismatch,
+                message: "resolved form control has no accessible name".into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })
+        }
+    };
     Ok(FormControlTarget {
-        attributes: Default::default(),
+        attributes: Box::new(attributes),
         role: candidate.role.clone().ok_or_else(|| CommandError {
             code: ErrorCode::IntentActionMismatch,
             message: "resolved form control has no semantic role".into(),
             layer: ErrorLayer::Page,
             retryable: false,
         })?,
-        accessible_name: candidate.name.clone().ok_or_else(|| CommandError {
-            code: ErrorCode::IntentActionMismatch,
-            message: "resolved form control has no accessible name".into(),
-            layer: ErrorLayer::Page,
-            retryable: false,
-        })?,
-        ordinal: intent_target.ordinal,
+        accessible_name,
+        ordinal,
         // An explicit frame path on the intent wins; otherwise the one the
         // gather stamped when it found the control inside a frame.
         frame_path: if intent_target.frame_path.is_empty() {
@@ -2175,6 +2205,46 @@ fn form_control_target(
             .map(|target| segment(target))
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+/// The intent asked for the control by the name it has.
+fn names_by_intent(candidate: &Candidate, intent_target: &TargetSpec) -> bool {
+    intent_target
+        .accessible_name
+        .as_deref()
+        .is_some_and(|name| !name.is_empty())
+        && candidate
+            .name
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+}
+
+/// A control the intent did not pick by its name is acted on by the stamp a
+/// form snapshot puts on it. One snapshot stamps a control that has none,
+/// then the same element is read back from a fresh gather.
+async fn with_control_stamp(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    mut candidate: Candidate,
+    intent_target: &TargetSpec,
+) -> Candidate {
+    if candidate
+        .attributes
+        .contains_key(dom_engine::CONTROL_STAMP_ATTRIBUTE)
+        || names_by_intent(&candidate, intent_target)
+        || !matches!(browser.form_snapshot(page_id).await, Ok(Some(_)))
+    {
+        return candidate;
+    }
+    if let Some(gathered) = browser
+        .collect_candidates(page_id, intent_target)
+        .await
+        .ok()
+        .and_then(|gathered| gathered.into_iter().find(|item| item.id == candidate.id))
+    {
+        candidate.attributes = gathered.attributes;
+    }
+    candidate
 }
 
 fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, TargetSpec) {
@@ -2264,7 +2334,7 @@ async fn execute_submit_and_verify(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     target: TargetSpec,
-    expected_state: WaitForCommand,
+    expected_state: Option<WaitForCommand>,
     command_deadline: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
     let (purpose, purpose_is_implicit_match) = match intent {
@@ -2276,11 +2346,10 @@ async fn execute_submit_and_verify(
         ),
         _ => (None, false),
     };
-    let plan_summary = format!(
-        "{} expected_state={}",
-        summarize_target(&target),
-        wait_condition_kind(&expected_state.condition)
-    );
+    let verify_kind = expected_state.as_ref().map_or("pageChange", |expected| {
+        wait_condition_kind(&expected.condition)
+    });
+    let plan_summary = format!("{} expected_state={verify_kind}", summarize_target(&target));
     let LocatedTarget {
         candidate,
         evidence: candidate_evidence,
@@ -2317,11 +2386,12 @@ async fn execute_submit_and_verify(
     };
 
     let (selector, action_target) = action_target(&candidate, &target);
+    let submit_control = action_target.clone();
     let click = ClickCommand {
         selector,
         target: Some(action_target),
         boundary: true,
-        expected_url: expected_url_from_wait(&expected_state),
+        expected_url: expected_state.as_ref().and_then(expected_url_from_wait),
         modifiers: Vec::new(),
     };
     // If a text/element/value expected-state already holds before the click,
@@ -2341,10 +2411,14 @@ async fn execute_submit_and_verify(
     // customer page, the submit "verified" nothing, and the agent re-ran the
     // Boundary submit (boundary-once now refuses that, but the first line of
     // defense is a pre-check that outlives the render).
-    if matches!(
-        expected_state.condition,
-        WaitCondition::Text { .. } | WaitCondition::Element { .. } | WaitCondition::Value { .. }
-    ) {
+    if let Some(expected_state) = expected_state.as_ref().filter(|expected| {
+        matches!(
+            expected.condition,
+            WaitCondition::Text { .. }
+                | WaitCondition::Element { .. }
+                | WaitCondition::Value { .. }
+        )
+    }) {
         let pre_check = WaitForCommand {
             condition: expected_state.condition.clone(),
             timeout_ms: 2_000,
@@ -2376,13 +2450,17 @@ async fn execute_submit_and_verify(
             };
         }
     }
+    let baseline = match expected_state {
+        Some(_) => page_change::Baseline::default(),
+        None => page_change::baseline(page_id, browser).await,
+    };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) if post_navigation_context_loss(&error) => {
             // The browser destroyed the frame execution context while the
             // click was returning. The side effect may already have landed;
-            // only the caller's expected state can decide. Continue to that
-            // verification instead of reporting an unverified act failure.
+            // only the post-state verification can decide. Continue to it
+            // instead of reporting an unverified act failure.
             vec![Evidence::Configuration {
                 name: "clickDispatch".into(),
                 value: "execution context replaced; verifying expected post-state".into(),
@@ -2407,7 +2485,96 @@ async fn execute_submit_and_verify(
         }
     };
 
-    let mut wait_evidence = match browser.wait_for(page_id, &expected_state).await {
+    let mut settlement_verification = "submitted";
+    let waited = match &expected_state {
+        Some(expected_state) => browser.wait_for(page_id, expected_state).await,
+        None => match page_change::await_change(
+            page_id,
+            browser,
+            &submit_control,
+            &baseline,
+            command_deadline,
+        )
+        .await
+        {
+            Ok(page_change::PageChange::Changed {
+                evidence,
+                verification,
+            }) => {
+                settlement_verification = verification;
+                Ok(evidence)
+            }
+            Ok(page_change::PageChange::Rejected { issues }) => {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VerificationFailed,
+                        message: format!(
+                            "the page stayed and marks fields invalid: {}. Nothing was \
+                             accepted; correct these fields, then submit again",
+                            page_change::describe_rejection(&issues)
+                        ),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: {
+                        let mut evidence = vec![resolution];
+                        evidence.append(&mut click_evidence);
+                        evidence.push(Evidence::SubmitSettlement {
+                            outcome: types::SubmitSettlementOutcome::ValidationRejected,
+                        });
+                        evidence.push(Evidence::FormValidation { issues });
+                        evidence.push(intent_evidence(execution_record(
+                            "submitAndVerify",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "validationRejected",
+                        )));
+                        evidence
+                    },
+                };
+            }
+            Err(error) => Err(error),
+        },
+    };
+    // A submit that lands on a one-time-code step is the next step of the
+    // sign-in, not a failure to repair: say so, with where the code goes.
+    // An expected state that held is trusted as is.
+    if expected_state.is_none() || waited.is_err() {
+        if let Some(step) = enter_code::read_code_step(page_id, browser, None)
+            .await
+            .ok()
+            .flatten()
+        {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VerificationCodeRequired,
+                    message: "the submit landed and the page now asks for a one-time code; get \
+                              the code from the inbox or phone the page names, then call \
+                              intent_enter_code"
+                        .into(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: {
+                    let mut evidence = vec![resolution];
+                    evidence.append(&mut click_evidence);
+                    evidence.push(step.evidence());
+                    evidence.push(intent_evidence(execution_record(
+                        "submitAndVerify",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "codeRequired",
+                    )));
+                    evidence
+                },
+            };
+        }
+    }
+    let mut wait_evidence = match waited {
         Ok(evidence) => evidence,
         Err(error) => {
             // The boundary click already landed; only the post-state
@@ -2416,40 +2583,6 @@ async fn execute_submit_and_verify(
             // the POST. Rewrap so the effect and the safe next step are
             // explicit.
             let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
-            // A submit that lands on a one-time-code step is the next step of
-            // the sign-in, not a failure to repair: say so, with where the
-            // code goes.
-            if let Some(step) = enter_code::read_code_step(page_id, browser, None)
-                .await
-                .ok()
-                .flatten()
-            {
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VerificationCodeRequired,
-                        message: "the submit landed and the page now asks for a one-time code \
-                                  instead of reaching the expected state; get the code from the \
-                                  inbox or phone the page names, then call intent_enter_code"
-                            .into(),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence: {
-                        let mut evidence = vec![resolution];
-                        evidence.append(&mut click_evidence);
-                        evidence.push(step.evidence());
-                        evidence.push(intent_evidence(execution_record(
-                            "submitAndVerify",
-                            purpose,
-                            plan_summary,
-                            vec![candidate_evidence],
-                            None,
-                            "codeRequired",
-                        )));
-                        evidence
-                    },
-                };
-            }
             let reading = read_outcome(
                 page_id,
                 browser,
@@ -2465,7 +2598,7 @@ async fn execute_submit_and_verify(
                      Do not resubmit blindly — inspect the page for a server rejection or \
                      confirmation, then re-verify with intent_wait_for_state or correct the \
                      rejected fields",
-                    wait_condition_kind(&expected_state.condition),
+                    verify_kind,
                     error.message,
                     if opened.is_empty() {
                         ""
@@ -2515,8 +2648,10 @@ async fn execute_submit_and_verify(
     // client-side validation as a recoverable outcome. The boundary click has
     // already happened exactly once, so a validation rejection is data for the
     // caller to repair, not a tool error that could invite a blind resubmit.
-    let mut settlement_verification = "submitted";
-    if matches!(expected_state.condition, WaitCondition::NetworkQuiet { .. }) {
+    if matches!(
+        expected_state.as_ref().map(|expected| &expected.condition),
+        Some(WaitCondition::NetworkQuiet { .. })
+    ) {
         // Inspect first. Network-idle can become true just before the browser
         // commits the response-driven DOM update; the bounded inspection is a
         // page round trip that observes that render before validation is

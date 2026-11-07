@@ -296,6 +296,15 @@ test("search inputs observe as searchbox and file inputs as button with their se
   assert.equal(file?.value, "resume.txt");
 });
 
+test("an unnamed control keeps the number a form snapshot stamped on it", () => {
+  const observed = observeDocument(
+    documentFor('<select data-bobby-control="7"><option>Yes</option></select><input type="password" data-bobby-control="8">'),
+  );
+  assert.equal(observed.controls[0]?.name, undefined);
+  assert.equal(observed.controls[0]?.attributes["data-bobby-control"], "7");
+  assert.equal(observed.controls[1]?.attributes["data-bobby-control"], "8");
+});
+
 test("invalid required fields retain the accessibility invalid state for resolution", () => {
   const observed = observeDocument(documentFor('<input aria-label="Full name" required>'));
   assert.equal(observed.controls[0]?.name, "Full name");

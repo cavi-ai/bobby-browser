@@ -152,7 +152,7 @@ export function submitAndVerifyRuntimeCommand(input: SubmitAndVerifyIntent): Run
       input: {
         purpose: input.purpose,
         hints: withHints(input.hints),
-        expectedState: input.expectedState,
+        ...(input.expectedState ? { expectedState: input.expectedState } : {}),
       },
     },
   };

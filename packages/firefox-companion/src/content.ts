@@ -159,6 +159,9 @@ export type PageObservation = {
   controlsTruncated?: boolean;
 };
 
+/** The attribute a form snapshot stamps on each control it reports. */
+const CONTROL_STAMP_ATTRIBUTE = "data-bobby-control";
+
 const CONTROL_SELECTOR = [
   "a[href]",
   "button",
@@ -859,6 +862,9 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     // Match a11yTree and locateTarget, including omitted or invalid HTML types.
     // The normalized native kind is structural metadata, even for redacted controls.
     if (element.tagName === "INPUT") attributes.type = (element as HTMLInputElement).type;
+    // The number a form snapshot stamped on the control identifies an unnamed one.
+    const stamp = element.getAttribute(CONTROL_STAMP_ATTRIBUTE);
+    if (stamp && /^[1-9][0-9]{0,8}$/.test(stamp)) attributes[CONTROL_STAMP_ATTRIBUTE] = stamp;
     if (!sensitive) {
       for (const name of ["name", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
         const value = observationString(element.getAttribute(name));

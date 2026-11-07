@@ -92,7 +92,7 @@ fn compile_submit_without_hints_keeps_purpose_descriptive() {
     let plan = compile_intent(&IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
         purpose: "Create customer".into(),
         hints: IntentHints::default(),
-        expected_state,
+        expected_state: Some(expected_state),
     }))
     .expect("compile");
     let IntentPlan::SubmitAndVerify { target, .. } = plan else {

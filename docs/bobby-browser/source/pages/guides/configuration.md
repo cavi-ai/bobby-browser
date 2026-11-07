@@ -335,7 +335,7 @@ With a detector, the vision window of an intent that clicks also offers up to tw
 
 ### Text tier
 
-`[vision.text_tier]` sends candidate windows to a text-only vision server without a screenshot; every other request keeps the screenshot and the image provider.
+`[vision.text_tier]` sends candidate windows to a text-only vision server without a screenshot; every other request, including every extract, keeps the screenshot and the image provider.
 
 | Key | Default | Meaning |
 |---|---|---|

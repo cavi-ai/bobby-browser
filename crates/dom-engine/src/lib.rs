@@ -37,6 +37,27 @@ pub use shadow_segment::{
     shadow_segment_function,
 };
 
+/// The attribute a form snapshot stamps on each control it reports. An
+/// element keeps its number across snapshots.
+pub const CONTROL_STAMP_ATTRIBUTE: &str = "data-bobby-control";
+
+/// The target a snapshot returns for an unnamed control: its role, an empty
+/// name and the stamp, which alone identifies the element.
+pub fn is_stamped_control_target(target: &types::TargetSpec) -> bool {
+    target
+        .role
+        .as_deref()
+        .is_some_and(|role| !role.trim().is_empty())
+        && target.accessible_name.as_deref() == Some("")
+        && target.attributes.len() == 1
+        && target.attributes.contains_key(CONTROL_STAMP_ATTRIBUTE)
+        && target.css.is_none()
+        && target.test_id.is_none()
+        && target.label.is_none()
+        && target.text.is_none()
+        && !target.allow_best_match
+}
+
 /// The exact structural target a snapshot returns for an unnamed native file input.
 pub fn is_unnamed_file_target(target: &types::TargetSpec) -> bool {
     target.role.as_deref() == Some("button")

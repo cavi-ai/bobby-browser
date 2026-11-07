@@ -152,6 +152,7 @@ fn looks_like_control_id(value: &str) -> bool {
 /// `accessibleName` itself as the possible control id.
 fn hints_locator_empty_besides_name(hints: &types::IntentHints) -> bool {
     hints.role.is_none()
+        && hints.attributes.is_empty()
         && hints.near_text.is_none()
         && hints.ordinal.is_none()
         && hints.frame_path.is_empty()
@@ -222,6 +223,7 @@ fn control_target_from_snapshot(
 fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpec) {
     hints.role = target.role;
     hints.accessible_name = target.accessible_name;
+    hints.attributes = target.attributes;
     hints.ordinal = target.ordinal;
     hints.frame_path = target
         .frame_path
@@ -240,9 +242,10 @@ fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpe
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
 /// Construct with [`Self::new`] and drive I/O through [`Self::serve`] or
 /// [`Self::handle_message`].
-/// Ledger key: (workflow, control identity). The control identity is
-/// `None` for hints-less submits, which the ledger does not guard.
-pub(crate) type BoundaryLedgerKey = (types::WorkflowId, Option<ControlIdentity>);
+/// Ledger key: (workflow, control identity, page url without fragment). The
+/// control identity is `None` for hints-less submits, which the ledger does
+/// not guard; the url is `None` when the page list could not be read.
+pub(crate) type BoundaryLedgerKey = (types::WorkflowId, Option<ControlIdentity>, Option<String>);
 
 pub struct Server {
     runtime: Arc<dyn RuntimeInterface>,
@@ -1168,13 +1171,39 @@ impl Server {
                     if screenshot_artifacts.contains(artifact_id.as_str())
                         && artifact.media_type.starts_with("image/")
                     {
-                        let data = BASE64.encode(&artifact.bytes);
-                        if data.len() <= MAX_RESOURCE_ENCODED_BYTES {
+                        if artifact.bytes.len().div_ceil(3) * 4 <= MAX_RESOURCE_ENCODED_BYTES {
                             content.push(json!({
                                 "type":"image",
-                                "data":data,
+                                "data":BASE64.encode(&artifact.bytes),
                                 "mimeType":artifact.media_type
                             }));
+                        } else if artifact.media_type == "image/png" {
+                            // Too large to inline: a downscaled preview, with
+                            // its scale, and the full image stays the artifact.
+                            let bytes = artifact.bytes;
+                            let preview = tokio::task::spawn_blocking(move || {
+                                crate::screenshot_preview::downscaled(
+                                    &bytes,
+                                    MAX_RESOURCE_ENCODED_BYTES,
+                                )
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            if let Some(preview) = preview {
+                                content.push(json!({
+                                    "type":"image",
+                                    "data":BASE64.encode(&preview.png),
+                                    "mimeType":"image/png"
+                                }));
+                                content.push(json!({
+                                    "type":"text",
+                                    "text":format!(
+                                        "Preview at 1/{} scale ({}x{}); full size: artifact://{artifact_id}",
+                                        preview.factor, preview.width, preview.height
+                                    )
+                                }));
+                            }
                         }
                     }
                 }
@@ -1284,10 +1313,43 @@ impl Server {
     ) {
         let hints: types::IntentHints = serde_json::from_value(hints).unwrap();
         self.record_boundary_execution(
-            &(workflow_id.clone(), control_identity(&hints)),
+            &(workflow_id.clone(), control_identity(&hints), None),
             command_id,
         )
         .await;
+    }
+
+    /// The page's current url without its fragment, read before a guarded
+    /// submit so the same control on another page is a distinct Boundary.
+    /// `None` when the page list cannot be read or does not hold the page.
+    async fn boundary_page_url(
+        &self,
+        context: &types::RequestContext,
+        session_id: &types::SessionId,
+        page_id: &types::PageId,
+    ) -> Option<String> {
+        let context = types::RequestContext {
+            idempotency_key: None,
+            ..context.clone()
+        };
+        let (context, envelope) = primitive_envelope(
+            context,
+            session_id.clone(),
+            None,
+            None,
+            types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+        );
+        let listed = self.submit_envelope_once(context, envelope).await.ok()?;
+        let page_id = serde_json::to_value(page_id).ok()?;
+        listed["evidence"]
+            .as_array()?
+            .iter()
+            .filter(|item| item["kind"] == "pages")
+            .filter_map(|item| item["pages"].as_array())
+            .flatten()
+            .find(|page| page["pageId"] == page_id)
+            .and_then(|page| page["url"].as_str())
+            .map(|url| url.split('#').next().unwrap_or(url).to_owned())
     }
 
     /// One call for a Boundary command: mint the checkpoint, then run it.
@@ -2291,9 +2353,10 @@ fn requested_wait_ms(command: &types::RuntimeCommand) -> Option<u64> {
     use types::{IntentCommand as Intent, PrimitiveCommand as Primitive, RuntimeCommand};
     match command {
         RuntimeCommand::Intent(Intent::WaitForState(intent)) => Some(intent.timeout_ms),
-        RuntimeCommand::Intent(Intent::SubmitAndVerify(intent)) => {
-            Some(intent.expected_state.timeout_ms)
-        }
+        RuntimeCommand::Intent(Intent::SubmitAndVerify(intent)) => intent
+            .expected_state
+            .as_ref()
+            .map(|expected| expected.timeout_ms),
         RuntimeCommand::Intent(Intent::Follow(intent)) => {
             Some(intent.expected_destination.timeout_ms)
         }

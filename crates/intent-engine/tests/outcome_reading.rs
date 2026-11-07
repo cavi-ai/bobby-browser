@@ -134,12 +134,12 @@ fn submit() -> IntentCommand {
             accessible_name: Some("Create account".into()),
             ..IntentHints::default()
         },
-        expected_state: WaitForCommand {
+        expected_state: Some(WaitForCommand {
             condition: WaitCondition::Url {
                 matcher: TextMatch::Contains("/welcome".into()),
             },
             timeout_ms: 5_000,
-        },
+        }),
     })
 }
 

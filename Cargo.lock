@@ -2860,6 +2860,7 @@ dependencies = [
  "network-engine",
  "observability",
  "page-runtime",
+ "png",
  "schemars 1.2.3",
  "sdk-core",
  "serde",

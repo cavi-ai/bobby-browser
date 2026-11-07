@@ -70,7 +70,8 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
         (tag==='img'||(tag==='input'&&element.type==='image')?element.getAttribute('alt'):null)||(tag==='iframe'?element.getAttribute('title'):null)||
         (tag==='input'&&['button','submit','reset'].includes(element.type)?element.value:null)||
         (tag==='input'||tag==='textarea'?element.getAttribute('placeholder'):null)||
-        String(element.innerText||'').trim()||contentName(element)||element.getAttribute('title')||null;
+        // A select is never named by its options.
+        (tag==='select'?'':String(element.innerText||'').trim()||contentName(element))||element.getAttribute('title')||null;
       const isSensitive=publicMetadata&&sensitive(element);
       const expose=value=>bounded(isSensitive?(publicLabels.has(value)?value:'[redacted]'):safeLabel(value||''));
       const name=publicMetadata?expose(rawName):rawName;

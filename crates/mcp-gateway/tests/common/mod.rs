@@ -233,10 +233,24 @@ impl worker_pool::TabsEngine for LiveWorker {
     }
 
     async fn list_pages(&self, _: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        let page_id = self
+            .probe
+            .opened_page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        let url = self
+            .probe
+            .current_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "https://live-harness.test/".into());
         Ok(vec![Evidence::Pages {
             pages: vec![PageEvidence {
-                page_id: PageId::new(),
-                url: "https://live-harness.test/".into(),
+                page_id,
+                url,
                 title: "live-harness".into(),
             }],
         }])

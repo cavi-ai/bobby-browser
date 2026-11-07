@@ -2883,7 +2883,13 @@ impl crate::InputEngine for ChromiumWorker {
                 resolved.set_checked(&page, *checked).await?;
             }
             ControlAction::SelectOne { value } => {
-                committed = Some(vec![resolved.select_option(&page, value).await?]);
+                committed = Some(vec![if before_control.control_kind
+                    == types::FormControlKind::Combobox
+                {
+                    resolved.select_combobox_option(&page, value).await?
+                } else {
+                    resolved.select_option(&page, value).await?
+                }]);
             }
             ControlAction::SelectMany { values } => {
                 committed = Some(resolved.select_options(&page, values).await?);
@@ -3763,9 +3769,13 @@ fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
     })
 }
 
+/// CDP reports a node removed from the page, or left in a replaced document, as gone.
 fn is_missing_css_node(error: &CommandError) -> bool {
     error.code == ErrorCode::BrowserCommandFailed
-        && error.message.contains("Could not find node with given id")
+        && (error.message.contains("Could not find node with given id")
+            || error
+                .message
+                .contains("Node with given id does not belong to the document"))
 }
 
 fn element_wait_missing_observation(
@@ -5386,6 +5396,25 @@ mod tests {
         );
         assert_eq!(
             element_wait_missing_observation(&types::ElementState::Hidden, &error),
+            Some(true)
+        );
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn detached_element_wait_accepts_a_node_gone_from_a_replaced_document() {
+        let error = types::CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Error -32000: Node with given id does not belong to the document".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Detached, &error),
             Some(true)
         );
         assert_eq!(

@@ -192,11 +192,21 @@ impl Server {
                 // started the fix-and-resubmit flow does NOT record, so the
                 // legitimate rejected-then-corrected flow stays open.
                 // `reSubmit` is the explicit escape hatch.
-                let boundary_key = input
+                // The page url joins the key: the same control on another
+                // page (the next form in a run) is a distinct Boundary.
+                let boundary_key = match input
                     .workflow_id
                     .clone()
                     .zip(control_identity(&input.hints.clone().unwrap_or_default()))
-                    .map(|(workflow_id, control)| (workflow_id, Some(control)));
+                {
+                    Some((workflow_id, control)) => {
+                        let page_url = self
+                            .boundary_page_url(&context, &input.session_id, &input.page_id)
+                            .await;
+                        Some((workflow_id, Some(control), page_url))
+                    }
+                    None => None,
+                };
                 if let Some(key) = &boundary_key {
                     if !input.re_submit.unwrap_or(false) {
                         if let Some(prior) = self.prior_boundary_execution(key).await {
@@ -249,7 +259,8 @@ impl Server {
                 //   double-apply.
                 // Everything else (resolution failures, actFailed,
                 // retryableFailure, policyDenied) means nothing landed, so
-                // the fix-and-resubmit flow stays open.
+                // the fix-and-resubmit flow stays open. So does a submit the
+                // page rejected with invalid fields.
                 if let Some(boundary_key) = &boundary_key {
                     let landed = match &result {
                         Ok(value) => {
@@ -258,12 +269,24 @@ impl Server {
                                 .get("error")
                                 .and_then(|error| error.get("code"))
                                 .and_then(Value::as_str);
-                            matches!(status, Some("completed") | Some("needsReconciliation"))
-                                || (matches!(status, Some("failed"))
+                            let rejected = value
+                                .get("evidence")
+                                .and_then(Value::as_array)
+                                .is_some_and(|evidence| {
+                                    evidence.iter().any(|item| {
+                                        item["kind"] == "submitSettlement"
+                                            && item["outcome"] == "validationRejected"
+                                    })
+                                });
+                            !rejected
+                                && (matches!(
+                                    status,
+                                    Some("completed") | Some("needsReconciliation")
+                                ) || (matches!(status, Some("failed"))
                                     && matches!(
                                         code,
                                         Some("verificationFailed" | "verificationCodeRequired")
-                                    ))
+                                    )))
                         }
                         Err(_) => false,
                     };

@@ -161,6 +161,28 @@ async fn a_named_window_goes_to_the_text_tier_and_the_rest_to_the_image_tier() {
     assert_eq!(text.extract_calls.load(Ordering::SeqCst), 0);
 }
 
+/// An extract reads its value off the screen, so it goes to the image tier
+/// even with a candidate window.
+#[tokio::test]
+async fn an_extract_goes_to_the_image_tier_despite_a_window() {
+    let image = answering(VisionAction::ExtractValue {
+        value: "Other".into(),
+    });
+    let text = answering(VisionAction::ExtractFromCandidate { index: 0 });
+    let mut app = tiered_app(image.clone(), Some(text.clone()));
+
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"purpose":"selected referral source","intentKind":"extract","stuck":"targetMissing","screenshotPng":"abc","context":{"candidates":[{"role":"button","name":"Apply"}]}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Other"), "{body}");
+    assert_eq!(image.propose_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(text.propose_calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn without_a_text_tier_a_window_needs_a_screenshot() {
     let image = answering(VisionAction::ClickCandidate { index: 0 });

@@ -5633,6 +5633,391 @@ pub async fn a_split_code_takes_one_character_per_box(rig: &Rig) {
     live.close().await;
 }
 
+/// `selectOne` on ARIA comboboxes picks the option whose text is the value:
+/// a text combobox whose filtered options mount on input (the first match is
+/// a different option) and a button-like combobox that opens on click.
+pub async fn select_one_picks_the_exact_option_of_an_aria_combobox(rig: &Rig) {
+    let body = r#"<label id="lang-label">Language</label>
+        <input id="lang" role="combobox" aria-labelledby="lang-label" aria-autocomplete="list" autocomplete="off">
+        <div id="source-label">Referral source</div>
+        <div id="source" role="combobox" tabindex="0" aria-labelledby="source-label">Choose one</div>
+        <p id="picked"></p>
+        <div id="portal"></div>
+        <script>
+          const input = document.getElementById("lang");
+          const source = document.getElementById("source");
+          const portal = document.getElementById("portal");
+          const languages = ["Mother tongue", "Other", "Another language"];
+          const show = () => {
+            document.getElementById("picked").textContent =
+              `Language: ${input.value}; Referral source: ${source.textContent}`;
+          };
+          const render = (items, event, pick) => {
+            portal.innerHTML = "";
+            const list = document.createElement("ul");
+            list.setAttribute("role", "listbox");
+            for (const item of items) {
+              const option = document.createElement("li");
+              option.setAttribute("role", "option");
+              option.textContent = item;
+              option.addEventListener(event, (press) => {
+                press.preventDefault();
+                pick(item);
+                portal.innerHTML = "";
+                show();
+              });
+              list.append(option);
+            }
+            portal.append(list);
+          };
+          input.addEventListener("input", () => {
+            const query = input.value.toLowerCase();
+            const matches = languages.filter((item) => item.toLowerCase().includes(query));
+            render(matches, "mousedown", (item) => { input.value = item; });
+          });
+          input.addEventListener("keydown", (event) => {
+            const first = portal.querySelector('[role="option"]');
+            if (event.key === "Enter" && first) { input.value = first.textContent; portal.innerHTML = ""; show(); }
+          });
+          input.addEventListener("blur", () => { if (!languages.includes(input.value)) input.value = ""; });
+          source.addEventListener("click", () =>
+            render(["Search engine", "Other", "Friend"], "click", (item) => { source.textContent = item; }));
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/combo", Route::Html(page("Combo", body)))]).await;
+    let live = Live::open(rig, &site.url("/combo")).await;
+    for name in ["Language", "Referral source"] {
+        let picked = live
+            .call(
+                "intent_fill",
+                json!({"purpose":format!("choose the {name}"),
+                       "hints":{"role":"combobox","accessibleName":name},
+                       "value":{"kind":"selectOne","value":"Other"}}),
+            )
+            .await;
+        assert_eq!(picked["status"], "completed", "{name}: {picked}");
+    }
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string()
+            .contains("Language: Other; Referral source: Other"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+fn controls_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("controlKind").and_then(Value::as_str) == Some(kind) {
+                out.push(value);
+            }
+            map.values()
+                .for_each(|child| controls_of_kind(child, kind, out));
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|child| controls_of_kind(child, kind, out)),
+        _ => {}
+    }
+}
+
+/// Unnamed selects are addressed by their form snapshot control id and
+/// target, both of which stay on the same select after the form inserts
+/// another one before it; a role and ordinal alone address one by position.
+pub async fn control_ids_stay_on_unnamed_controls_when_the_form_grows(rig: &Rig) {
+    let body = r#"<form><div id="rows">
+        <p>How did you hear about us?</p>
+        <select id="hear"><option value="">Choose</option><option>Search</option>
+        <option>AI tool - Other</option><option>Other</option></select>
+        <p>Are you authorized to work here?</p>
+        <select id="auth"><option value="">Choose</option><option>Yes</option><option>No</option></select>
+        <p>Do you need sponsorship?</p>
+        <select id="visa"><option value="">Choose</option><option>Yes</option><option>No</option></select>
+        </div><button type="button" id="add">Add location</button></form>
+        <p id="picked"></p>
+        <script>
+          const show = () => { document.getElementById("picked").textContent = "Picked: " +
+            [...document.querySelectorAll("select")].map((s) => s.id + "=" + s.value).join(", "); };
+          document.addEventListener("change", show);
+          document.getElementById("add").addEventListener("click", () => {
+            const location = document.createElement("select");
+            location.id = "location";
+            location.innerHTML = '<option value="">Choose</option><option>Other</option><option>Yes</option>';
+            document.getElementById("rows").prepend(location);
+            show();
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/form", Route::Html(page("Form", body))),
+        ("/fresh", Route::Html(page("Form", body))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/form")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut selects = Vec::new();
+    controls_of_kind(&snapshot, "selectOne", &mut selects);
+    let [hear, auth, _] = selects.as_slice() else {
+        panic!("three selects in the form snapshot: {snapshot}");
+    };
+    let (hear_id, auth_target) = (hear["id"].clone(), auth["target"].clone());
+    assert!(
+        auth_target.is_object(),
+        "an unnamed select has a target: {auth}"
+    );
+
+    let added = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Add location"}}),
+        )
+        .await;
+    assert_eq!(added["status"], "completed", "{added}");
+    let by_id = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"How did you hear about us?","hints":{"accessibleName":hear_id},
+                   "value":{"kind":"selectOne","value":"Other"}}),
+        )
+        .await;
+    assert_eq!(by_id["status"], "completed", "by control id: {by_id}");
+    let by_target = live
+        .call(
+            "control_action",
+            json!({"target":auth_target,"action":{"kind":"selectOne","value":"Yes"}}),
+        )
+        .await;
+    assert_eq!(
+        by_target["status"], "completed",
+        "by snapshot target: {by_target}"
+    );
+    let by_ordinal = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Do you need sponsorship?","hints":{"role":"combobox","ordinal":3},
+                   "value":{"kind":"selectOne","value":"No"}}),
+        )
+        .await;
+    assert_eq!(
+        by_ordinal["status"], "completed",
+        "by role and ordinal: {by_ordinal}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string()
+            .contains("Picked: location=, hear=Other, auth=Yes, visa=No"),
+        "{page}"
+    );
+
+    // No snapshot has stamped this page's selects.
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/fresh")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "{navigated}");
+    let first = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Are you authorized to work here?","hints":{"role":"combobox","ordinal":1},
+                   "value":{"kind":"selectOne","value":"Yes"}}),
+        )
+        .await;
+    assert_eq!(
+        first["status"], "completed",
+        "first call on a fresh page: {first}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string().contains("Picked: hear=, auth=Yes, visa="),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// A submit with no expected state is verified by the page: a required field
+/// left empty fails naming it with nothing sent, the corrected submit passes
+/// on the URL change, an in-place step passes on its new fields, a code step
+/// asks for the code, and a page that does not change fails.
+pub async fn a_submit_without_expected_state_is_verified_by_the_page(rig: &Rig) {
+    let apply = page(
+        "Apply",
+        r#"<form method="post" action="/applied"><label>Email <input id="email" type="email" required></label>
+        <button type="submit">Send application</button></form>"#,
+    );
+    let steps = page(
+        "Steps",
+        r#"<main><h1>Step 1</h1><label id="field">Full name <input id="name"></label>
+        <button type="button" id="next">Continue</button></main>
+        <script>
+          document.getElementById("next").addEventListener("click", () => {
+            document.querySelector("h1").textContent = "Step 2";
+            document.getElementById("field").innerHTML = 'Phone <input id="phone">';
+          });
+        </script>"#,
+    );
+    let code_step = r#"<h1>Check your email</h1><p>We sent a code to a***@example.com</p>
+        <form id="verify"><label for="code">Verification code</label>
+        <input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+        <button type="submit">Verify</button></form><p id="note"></p>"#;
+    let still = page(
+        "Still",
+        r#"<main><label>Note <input id="note"></label><button type="button">Save note</button></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/apply", Route::Html(apply)),
+        (
+            "/applied",
+            Route::Html(page(
+                "Applied",
+                "<main><h1>Application received</h1></main>",
+            )),
+        ),
+        ("/steps", Route::Html(steps)),
+        ("/signin", Route::Html(code_step_page(code_step, ""))),
+        ("/still", Route::Html(still)),
+    ])
+    .await;
+    let submit = |name: &str| {
+        json!({"purpose":format!("press {name}"),
+               "hints":{"role":"button","accessibleName":name}})
+    };
+    let live = Live::open(rig, &site.url("/apply")).await;
+
+    let rejected = live
+        .call("intent_submit_and_verify", submit("Send application"))
+        .await;
+    assert_eq!(rejected["status"], "failed", "{rejected}");
+    assert_eq!(
+        rejected["error"]["code"], "verificationFailed",
+        "{rejected}"
+    );
+    let message = rejected["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("\"Email\""), "{rejected}");
+    assert!(
+        rejected.to_string().contains("validationRejected"),
+        "{rejected}"
+    );
+    assert_eq!(site.hits("/applied"), 0);
+
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"enter the email","hints":{"role":"textbox","accessibleName":"Email"},
+                   "value":{"kind":"setText","value":"ada@example.com"}}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    let sent = live
+        .call("intent_submit_and_verify", submit("Send application"))
+        .await;
+    assert_eq!(sent["status"], "completed", "{sent}");
+    let waited = |result: &Value, holds: &dyn Fn(&Value) -> bool| {
+        result["evidence"].as_array().is_some_and(|evidence| {
+            evidence
+                .iter()
+                .any(|item| item["kind"] == "wait" && holds(item))
+        })
+    };
+    assert!(
+        waited(&sent, &|item| item["observed"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/applied"))),
+        "{sent}"
+    );
+    assert_eq!(site.hits("/applied"), 1);
+
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/steps")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "{navigated}");
+    let stepped = live
+        .call("intent_submit_and_verify", submit("Continue"))
+        .await;
+    assert_eq!(stepped["status"], "completed", "{stepped}");
+    assert!(
+        waited(&stepped, &|item| item["condition"]["target"]
+            ["accessibleName"]
+            == "Phone"),
+        "{stepped}"
+    );
+
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/signin")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "{navigated}");
+    let signed = live
+        .call("intent_submit_and_verify", submit("Continue"))
+        .await;
+    assert_code_required(&signed);
+
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/still")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "{navigated}");
+    let unchanged = live
+        .call("intent_submit_and_verify", submit("Save note"))
+        .await;
+    assert_eq!(unchanged["status"], "failed", "{unchanged}");
+    assert_eq!(
+        unchanged["error"]["code"], "verificationFailed",
+        "{unchanged}"
+    );
+    assert!(
+        unchanged["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("did not change")),
+        "{unchanged}"
+    );
+    live.close().await;
+}
+
+/// Eight boxes where only the first has a name: the code is typed from the
+/// first box while the page moves focus on input, and every box is read back.
+pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {
+    const CODE: &str = "48291337";
+    let mut boxes = String::from(
+        r#"<input class="digit" aria-label="Security code" inputmode="numeric" maxlength="1">"#,
+    );
+    for _ in 2..=8 {
+        boxes.push_str(r#"<input class="digit" inputmode="numeric" maxlength="1">"#);
+    }
+    let step = format!(
+        r#"<h1>Enter the code</h1><p>We sent a code to your phone ending in 42</p>
+        <div id="boxes">{boxes}</div><p id="note"></p>"#
+    );
+    let verify = format!(
+        r#"app.addEventListener("input", (event) => {{
+          const digits = [...document.querySelectorAll(".digit")];
+          const at = digits.indexOf(event.target);
+          if (at >= 0 && event.target.value && digits[at + 1]) digits[at + 1].focus();
+        }});
+        app.addEventListener("keydown", (event) => {{
+          if (event.key !== "Enter" || !event.target.classList.contains("digit")) return;
+          const typed = [...document.querySelectorAll(".digit")].map((box) => box.value).join("");
+          typed === "{CODE}" ? accept() : reject();
+        }});"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(&step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let submitted = submit_sign_in(&live).await;
+    assert_code_required(&submitted);
+    assert_eq!(code_entry(&submitted)["codeLength"], 8, "{submitted}");
+
+    let entered = live
+        .call("intent_enter_code", json!({"code":"4829-1337"}))
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    assert!(
+        !entered.to_string().contains(CODE),
+        "code echoed: {entered}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page.to_string().contains("Welcome back"), "{page}");
+    live.close().await;
+}
+
 /// A wrong code fails verification and the page keeps its code step; the
 /// right code then gets through. The code never appears in either result.
 pub async fn a_wrong_code_fails_without_echoing_it(rig: &Rig) {

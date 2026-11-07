@@ -39,7 +39,7 @@ export const COMMAND_CONTRACT = {
     "follow": { fields: ["boundary","expectedDestination","hints","purpose"], required: ["expectedDestination","purpose"] },
     "locate": { fields: ["hints","purpose"], required: ["purpose"] },
     "solveChallenge": { fields: ["hints","purpose"], required: ["purpose"] },
-    "submitAndVerify": { fields: ["expectedState","hints","purpose"], required: ["expectedState","purpose"] },
+    "submitAndVerify": { fields: ["expectedState","hints","purpose"], required: ["purpose"] },
     "waitForState": { fields: ["condition","timeoutMs"], required: ["condition","timeoutMs"] },
   },
 } as const;

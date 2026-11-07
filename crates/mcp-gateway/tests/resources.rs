@@ -41,6 +41,7 @@ struct ScreenshotWorker {
     artifacts: ArtifactStore,
     download_path: PathBuf,
     screenshot_count: usize,
+    png: Arc<Vec<u8>>,
 }
 
 #[async_trait]
@@ -171,7 +172,7 @@ impl worker_pool::CaptureEngine for ScreenshotWorker {
         for _ in 0..self.screenshot_count {
             let record = self
                 .artifacts
-                .put_png(&self.session_id, page_id, ONE_PIXEL_PNG)
+                .put_png(&self.session_id, page_id, &self.png)
                 .await
                 .map_err(|_| fixture_error("fixture artifact write failed"))?;
             evidence.push(Evidence::Screenshot {
@@ -192,6 +193,7 @@ struct ScreenshotFactory {
     artifacts: ArtifactStore,
     downloads: PathBuf,
     screenshot_count: usize,
+    png: Arc<Vec<u8>>,
 }
 
 #[async_trait]
@@ -212,6 +214,7 @@ impl WorkerFactory for ScreenshotFactory {
             artifacts: self.artifacts.clone(),
             download_path,
             screenshot_count: self.screenshot_count,
+            png: Arc::clone(&self.png),
         }))
     }
 }
@@ -224,8 +227,24 @@ async fn fixture_with(
     screenshot_count: usize,
     catalog_entries: usize,
 ) -> (Server, tempfile::TempDir) {
+    fixture_capturing(
+        screenshot_count,
+        catalog_entries,
+        ONE_PIXEL_PNG.to_vec(),
+        4096,
+    )
+    .await
+}
+
+/// `max_bytes` bounds one artifact; the store, reader and imports share it.
+async fn fixture_capturing(
+    screenshot_count: usize,
+    catalog_entries: usize,
+    png: Vec<u8>,
+    max_bytes: usize,
+) -> (Server, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
-    let artifacts = ArtifactStore::new(root.path().join("artifacts"), 4096, 4096);
+    let artifacts = ArtifactStore::new(root.path().join("artifacts"), max_bytes, 4096);
     let journal = Arc::new(
         JsonlJournal::open(root.path().join("journal.jsonl"))
             .await
@@ -238,6 +257,7 @@ async fn fixture_with(
             artifacts: artifacts.clone(),
             downloads: root.path().join("downloads"),
             screenshot_count,
+            png: Arc::new(png),
         }),
     ));
     let runtime = RuntimeService::new(
@@ -266,10 +286,10 @@ async fn fixture_with(
     let reader = ArtifactReader::new(
         artifacts.clone(),
         ownership,
-        4096,
+        max_bytes,
         ArtifactOwnershipLimits {
             max_records: 8,
-            max_bytes: 32 * 1024,
+            max_bytes: (32 * 1024).max(max_bytes as u64),
         },
     )
     .unwrap();
@@ -559,6 +579,61 @@ async fn screenshot_result_includes_the_verified_image() {
         .decode(image["data"].as_str().unwrap())
         .unwrap();
     assert_eq!(bytes, ONE_PIXEL_PNG);
+}
+
+/// A screenshot too large to inline still returns an image: a downscaled
+/// preview under the inline limit whose scale the result names, beside the
+/// link to the full-size artifact.
+#[tokio::test]
+async fn an_oversized_screenshot_inlines_a_downscaled_preview() {
+    let (width, height) = (1000u32, 3000u32);
+    let mut state = 0x2545_f491_u32;
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let mut full = Vec::new();
+    let mut encoder = png::Encoder::new(&mut full, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    let inline_limit = 768 * 1024;
+    assert!(full.len() * 4 / 3 > inline_limit);
+
+    let (server, _root) = fixture_capturing(1, 8, full, 16 * 1024 * 1024).await;
+    let captured = execute_screenshot(&server).await;
+    let content = captured["result"]["content"].as_array().unwrap();
+    let image = content
+        .iter()
+        .find(|item| item["type"] == "image")
+        .unwrap_or_else(|| panic!("oversized screenshot had no inline image: {captured}"));
+    assert_eq!(image["mimeType"], "image/png");
+    let data = image["data"].as_str().unwrap();
+    assert!(data.len() <= inline_limit, "{}", data.len());
+    let preview = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    let reader = png::Decoder::new(std::io::Cursor::new(preview))
+        .read_info()
+        .unwrap();
+    let (preview_width, preview_height) = (reader.info().width, reader.info().height);
+    let factor = width / preview_width;
+    assert!(factor >= 2, "{preview_width}x{preview_height}");
+    assert_eq!(preview_height, height / factor);
+    let scale = format!("1/{factor} scale ({preview_width}x{preview_height})");
+    assert!(
+        content
+            .iter()
+            .any(|item| item["type"] == "text" && item["text"].as_str().unwrap().contains(&scale)),
+        "the result must name the preview scale {scale}: {captured}"
+    );
+    assert!(content.iter().any(|item| item["type"] == "resource_link"));
 }
 
 #[tokio::test]

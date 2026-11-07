@@ -170,6 +170,162 @@ async fn landed_submit_verification_failure_returns_state_without_replaying_the_
     }
 }
 
+/// The same submit control on another page of one workflow is a new
+/// Boundary; back on the first page (fragment ignored) it is refused.
+#[tokio::test]
+async fn a_landed_submit_guards_its_page_only() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        1,
+        "workflow_start",
+        json!({"profile":"recovery"}),
+    )
+    .await;
+    let handle = started["result"]["structuredContent"]["workflowHandle"].clone();
+    live.probe
+        .candidates
+        .lock()
+        .expect("candidates")
+        .push(clickable_candidate());
+    let submit = json!({
+        "workflowHandle":handle,
+        "purpose":"Submit application",
+        "hints":{"role":"button","accessibleName":"Continue"},
+        "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/done"}},"timeoutMs":100}
+    });
+    let mut id = 10;
+    let mut submit_on = |url: &'static str| {
+        id += 2;
+        let live = &live;
+        let handle = handle.clone();
+        let submit = submit.clone();
+        let navigate_id = id;
+        async move {
+            let navigated = call_tool(
+                &live.server,
+                navigate_id,
+                "navigate",
+                json!({"workflowHandle":handle,"url":url}),
+            )
+            .await;
+            assert_eq!(
+                navigated["result"]["structuredContent"]["status"], "completed",
+                "{navigated}"
+            );
+            call_tool(
+                &live.server,
+                navigate_id + 1,
+                "intent_submit_and_verify",
+                submit,
+            )
+            .await
+        }
+    };
+
+    let first = submit_on("https://live-harness.test/jobs/a#apply").await;
+    assert_eq!(
+        first["result"]["structuredContent"]["error"]["code"], "verificationFailed",
+        "{first}"
+    );
+    let other_page = submit_on("https://live-harness.test/jobs/b").await;
+    assert_ne!(
+        other_page["result"]["structuredContent"]["error"]["code"], "boundaryAlreadyExecuted",
+        "{other_page}"
+    );
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 2);
+    let same_page = submit_on("https://live-harness.test/jobs/a").await;
+    assert_eq!(
+        same_page["result"]["structuredContent"]["error"]["code"], "boundaryAlreadyExecuted",
+        "{same_page}"
+    );
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 2);
+}
+
+/// A submit the page rejected with invalid fields landed nothing, so the
+/// corrected submit in the same workflow is not refused.
+#[tokio::test]
+async fn a_rejected_submit_leaves_the_boundary_open() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        1,
+        "workflow_start",
+        json!({"profile":"recovery"}),
+    )
+    .await;
+    let handle = started["result"]["structuredContent"]["workflowHandle"].clone();
+    live.probe
+        .candidates
+        .lock()
+        .expect("candidates")
+        .push(clickable_candidate());
+    live.probe.satisfy_wait.store(true, Ordering::SeqCst);
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .expect("controls")
+        .push(invalid_email());
+    let submit = json!({
+        "workflowHandle":handle,
+        "purpose":"Submit application",
+        "hints":{"role":"button","accessibleName":"Continue"},
+        "expectedState":{"condition":{"kind":"networkQuiet","idleMs":10,"maxInFlight":0},"timeoutMs":1000}
+    });
+    let rejected = call_tool(&live.server, 2, "intent_submit_and_verify", submit.clone()).await;
+    assert!(
+        rejected.to_string().contains("validationRejected"),
+        "{rejected}"
+    );
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .expect("controls")
+        .clear();
+    let corrected = call_tool(&live.server, 3, "intent_submit_and_verify", submit).await;
+    assert_eq!(
+        corrected["result"]["structuredContent"]["status"], "completed",
+        "{corrected}"
+    );
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 2);
+}
+
+fn invalid_email() -> types::FormControl {
+    types::FormControl {
+        id: "control-0".into(),
+        form_id: None,
+        group_id: None,
+        target: Some(types::FormControlTarget {
+            attributes: Default::default(),
+            role: "textbox".into(),
+            accessible_name: "Email".into(),
+            ordinal: None,
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        }),
+        control_kind: types::FormControlKind::Email,
+        accessible_name: Some("Email".into()),
+        label: None,
+        description: None,
+        placeholder: None,
+        autocomplete: None,
+        state: types::FormControlState::Empty,
+        constraints: types::FormControlConstraints::default(),
+        validity: types::FormControlValidity {
+            will_validate: true,
+            valid: false,
+            flags: vec![types::FormValidityFlag::ValueMissing],
+            message: Some("Fill out this field.".into()),
+            described_by: Vec::new(),
+        },
+        options: Vec::new(),
+        supported_operations: vec![
+            types::FormControlOperation::SetText,
+            types::FormControlOperation::Clear,
+        ],
+    }
+}
+
 #[tokio::test]
 async fn popup_returns_state_from_the_rebound_handle_and_keeps_id_conflicts_rejected() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;

@@ -68,7 +68,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `intent_follow` | `browser:mutate`, `intent:execute` | Activate a control and verify the resulting state |
 | `intent_locate` | `browser:mutate`, `intent:execute` | Find an element without acting |
 | `intent_solve_challenge` | `browser:mutate`, `intent:execute`, `vision:assist` | Run the vision solve loop on a challenge |
-| `intent_submit_and_verify` | `browser:mutate`, `intent:execute` | Submit once and verify the expected state |
+| `intent_submit_and_verify` | `browser:mutate`, `intent:execute` | Submit once and verify the expected state, or the page change without one |
 | `intent_wait_for_state` | `browser:mutate`, `intent:execute` | Wait for a described page state |
 | `job_cancel` | `job:cancel` | Cancel an owned job |
 | `job_status` | `job:read` | Read an owned job |

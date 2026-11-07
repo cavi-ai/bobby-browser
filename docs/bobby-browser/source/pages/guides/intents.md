@@ -49,7 +49,7 @@ await client.submit(
 | `locate` | `intent_locate` | Replayable | Finds a control and returns its fingerprint |
 | `fill` | `intent_fill` | Reconciliable | Sets one control and verifies the value |
 | `completeForm` | `intent_complete_form` | Reconciliable | Fills an ordered list of fields. Never submits |
-| `submitAndVerify` | `intent_submit_and_verify` | Boundary | Submits once and verifies `expectedState` |
+| `submitAndVerify` | `intent_submit_and_verify` | Boundary | Submits once and verifies `expectedState`, or the page change without one |
 | `follow` | `intent_follow` | Reconciliable, Boundary with `boundary: true` | Activates a control and verifies the result |
 | `waitForState` | `intent_wait_for_state` | Replayable | Waits for a page condition |
 | `dismissObstruction` | `intent_dismiss_obstruction` | Reconciliable | Closes a popup, overlay or cookie banner |
@@ -82,9 +82,10 @@ to retry its wait.
 | Field | Meaning |
 |---|---|
 | `role` | Accessible role |
-| `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot` |
+| `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot`, including an unnamed control's |
+| `attributes` | Attribute values the control carries, as a `form_snapshot` target gives them |
 | `nearText` | `{kind: "exact" \| "contains" \| "regex", value}` matched against the control's own text, in place of `accessibleName` |
-| `ordinal` | Zero-based index among peers with the same role and name |
+| `ordinal` | Zero-based index among peers with the same role and name; with a `role` and no name hint, among controls with that role |
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |
 
@@ -139,16 +140,22 @@ A fill succeeds only with postcondition evidence. It also reads the browser's co
 }}
 ```
 
-`expectedState` is required. Use a `text` or `url` condition when you know the success state, or `networkQuiet` when you do not. With `networkQuiet` the result has `submitSettlement`:
+`expectedState` is optional. Without it, bobby verifies the submit from the page for up to 10 seconds:
+
+- The URL changes (the fragment aside), the submit control leaves the page, or the form shows other fields: the submit completes with `wait` evidence for what changed.
+- The page stays and marks fields invalid: the submit fails `verificationFailed` naming the fields, with `submitSettlement` `validationRejected` and `formValidation` evidence.
+- Nothing changes: the submit fails `verificationFailed`. A page that confirms in place needs an `expectedState`.
+
+Use a `text` or `url` condition when you know the success state, or `networkQuiet` to wait for the page to settle. With `networkQuiet` the result has `submitSettlement`:
 
 - `settled`: the page went quiet with no invalid controls.
 - `validationRejected`: fix the fields listed in `formValidation` (control, kind, name, target, validity, never values) and do not resubmit blindly.
 
-A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`.
+A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`. A submit rejected with `validationRejected` does not count, so the corrected submit needs no `reSubmit`.
 
 ## One-time codes
 
-When a submit does not reach `expectedState` and the page now asks for a one-time code, the result is `verificationCodeRequired` (not retryable) instead of `verificationFailed`. A code step is a field with `autocomplete="one-time-code"`, a run of 4 to 8 adjacent one-character inputs, or a field whose label or placeholder names a verification, one-time or passcode code, with page text that says a code was sent. The `codeEntry` evidence lists the field targets (`role`, `accessibleName`, `ordinal`), the code length when the page states it, and `destinationHint`, the page's own line about where the code went (page-derived text).
+When a submit lands on a page that asks for a one-time code instead of reaching `expectedState`, the result is `verificationCodeRequired` (not retryable) instead of `verificationFailed`. A code step is a field with `autocomplete="one-time-code"`, a run of 4 to 8 adjacent one-character inputs, or a field whose label or placeholder names a verification, one-time or passcode code, with page text that says a code was sent. The `codeEntry` evidence lists the field targets (`role`, `accessibleName`, `ordinal`), the code length when the page states it, and `destinationHint`, the page's own line about where the code went (page-derived text).
 
 Read the code from your own mail or SMS tool (bobby never reads either), then call `intent_enter_code` with `code`. Spaces and dashes are removed. It fills the field, or one character per box, reads the values back, then presses the step's submit control (or Enter) unless `submit` is `false`, and verifies `expectedState` or that the page left the code step. `hints` names the field when the page shows several. A wrong or expired code fails `verificationFailed`; the code is never echoed in evidence, errors or the journal.
 

@@ -1364,12 +1364,12 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
             accessible_name: Some("Submit".into()),
             ..IntentHints::default()
         },
-        expected_state: WaitForCommand {
+        expected_state: Some(WaitForCommand {
             condition: WaitCondition::Url {
                 matcher: TextMatch::Contains("/thanks".into()),
             },
             timeout_ms: 5_000,
-        },
+        }),
     });
     assert_eq!(submit.class(), CommandClass::Boundary);
     let request = intent_envelope(session.clone(), page.id.clone(), submit);
@@ -1728,7 +1728,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
             accessible_name: Some("Save".into()),
             ..IntentHints::default()
         },
-        expected_state: WaitForCommand {
+        expected_state: Some(WaitForCommand {
             condition: WaitCondition::Text {
                 target: Box::new(TargetSpec {
                     role: Some("main".into()),
@@ -1737,7 +1737,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
                 matcher: TextMatch::Contains("Priority saved".into()),
             },
             timeout_ms: 1_000,
-        },
+        }),
     });
     let request = intent_envelope(session.clone(), page.id.clone(), submit);
     store
@@ -1807,7 +1807,7 @@ async fn expected_state_pre_satisfied_is_failed_not_needs_reconciliation() {
             accessible_name: Some("Save".into()),
             ..IntentHints::default()
         },
-        expected_state: WaitForCommand {
+        expected_state: Some(WaitForCommand {
             condition: WaitCondition::Text {
                 target: Box::new(TargetSpec {
                     role: Some("main".into()),
@@ -1816,7 +1816,7 @@ async fn expected_state_pre_satisfied_is_failed_not_needs_reconciliation() {
                 matcher: TextMatch::Contains("preview".into()),
             },
             timeout_ms: 1_000,
-        },
+        }),
     });
     let request = intent_envelope(session.clone(), page.id.clone(), submit);
     store
