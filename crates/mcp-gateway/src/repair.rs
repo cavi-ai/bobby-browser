@@ -329,6 +329,18 @@ pub(crate) fn repair_for_protocol_reason(reason: &str) -> Option<Value> {
         "exactlyOneOfWorkflowIdOrSessionId" => {
             "Pass exactly one of workflowId or sessionId, not both and not neither."
         }
+        "workflowNotFound" => {
+            "Read bobby://workflows for the workflow names; a workflow file is <name>.json in a workflow directory."
+        }
+        "workflowInvalid" => {
+            "Fix the workflow file at error.data.workflowError.pointer; `bobby workflow validate` checks it."
+        }
+        "workflowInputs" => {
+            "Pass the inputs bobby://workflows lists for the workflow: each required one, of its type, and no others."
+        }
+        "workflowRun" => {
+            "Rerun with the runId of an earlier run of this workflow in this connection and from naming a step it reached, or leave both out to run from the start."
+        }
         _ => return None,
     };
     Some(repair(action))

@@ -368,6 +368,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: AuditCommands,
     },
+    /// Check workflow files for workflow_run or print their schema
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
     /// Vision provider setup and loopback proxy
     Vision {
         #[command(subcommand)]
@@ -643,6 +648,19 @@ enum AuditCommands {
         #[arg(long)]
         key: Option<PathBuf>,
     },
+}
+
+#[derive(clap::Subcommand)]
+enum WorkflowCommands {
+    /// Check workflow files; with none given, every file in the workflow directories
+    Validate {
+        files: Vec<PathBuf>,
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Print the JSON Schema of a workflow file
+    Schema,
 }
 
 #[derive(clap::Subcommand)]
@@ -1012,6 +1030,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command, config } => run_context(command, config).await?,
         CliCommand::Audit { command } => run_audit(command)?,
+        CliCommand::Workflow { command } => run_workflow(command)?,
         CliCommand::Vision { command } => vision_commands::run(command).await?,
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
@@ -1653,6 +1672,52 @@ impl Drop for ManagedPythonServer {
 
 pub(crate) fn default_context_dir() -> Result<PathBuf> {
     config::default_context_dir().ok_or_else(|| anyhow::anyhow!("config directory unavailable"))
+}
+
+fn run_workflow(command: WorkflowCommands) -> Result<()> {
+    use mcp_gateway::workflows;
+    let (files, config) = match command {
+        WorkflowCommands::Schema => {
+            print!("{}", workflows::WORKFLOW_SCHEMA);
+            return Ok(());
+        }
+        WorkflowCommands::Validate { files, config } => (files, config),
+    };
+    let checked: Vec<(PathBuf, Option<workflows::WorkflowError>)> = if files.is_empty() {
+        let config = config::AppConfig::load(&resolve_config_path(config))?;
+        let dirs = config.mcp.workflow_search_dirs();
+        let listed = workflows::list_files(&dirs);
+        if listed.is_empty() {
+            let dirs: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+            println!("no workflow files in {}", dirs.join(", "));
+        }
+        listed
+            .into_iter()
+            .map(|listed| (listed.path, listed.error))
+            .collect()
+    } else {
+        files
+            .into_iter()
+            .map(|path| {
+                let error = workflows::validate_file(&path).err();
+                (path, error)
+            })
+            .collect()
+    };
+    let mut invalid = 0;
+    for (path, error) in &checked {
+        match error {
+            None => println!("ok {}", path.display()),
+            Some(error) => {
+                invalid += 1;
+                println!("invalid {}: {error}", path.display());
+            }
+        }
+    }
+    if invalid > 0 {
+        anyhow::bail!("{invalid} of {} workflow files are invalid", checked.len());
+    }
+    Ok(())
 }
 
 fn run_audit(command: AuditCommands) -> Result<()> {

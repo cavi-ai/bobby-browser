@@ -283,6 +283,10 @@ pub struct Server {
     /// Whether a completed form or submit intent attaches a screenshot when
     /// its call does not say.
     success_screenshots: bool,
+    /// Directories `workflow_run` reads workflow files from.
+    workflow_dirs: Vec<std::path::PathBuf>,
+    /// Recent file-workflow runs, for reruns with `runId` and `from`.
+    workflow_runs: std::sync::Mutex<std::collections::VecDeque<dispatch_workflow_run::StoredRun>>,
 }
 
 impl Server {
@@ -334,7 +338,15 @@ impl Server {
             jobs: None,
             operational_metrics: None,
             success_screenshots: false,
+            workflow_dirs: Vec::new(),
+            workflow_runs: std::sync::Mutex::default(),
         }
+    }
+
+    /// Directories whose `<name>.json` files `workflow_run` runs by name.
+    pub fn with_workflow_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.workflow_dirs = dirs;
+        self
     }
 
     /// Attach a compact screenshot to a completed `intent_complete_form` or
@@ -889,11 +901,18 @@ impl Server {
             Err(error) if error.code == types::InterfaceErrorCode::MissingCapability => Vec::new(),
             Err(error) => return interface_error_response(id, error),
         };
+        let workflow_entries = [
+            json!({"uri":crate::workflows::WORKFLOWS_URI,"name":"Workflows",
+                   "description":"Built-in and file workflows with their inputs; workflow_run runs one by name."}),
+            json!({"uri":crate::workflows::WORKFLOW_SCHEMA_URI,"name":"Workflow file schema",
+                   "description":"The JSON Schema of a workflow file."}),
+        ];
         let resources = static_resources()
             .iter()
             .map(
                 |(uri, name, description)| json!({"uri":uri,"name":name,"description":description}),
             )
+            .chain(workflow_entries)
             .chain(artifact_entries)
             .collect::<Vec<_>>();
         success(id, json!({"resources":resources}))
@@ -904,6 +923,21 @@ impl Server {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
         };
+        if let Some(text) = crate::workflows::resource_text(&self.workflow_dirs, &input.uri) {
+            let context = self.request_context();
+            if let Err(error) = self
+                .authorization
+                .authorize(&context, types::InterfaceOperation::ReadArtifact)
+            {
+                if error.code != types::InterfaceErrorCode::MissingCapability {
+                    return interface_error_response(id, error);
+                }
+            }
+            return success(
+                id,
+                json!({"contents":[{"uri":input.uri,"mimeType":"application/json","text":text}]}),
+            );
+        }
         if let Some(text) = static_resource_body(&input.uri) {
             let context = self.request_context();
             // Repair docs are readable by any authenticated principal, even

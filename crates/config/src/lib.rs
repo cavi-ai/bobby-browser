@@ -196,6 +196,22 @@ pub struct McpConfig {
     /// call does not set `screenshot`.
     #[serde(default)]
     pub success_screenshots: bool,
+    /// More directories of `<name>.json` workflow files for `workflow_run`,
+    /// searched after `<config dir>/workflows`.
+    #[serde(default)]
+    pub workflow_dirs: Vec<PathBuf>,
+}
+
+impl McpConfig {
+    /// `<config dir>/workflows`, then `workflow_dirs`: the first file with a
+    /// name wins.
+    pub fn workflow_search_dirs(&self) -> Vec<PathBuf> {
+        bobby_config_dir()
+            .map(|dir| dir.join("workflows"))
+            .into_iter()
+            .chain(self.workflow_dirs.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -462,6 +478,7 @@ impl AppConfig {
         anchor(&mut self.storage.authority_path);
         anchor(&mut self.storage.scheduler_journal_path);
         anchor(&mut self.interface.token_records_path);
+        self.mcp.workflow_dirs.iter_mut().for_each(anchor);
         if let Some(dir) = self.context.dir.as_mut() {
             anchor(dir);
         }

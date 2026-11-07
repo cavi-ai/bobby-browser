@@ -27,6 +27,7 @@ mod server;
 mod tool_args;
 pub mod toolset;
 mod workflow_handles;
+pub mod workflows;
 
 /// Short agent tip returned on MCP `initialize` (`instructions`).
 ///

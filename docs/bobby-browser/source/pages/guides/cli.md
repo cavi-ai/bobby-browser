@@ -34,6 +34,7 @@ Put them before the subcommand. Without them, bobby uses the personal scope.
 | `openshell` | OpenShell pack and sandbox principals |
 | `context` | Inspect or erase remembered site context |
 | `audit` | Export, verify and replay audit bundles |
+| `workflow` | Check workflow files and print their schema |
 | `vision` | Vision provider setup and diagnostics |
 
 ### `bobby install`
@@ -136,6 +137,15 @@ bobby context forget --profile <profile-id> <site>
 ```
 
 `list` shows remembered sites. `forget` erases everything remembered for one site. Both take `--config` and `--dir`. See [Context graph](../concepts/context-graph.md).
+
+### `bobby workflow`
+
+```bash
+bobby workflow validate [<file>...]
+bobby workflow schema
+```
+
+`validate` checks the named files, or with none every file in the workflow directories, and exits non-zero when any is invalid; it takes `--config`. `schema` prints the JSON Schema of a workflow file. See [Workflow files](workflows.md).
 
 ### `bobby vision`
 

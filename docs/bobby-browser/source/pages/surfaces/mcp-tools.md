@@ -167,9 +167,9 @@ Intent tools find controls by purpose and verify the result. Behavior and parame
 
 ### Named workflows
 
-`workflow_run` runs a fixed sequence of the tools above in one call, on the page its `workflowHandle` (or `sessionId` and `pageId`) names. Every step is a normal call of its tool, with that tool's capability checks, guards and evidence, under one `workflowId`. `url`, when set, is opened first with `navigate`.
+`workflow_run` runs a built-in workflow or a [workflow file](../guides/workflows.md) by name in one call, on the page its `workflowHandle` (or `sessionId` and `pageId`) names. `workflow` is the name and `inputs` its inputs; `bobby://workflows` lists every workflow with its inputs. Every step is a normal call of its tool, with that tool's capability checks, guards and evidence, under one `workflowId`. For a built-in, `url`, when set in `inputs`, is opened first with `navigate`.
 
-| `workflow` | Parameters | Steps |
+| `workflow` | `inputs` | Steps |
 |---|---|---|
 | `fillForm` | `fields` (required, as in `intent_complete_form`), `submit` (`purpose`, `hints`, `expectedState`), `screenshot` | `intent_complete_form`, then `intent_submit_and_verify` when `submit` is set |
 | `extractPage` | `fields` (required, as in `intent_extract`) | `intent_extract` |
@@ -178,6 +178,8 @@ Intent tools find controls by purpose and verify the result. Behavior and parame
 A `fillForm` without `submit` stops after filling, so the form can be checked before it is sent. Field values take every `intent_complete_form` kind, so a sign-in form takes `credential` or `passwordManagerFill` and an upload takes `setFiles`.
 
 The result has `status`, `workflow`, `workflowId` and `steps`, each `{tool, result}` with that call's result. The run stops at the first step that does not complete: `stoppedAt` names its tool, and `status` and `error` are that step's. `evidence` lists every screenshot the steps took. `collectLinks` adds `links` (`{name, url}`, in page order, each URL once, at most 512) and `pages`; it ends without an error when `next` is not on the page.
+
+A workflow file's result also has `runId` and `outputs`, its steps carry their `id`, and `stoppedAt` names the step. `runId` with `from` reruns a failed run from that step, keeping the earlier steps' results.
 
 ### Recovery, events and jobs
 

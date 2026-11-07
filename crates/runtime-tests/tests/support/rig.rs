@@ -126,10 +126,22 @@ impl Rig {
             .into_iter()
             .chain([types::Capability::BrowserHumanize])
             .collect();
-        Self::serve_with(root, service, None, capabilities).await
+        Self::serve_with(root, service, None, capabilities, vec![]).await
     }
 
     async fn chromium_configured(configure: impl FnOnce(&mut AppConfig)) -> Self {
+        Self::chromium_serving(configure, vec![]).await
+    }
+
+    /// A Chromium rig whose `workflow_run` reads workflow files from `dirs`.
+    pub async fn chromium_with_workflow_dirs(dirs: Vec<std::path::PathBuf>) -> Self {
+        Self::chromium_serving(|_| {}, dirs).await
+    }
+
+    async fn chromium_serving(
+        configure: impl FnOnce(&mut AppConfig),
+        workflow_dirs: Vec<std::path::PathBuf>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("create rig root");
         let mut config = config(root.path(), vec![]);
         configure(&mut config);
@@ -139,7 +151,14 @@ impl Rig {
         let service = RuntimeService::build(&config)
             .await
             .expect("build Chromium runtime");
-        Self::serve(root, service, None).await
+        Self::serve_with(
+            root,
+            service,
+            None,
+            all_capabilities().to_vec(),
+            workflow_dirs,
+        )
+        .await
     }
 
     /// A Chromium rig whose only vision node is the loopback `endpoint`, with a
@@ -186,7 +205,7 @@ impl Rig {
             .into_iter()
             .chain([types::Capability::VisionAssist])
             .collect();
-        Self::serve_with(root, service, None, capabilities).await
+        Self::serve_with(root, service, None, capabilities, vec![]).await
     }
 
     pub async fn firefox() -> Self {
@@ -240,7 +259,7 @@ impl Rig {
         service: RuntimeService,
         firefox: Option<InstalledFirefoxRuntime>,
     ) -> Self {
-        Self::serve_with(root, service, firefox, all_capabilities().to_vec()).await
+        Self::serve_with(root, service, firefox, all_capabilities().to_vec(), vec![]).await
     }
 
     async fn serve_with(
@@ -248,6 +267,7 @@ impl Rig {
         service: RuntimeService,
         firefox: Option<InstalledFirefoxRuntime>,
         capabilities: Vec<types::Capability>,
+        workflow_dirs: Vec<std::path::PathBuf>,
     ) -> Self {
         // `RUST_LOG` prints the runtime's own events, such as each navigation settle.
         std::mem::forget(observability::init_stdio());
@@ -262,7 +282,8 @@ impl Rig {
             .expect("issue token")
             .expose_once();
         let handle = authority.verify(&token).await.expect("verify token");
-        let server = Server::new(Arc::new(AuthenticatedRuntime::new(service, handle)));
+        let server = Server::new(Arc::new(AuthenticatedRuntime::new(service, handle)))
+            .with_workflow_dirs(workflow_dirs);
         let rig = Self {
             server,
             next_id: AtomicU64::new(1),

@@ -65,7 +65,8 @@ impl McpServers {
             state.events.clone(),
             state.mcp_resources.clone(),
         )
-        .with_success_screenshots(state.mcp_success_screenshots);
+        .with_success_screenshots(state.mcp_success_screenshots)
+        .with_workflow_dirs(state.mcp_workflow_dirs.clone());
         // Same in-process scheduler as POST /v1/jobs (handlers already registered).
         server = server.with_jobs(Arc::new(mcp_gateway::InProcessJobPort::new(Arc::clone(
             &state.scheduler,
