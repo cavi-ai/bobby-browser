@@ -230,6 +230,7 @@ Add `--activate` to readiness-test the provider right away, and `--download-mode
 | `health_failure_threshold` | `3` | Consecutive failures before `/v1/runtime` reports the provider `unhealthy` (or `degraded` for budget violations) |
 | `prefill` | `true` | Resolve unresolved form fields from one screenshot before filling |
 | `python` | unset | Interpreter with the vision server's packages (`scripts/vision-mlx/requirements.txt`); runs the MLX and text-tier servers. Unset runs `BOBBY_VISION_PYTHON`, else `python3` from `PATH` |
+| `model_server` | unset | OpenAI-compatible server that already holds the `mlx` provider's model, such as one `mlx-agent serve` started. The managed MLX server sends each request there instead of loading the model |
 
 Each `[vision.providers.<name>]` profile has `base_url` (required, OpenAI-compatible), `model` (required) and `api_key_env` (optional; omit for local servers).
 

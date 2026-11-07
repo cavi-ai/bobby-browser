@@ -175,3 +175,81 @@ fn a_symlinked_bobby_finds_the_vision_server_beside_its_target() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Stands in for vision_server.py: writes its arguments and model server to
+/// `$RECORD`, then serves until stdin closes.
+const RECORDING: &str = r#"import argparse, json, os, sys
+p = argparse.ArgumentParser()
+for flag in ("--bind", "--provider", "--model"):
+    p.add_argument(flag)
+p.add_argument("--exit-with-stdin", action="store_true")
+a = p.parse_args()
+record = os.environ["RECORD"]
+with open(record + ".part", "w") as out:
+    json.dump({"provider": a.provider, "model": a.model, "server": os.environ.get("VISION_MLX_SERVER_URL")}, out)
+os.rename(record + ".part", record)
+sys.stdin.read()
+"#;
+
+#[test]
+fn a_model_server_makes_the_mlx_vision_server_send_its_requests_there() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("vision_server.py");
+    std::fs::write(&script, RECORDING).unwrap();
+    let record = root.path().join("record.json");
+
+    let mut proxy = Command::new(env!("CARGO_BIN_EXE_bobby"))
+        .args([
+            "vision-proxy",
+            "--managed",
+            "--bind",
+            "127.0.0.1:0",
+            "--upstream",
+            "mlx",
+            "--spawn-server",
+            "--model",
+            "example/vision-model",
+            "--model-server",
+            "http://127.0.0.1:8083",
+        ])
+        .arg("--vision-base-url")
+        .arg(format!("http://127.0.0.1:{}", free_port()))
+        .arg("--python")
+        .arg(python3())
+        .env(
+            "BOBBY_VISION_TOKEN",
+            "vision-proxy-test-token-0123456789abcdef",
+        )
+        .env("BOBBY_VISION_SERVER_SCRIPT", &script)
+        .env("RECORD", &record)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !record.exists()
+        && proxy.try_wait().unwrap().is_none()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(proxy.stdin.take());
+    let output = proxy.wait_with_output().unwrap();
+
+    let recorded = std::fs::read_to_string(&record).unwrap_or_else(|_| {
+        panic!(
+            "no vision server started: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(
+        recorded,
+        serde_json::json!({
+            "provider": "mlx-server",
+            "model": "example/vision-model",
+            "server": "http://127.0.0.1:8083",
+        })
+    );
+}

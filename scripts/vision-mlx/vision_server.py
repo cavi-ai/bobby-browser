@@ -104,7 +104,7 @@ def exit_when_stdin_closes():
 def main():
     parser = argparse.ArgumentParser(description="Bobby canonical vision server")
     parser.add_argument("--bind", default="127.0.0.1:9101", help="bind address")
-    parser.add_argument("--provider", default=None, help="mlx-vlm | ollama | lmstudio")
+    parser.add_argument("--provider", default=None, help="mlx-vlm | mlx-server | ollama | lmstudio")
     parser.add_argument("--model", default=None, help="model override")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(

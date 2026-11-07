@@ -588,6 +588,7 @@ fn check_mlx_readiness(
         &profile.model,
         None,
         None,
+        None,
         python,
     )?;
     let deadline = Instant::now() + timeout;
