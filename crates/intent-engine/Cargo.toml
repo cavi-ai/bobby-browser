@@ -24,6 +24,7 @@ observability.workspace = true
 types.workspace = true
 context-store.workspace = true
 futures-util.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

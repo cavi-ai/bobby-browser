@@ -229,19 +229,35 @@ impl VisionAssist for HttpVisionAssist {
         !crate::text_tier_answers(intent_kind, candidates.len()) || !self.text_tier().await
     }
 
-    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+    async fn propose(
+        &self,
+        mut request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        // Frames over the size cap leave shrunk; the answer's coordinates are
+        // scaled back to the captured frame below.
+        let screenshot = request.screenshot_png.take();
+        let corpus = request.corpus_screenshot_png.take();
+        let (screenshot_png, corpus_screenshot_png, scale) =
+            tokio::task::spawn_blocking(move || {
+                let (screenshot, scale) = match screenshot {
+                    Some(png) => match crate::frame::cap_frame(&png) {
+                        Some((capped, scale)) => (Some(capped), Some(scale)),
+                        None => (Some(png), None),
+                    },
+                    None => (None, None),
+                };
+                let corpus = corpus
+                    .map(|png| crate::frame::cap_frame(&png).map_or(png, |(capped, _)| capped));
+                (screenshot, corpus, scale)
+            })
+            .await
+            .map_err(|_| provider_error("vision frame could not be prepared"))?;
         let body = ProposeBody {
             purpose: &request.purpose,
             intent_kind: &request.intent_kind,
             stuck: stuck_name(request.stuck),
-            screenshot_png: request
-                .screenshot_png
-                .as_ref()
-                .map(|png| BASE64.encode(png)),
-            corpus_screenshot_png: request
-                .corpus_screenshot_png
-                .as_ref()
-                .map(|png| BASE64.encode(png)),
+            screenshot_png: screenshot_png.as_ref().map(|png| BASE64.encode(png)),
+            corpus_screenshot_png: corpus_screenshot_png.as_ref().map(|png| BASE64.encode(png)),
             context: request.context.clone(),
         };
         let mut call = self
@@ -375,7 +391,10 @@ impl VisionAssist for HttpVisionAssist {
         };
         Ok(VisionProposal {
             confidence: proposal.confidence,
-            action,
+            action: match scale {
+                Some(scale) => scale.restore(action),
+                None => action,
+            },
         })
     }
 }

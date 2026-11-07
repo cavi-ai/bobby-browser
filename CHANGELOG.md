@@ -10,6 +10,7 @@
 
 ### Changed
 
+- An HTTP vision node receives screenshots at most 1280 pixels on their longest side, with answer coordinates scaled back to the captured screenshot.
 - An ACP vision harness starts once and serves every task in its own session, instead of one harness process per task.
 
 ### Fixed
