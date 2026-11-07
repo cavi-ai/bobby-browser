@@ -16,13 +16,14 @@
 - `intent_submit_and_verify` no longer requires `expectedState`: without one it verifies a URL change, the submit control leaving or new form fields, and a submit the page rejects with invalid fields fails naming them without counting toward `boundaryAlreadyExecuted`.
 - A `form_snapshot` control ID stays with its control in later snapshots of the page, and an unnamed control gets a target that `controlId`, `control_action` and intent `hints.attributes` accept.
 - Intent hints with a `role` and an `ordinal` but no name pick the control by position among that role instead of using `purpose` as its name.
+- `type_text` replaces the field's text unless `clearFirst` is false; a value of only line breaks presses Enter without clearing.
 
 ### Fixed
 
 - Harness warnings no longer corrupt an ACP vision result: bobby advertises `session.notices`.
 - After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
 - `bobby install` keeps an existing `[vision].collect_training_data = true` unless `--no-collect-training-data` is passed.
-- A target's `accessibleName` resolves when it differs from the control's name only by a trailing required marker or whitespace.
+- A target's `accessibleName` resolves when it differs from the control's name only by a trailing required marker or whitespace, and a control whose name it equals exactly outranks one that differs by the marker.
 - `hints.accessibleName` accepts names up to 2048 characters, the same limit as a target.
 - `bobby doctor` fails `vision-tier-text` when `[vision].python` cannot import `mlx_lm`, which `scripts/vision-mlx/requirements.txt` now lists.
 - `bobby doctor` warns on `provider-health` while a provider's last calls are failing.
@@ -37,6 +38,11 @@
 - An `intent_extract` vision fallback goes to the image provider with the screenshot, never to the text tier, which cannot read the value.
 - An unlabeled select is not named by the text of its options.
 - A vision click lands on its control on a display with more than one device pixel per CSS pixel.
+- On Chromium, `setChecked` checks ARIA checkboxes and radios, which `form_snapshot` now lists.
+- `form_snapshot` lists every editable region, including `contenteditable="plaintext-only"`, and text typed into one reads back.
+- On Chromium, a `form_snapshot` target for a control inside a custom element's shadow root resolves through its host.
+- A humanized click scrolls its target into view, including an option scrolled out of its list.
+- An intent hint `ordinal` picks among controls that share a name and have no id, in `intent_fill` and `intent_complete_form`.
 
 ## 0.23.0 - 2026-11-04
 

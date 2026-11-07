@@ -112,6 +112,23 @@ impl Rig {
         Self::chromium_configured(|config| config.credentials = credentials).await
     }
 
+    /// A Chromium rig whose principal may also ask for humanized input.
+    pub async fn chromium_humanized() -> Self {
+        let root = tempfile::tempdir().expect("create rig root");
+        let mut config = config(root.path(), vec![]);
+        if let Some(executable) = std::env::var_os("BOBBY_CHROME_EXECUTABLE") {
+            config.browser.executable = Some(executable.into());
+        }
+        let service = RuntimeService::build(&config)
+            .await
+            .expect("build Chromium runtime");
+        let capabilities = all_capabilities()
+            .into_iter()
+            .chain([types::Capability::BrowserHumanize])
+            .collect();
+        Self::serve_with(root, service, None, capabilities).await
+    }
+
     async fn chromium_configured(configure: impl FnOnce(&mut AppConfig)) -> Self {
         let root = tempfile::tempdir().expect("create rig root");
         let mut config = config(root.path(), vec![]);

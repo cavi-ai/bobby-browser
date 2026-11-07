@@ -31,8 +31,21 @@ cases::every_case!(
     a_split_code_with_one_named_box_takes_the_code,
     select_one_picks_the_exact_option_of_an_aria_combobox,
     a_submit_without_expected_state_is_verified_by_the_page,
-    control_ids_stay_on_unnamed_controls_when_the_form_grows
+    control_ids_stay_on_unnamed_controls_when_the_form_grows,
+    aria_checkboxes_and_radios_take_set_checked,
+    editable_regions_read_back_their_typed_text,
+    type_text_replaces_a_prefilled_value,
+    an_exact_name_outranks_one_with_a_required_marker,
+    snapshot_targets_reach_controls_inside_custom_elements,
+    complete_form_honors_a_field_ordinal
 );
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_humanized_click_reaches_an_option_scrolled_out_of_its_list() {
+    let rig = Rig::chromium_humanized().await;
+    cases::a_humanized_click_reaches_an_option_scrolled_out_of_its_list(&rig).await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]

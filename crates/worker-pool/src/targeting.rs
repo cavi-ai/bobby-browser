@@ -347,10 +347,15 @@ impl ResolvedTarget {
         self.eval(page, "return el.innerText || ''").await.map(Some)
     }
 
-    /// The control's value; empty for an element without one, such as an
-    /// editable region.
+    /// The control's value, or an editable region's text; empty for an element
+    /// with neither.
     pub async fn value(&self, page: &Page) -> Result<Option<String>, CommandError> {
-        self.eval(page, "return el.value || ''").await.map(Some)
+        self.eval(
+            page,
+            "return el.isContentEditable ? (el.innerText || '') : (el.value || '')",
+        )
+        .await
+        .map(Some)
     }
 
     /// The origin the browser reports for the frame holding the element;
@@ -620,11 +625,12 @@ impl ResolvedTarget {
         .await
     }
 
+    /// Native checkboxes and radios report `checked`; ARIA ones `aria-checked`.
     pub async fn set_checked(&self, page: &Page, checked: bool) -> Result<bool, CommandError> {
         let checked = if checked { "true" } else { "false" };
         self.eval(
             page,
-            &format!("if(el.type==='radio'&&!{checked})throw new Error('radio controls cannot be unchecked directly');if(el.checked!=={checked}){{el.click()}}return el.checked"),
+            &format!("const native=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio');const radio=native?el.type==='radio':el.getAttribute('role')==='radio';const state=()=>native?el.checked:el.getAttribute('aria-checked')==='true';if(radio&&!{checked})throw new Error('radio controls cannot be unchecked directly');if(state()!=={checked}){{el.click()}}return state()"),
         )
         .await
     }

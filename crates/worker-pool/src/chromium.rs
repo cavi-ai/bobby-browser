@@ -2511,13 +2511,11 @@ impl crate::InputEngine for ChromiumWorker {
             let text = resolved.inner_text(&page).await.ok().flatten();
             self.bring_page_to_front(&page).await;
             let humanized = crate::SessionSettings::humanization_enabled(self);
-            if !humanized {
-                // A coordinate-based dispatch needs the target on-screen;
-                // best-effort, like `bring_page_to_front` above -- this only
-                // sharpens the point `clickable_point` resolves next.
-                if let Err(error) = resolved.scroll_into_view(&page).await {
-                    tracing::debug!(?error, "scroll-into-view before click dispatch failed");
-                }
+            // A coordinate-based dispatch, humanized or not, needs the target
+            // on-screen and out of any scrolled container's clip; best-effort,
+            // like `bring_page_to_front` above.
+            if let Err(error) = resolved.scroll_into_view(&page).await {
+                tracing::debug!(?error, "scroll-into-view before click dispatch failed");
             }
             // The last read of the resolved element, on both the humanized
             // and the plain path; no input has been dispatched yet.
