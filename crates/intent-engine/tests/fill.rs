@@ -56,6 +56,72 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
     assert_eq!(calls.lock().unwrap().type_text.len(), 2);
 }
 
+async fn complete_phone_field(typed: &str, read_back: &str) -> IntentOutcome {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Phone")]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some(read_back.into()),
+        }],
+        upload_evidence: vec![],
+    };
+    IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete contact details".into(),
+            fields: vec![CompleteFormField {
+                name: "phone".into(),
+                purpose: "phone number".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Phone".into()),
+                    ..Default::default()
+                },
+                value: ControlAction::SetText {
+                    value: typed.into(),
+                    clear_first: true,
+                },
+                revealed_by: None,
+            }],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_phone_number_an_input_mask_reformats_verifies_by_its_digits() {
+    for (typed, read_back) in [
+        ("555-010-0199", "(555) 010-0199"),
+        ("+1 555 010 0199", "+1 (555) 010-0199"),
+        ("5550100199", "555.010.0199"),
+    ] {
+        let outcome = complete_phone_field(typed, read_back).await;
+        assert!(
+            matches!(outcome, IntentOutcome::Completed { .. }),
+            "{typed} read back as {read_back}: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reformatted_value_with_other_digits_or_letters_still_fails() {
+    for (typed, read_back) in [
+        ("555-010-0199", "(555) 010-0198"),
+        ("555-010-0199", "(555) 010-01"),
+        ("ext-0100199", "ext 010-0199"),
+        ("12-34", "(12) 34"),
+    ] {
+        let outcome = complete_phone_field(typed, read_back).await;
+        assert!(
+            !matches!(outcome, IntentOutcome::Completed { .. }),
+            "{typed} read back as {read_back}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name() {
     let calls = Arc::new(Mutex::new(CallLog::default()));

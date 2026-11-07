@@ -53,6 +53,8 @@ enum DriverMode {
     /// Inspect reports a prefilled value with the typed text appended,
     /// simulating `clear_first: false` into a non-empty field.
     AppendPrefill,
+    /// Inspect reports a phone number an input mask reformatted.
+    MaskedPhone,
     /// The first attempt at the exercised command fails with a
     /// closed-session-shaped message (matching
     /// `worker_pool::is_dead_worker_error`), but the browser process and the
@@ -318,6 +320,15 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 url: "https://example.test/".into(),
                 title: "Fixture".into(),
                 text: "prefilledx".into(),
+                html: None,
+            }]);
+        }
+        if matches!(self.mode, DriverMode::MaskedPhone) {
+            return Ok(vec![Evidence::Inspection {
+                selector: command.selector.clone(),
+                url: "https://example.test/".into(),
+                title: "Fixture".into(),
+                text: "(555) 010-0199".into(),
                 html: None,
             }]);
         }
@@ -3714,6 +3725,31 @@ async fn a_typed_value_that_never_lands_fails_verification() {
         other => panic!("mismatched page state must fail verification: {other:?}"),
     };
     assert_eq!(error.code, ErrorCode::VerificationFailed, "{error:?}");
+}
+
+#[tokio::test]
+async fn a_phone_number_an_input_mask_reformats_verifies_by_its_digits() {
+    for (typed, verified) in [("555-010-0199", true), ("555-010-0198", false)] {
+        let (runtime, session, page, _) = runtime(DriverMode::MaskedPhone, None).await;
+        let outcome = runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::TypeText(TypeTextCommand {
+                    selector: "input[name='phone']".into(),
+                    target: None,
+                    value: typed.into(),
+                    clear_first: true,
+                    expected_url: None,
+                }),
+            ))
+            .await;
+        assert_eq!(
+            matches!(outcome, CommandOutcome::Completed { .. }),
+            verified,
+            "{typed}: {outcome:?}"
+        );
+    }
 }
 
 #[tokio::test]

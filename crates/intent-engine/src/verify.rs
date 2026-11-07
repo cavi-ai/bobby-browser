@@ -337,6 +337,21 @@ fn verify_checked_state(expected: bool, evidence: &[Evidence]) -> Result<(), Str
 /// where the value stays, inside a frame, in place of reading it back.
 pub const TYPED_VALUE_VERIFIED: &str = "typedValueVerified";
 
+/// Whether `read` is the phone number `typed` reformatted by an input mask:
+/// both hold only digits and phone punctuation, the same digits, at least seven.
+pub fn same_phone_number(typed: &str, read: &str) -> bool {
+    fn digits(value: &str) -> Option<String> {
+        value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '-' | '.' | '(' | ')' | '+'))
+            .then(|| value.chars().filter(char::is_ascii_digit).collect())
+    }
+    match (digits(typed), digits(read)) {
+        (Some(typed), Some(read)) => typed.len() >= 7 && typed == read,
+        _ => false,
+    }
+}
+
 fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), String> {
     let control_valid = evidence.iter().find_map(|item| match item {
         Evidence::Configuration { name, value } if name == "formControlValid" => {
@@ -376,10 +391,9 @@ fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), Strin
     if observed.is_empty() {
         return Err("missing typed-value evidence".into());
     }
-    if observed
-        .iter()
-        .any(|text| *text == expected || text.contains(expected))
-    {
+    if observed.iter().any(|text| {
+        *text == expected || text.contains(expected) || same_phone_number(expected, text)
+    }) {
         Ok(())
     } else {
         Err(format!(

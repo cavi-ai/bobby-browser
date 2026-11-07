@@ -21,7 +21,8 @@ pub use http_vision::{
 };
 pub use stuck::{never_escalates, StuckKind};
 pub use verify::{
-    compatible, execution_record, summarize_target, verify_fill, TYPED_VALUE_VERIFIED,
+    compatible, execution_record, same_phone_number, summarize_target, verify_fill,
+    TYPED_VALUE_VERIFIED,
 };
 pub use vision::{
     collect_vision_training_data, compile_vision_packet, instrument_vision_assist, proposal_sha256,

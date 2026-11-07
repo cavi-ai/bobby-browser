@@ -346,6 +346,9 @@ fn typed_value_verified(
     if inspected == value {
         return true;
     }
+    if clear_first && intent_engine::same_phone_number(value, inspected) {
+        return true;
+    }
     if !clear_first && inspected.ends_with(value) {
         return true;
     }
