@@ -322,6 +322,7 @@ impl IntentEngine {
                     target,
                     expected_destination,
                     boundary,
+                    command_deadline,
                 )
                 .await
             }
@@ -2480,17 +2481,7 @@ async fn execute_submit_and_verify(
                 retryable: false,
             };
             if reading.is_some() {
-                if let Ok((_, mut screenshot)) = browser
-                    .capture_screenshot(
-                        page_id,
-                        &CaptureScreenshotCommand {
-                            mode: ScreenshotMode::Viewport,
-                        },
-                    )
-                    .await
-                {
-                    click_evidence.append(&mut screenshot);
-                }
+                click_evidence.extend(viewport_screenshot(page_id, browser).await);
             }
             click_evidence.extend(reading);
             let verification = if opened.is_empty() {
@@ -2628,11 +2619,11 @@ const OUTCOME_READING_MIN: std::time::Duration = std::time::Duration::from_secs(
 /// Longest quoted message a reading keeps.
 const OUTCOME_MESSAGE_CHARS: usize = 300;
 
-/// The vision model's reading of what the page shows after a landed submit,
-/// from a frame with typed values masked. `None` when a vision gate is
-/// closed, too little command time is left, or the provider fails, answers
-/// off-task or answers under the confidence floor. A reading never changes
-/// whether the submit verified.
+/// The vision model's reading of what the page shows after a landed submit
+/// or follow, from a frame with typed values masked. `None` when a vision
+/// gate is closed, too little command time is left, or the provider fails,
+/// answers off-task or answers under the confidence floor. A reading never
+/// changes whether the intent verified.
 async fn read_outcome(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -2721,6 +2712,21 @@ async fn read_outcome(
         })
     };
     tokio::time::timeout(budget, reading).await.ok().flatten()
+}
+
+/// Screenshot evidence of the viewport as the agent would see it; empty when
+/// the capture fails.
+async fn viewport_screenshot(page_id: &PageId, browser: &dyn IntentBrowser) -> Vec<Evidence> {
+    browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        )
+        .await
+        .map(|(_, evidence)| evidence)
+        .unwrap_or_default()
 }
 
 fn describe_outcome_reading(reading: &Evidence) -> String {
@@ -2885,6 +2891,7 @@ fn recode_postclick_verification_error(error: CommandError, prefix: &str) -> Com
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_follow(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -2893,6 +2900,7 @@ async fn execute_follow(
     target: TargetSpec,
     expected_destination: WaitForCommand,
     boundary: bool,
+    command_deadline: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
     let purpose = match intent {
         IntentCommand::Follow(follow) => Some(follow.purpose.clone()),
@@ -2973,10 +2981,25 @@ async fn execute_follow(
             // as a retryable ambiguity and invites re-clicking a control that
             // already fired.
             let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
+            let reading = read_outcome(
+                page_id,
+                browser,
+                vision,
+                purpose.as_deref(),
+                command_deadline,
+            )
+            .await;
+            let shown = reading
+                .as_ref()
+                .map(|reading| format!("; {}", describe_outcome_reading(reading)))
+                .unwrap_or_default();
             let (error, verification) = if opened.is_empty() {
                 (
                     recode_postclick_verification_error(
-                        error,
+                        CommandError {
+                            message: format!("{}{shown}", error.message),
+                            ..error
+                        },
                         "activation landed; expectedState could not be verified",
                     ),
                     "verifyFailed",
@@ -2985,13 +3008,20 @@ async fn execute_follow(
                 (
                     CommandError {
                         code: ErrorCode::ObstructionSuspected,
-                        message: "activation landed; a dialog opened over the page instead of the expectedState".into(),
+                        message: format!(
+                            "activation landed; a dialog opened over the page instead of the \
+                             expectedState{shown}"
+                        ),
                         layer: ErrorLayer::Page,
                         retryable: false,
                     },
                     "dialogOpened",
                 )
             };
+            if reading.is_some() {
+                click_evidence.extend(viewport_screenshot(page_id, browser).await);
+            }
+            click_evidence.extend(reading);
             let mut candidates = vec![candidate_evidence];
             candidates.extend(opened);
             return IntentOutcome::Failed {
@@ -3026,6 +3056,16 @@ async fn execute_follow(
     let mut evidence = vec![resolution];
     evidence.append(&mut click_evidence);
     evidence.append(&mut wait_evidence);
+    evidence.extend(
+        read_outcome(
+            page_id,
+            browser,
+            vision,
+            purpose.as_deref(),
+            command_deadline,
+        )
+        .await,
+    );
     evidence.push(intent_evidence(execution_record(
         "follow",
         purpose,

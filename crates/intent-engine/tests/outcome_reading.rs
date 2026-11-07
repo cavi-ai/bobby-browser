@@ -1,5 +1,5 @@
-//! After a landed submit, the vision node reads what the page shows and the
-//! submit's result carries that reading.
+//! After a landed submit or follow, the vision node reads what the page shows
+//! and the intent's result carries that reading.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use intent_engine::{HttpVisionAssist, IntentBrowser, IntentEngine, IntentOutcome
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    IntentCommand, IntentHints, PageId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    FollowIntent, IntentCommand, IntentHints, PageId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
     TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
 };
 
@@ -81,7 +81,7 @@ impl IntentBrowser for FakeBrowser {
             Ok(Vec::new())
         } else {
             Err(CommandError {
-                code: ErrorCode::DeadlineExceeded,
+                code: ErrorCode::WaitConditionTimedOut,
                 message: "url did not match within 5000ms".into(),
                 layer: ErrorLayer::Page,
                 retryable: true,
@@ -191,6 +191,24 @@ fn submit() -> IntentCommand {
             },
             timeout_ms: 5_000,
         },
+    })
+}
+
+fn follow() -> IntentCommand {
+    IntentCommand::Follow(FollowIntent {
+        purpose: "create the account".into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            accessible_name: Some("Create account".into()),
+            ..IntentHints::default()
+        },
+        expected_destination: WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/welcome".into()),
+            },
+            timeout_ms: 5_000,
+        },
+        boundary: true,
     })
 }
 
@@ -331,5 +349,79 @@ async fn a_low_confidence_reading_is_left_out() {
         !error.message.contains("maybe an error"),
         "{}",
         error.message
+    );
+}
+
+#[tokio::test]
+async fn a_follow_that_misses_its_destination_reports_the_message_the_page_shows() {
+    let (url, requests) = vision_endpoint(serde_json::json!({
+        "confidence": 0.875,
+        "action": {"kind": "outcomeRead", "outcome": "rejected", "message": "This email is already registered"}
+    }))
+    .await;
+    let outcome = IntentEngine::execute(
+        &follow(),
+        &PageId::new(),
+        &FakeBrowser { verified: false },
+        &vision(&url, true),
+    )
+    .await;
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("a follow whose destination never held must fail");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(
+        error
+            .message
+            .contains("the page shows a rejection: \"This email is already registered\""),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        readings(&evidence),
+        vec![serde_json::json!({
+            "kind": "outcomeReading",
+            "outcome": "rejected",
+            "message": "This email is already registered",
+            "confidence": 0.875
+        })]
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Screenshot { artifact_id, .. } if artifact_id == "after-submit"
+        )),
+        "a failed follow keeps a screenshot of the page it left: {evidence:?}"
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["intentKind"], "readOutcome");
+}
+
+#[tokio::test]
+async fn a_followed_destination_carries_the_confirmation_the_page_shows() {
+    let (url, _requests) = vision_endpoint(serde_json::json!({
+        "confidence": 0.9375,
+        "action": {"kind": "outcomeRead", "outcome": "confirmed", "message": "Welcome aboard"}
+    }))
+    .await;
+    let outcome = IntentEngine::execute(
+        &follow(),
+        &PageId::new(),
+        &FakeBrowser { verified: true },
+        &vision(&url, true),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("a follow whose destination held completes");
+    };
+    assert_eq!(
+        readings(&evidence),
+        vec![serde_json::json!({
+            "kind": "outcomeReading",
+            "outcome": "confirmed",
+            "message": "Welcome aboard",
+            "confidence": 0.9375
+        })]
     );
 }
