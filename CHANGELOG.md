@@ -4,6 +4,7 @@
 
 ### Added
 
+- With vision assist on, `intent_submit_and_verify` returns `outcomeReading` evidence: the confirmation or error message the page shows after the submit.
 - `[vision].assist_profiles` names browser profiles whose sessions always run with vision assist, so their escalations reach the vision corpus.
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 

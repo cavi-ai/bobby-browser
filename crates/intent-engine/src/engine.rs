@@ -230,21 +230,31 @@ impl IntentEngine {
         browser: &dyn IntentBrowser,
         vision: &VisionContext,
     ) -> IntentOutcome {
-        Self::execute_inner(intent, page_id, browser, vision, None).await
+        Self::execute_inner(intent, page_id, browser, vision, None, None).await
     }
 
     /// Limits speculative prefill to `prefill_deadline`, retaining completed
-    /// proposals and dropping unfinished work before normal field execution.
-    /// The caller still enforces the overall command deadline. `execute`
+    /// proposals and dropping unfinished work before normal field execution,
+    /// and ends optional post-action reads before `command_deadline`. The
+    /// caller still enforces the overall command deadline. `execute`
     /// preserves legacy behavior for callers without a deadline.
-    pub async fn execute_with_prefill_deadline(
+    pub async fn execute_with_deadlines(
         intent: &IntentCommand,
         page_id: &PageId,
         browser: &dyn IntentBrowser,
         vision: &VisionContext,
         prefill_deadline: tokio::time::Instant,
+        command_deadline: tokio::time::Instant,
     ) -> IntentOutcome {
-        Self::execute_inner(intent, page_id, browser, vision, Some(prefill_deadline)).await
+        Self::execute_inner(
+            intent,
+            page_id,
+            browser,
+            vision,
+            Some(prefill_deadline),
+            Some(command_deadline),
+        )
+        .await
     }
 
     async fn execute_inner(
@@ -253,6 +263,7 @@ impl IntentEngine {
         browser: &dyn IntentBrowser,
         vision: &VisionContext,
         prefill_deadline: Option<tokio::time::Instant>,
+        command_deadline: Option<tokio::time::Instant>,
     ) -> IntentOutcome {
         let plan = match compile_intent(intent) {
             Ok(plan) => plan,
@@ -287,8 +298,16 @@ impl IntentEngine {
                 target,
                 expected_state,
             } => {
-                execute_submit_and_verify(intent, page_id, browser, vision, target, expected_state)
-                    .await
+                execute_submit_and_verify(
+                    intent,
+                    page_id,
+                    browser,
+                    vision,
+                    target,
+                    expected_state,
+                    command_deadline,
+                )
+                .await
             }
             IntentPlan::Follow {
                 target,
@@ -2245,6 +2264,7 @@ async fn execute_submit_and_verify(
     vision: &VisionContext,
     target: TargetSpec,
     expected_state: WaitForCommand,
+    command_deadline: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
     let (purpose, purpose_is_implicit_match) = match intent {
         IntentCommand::SubmitAndVerify(submit) => (
@@ -2429,10 +2449,18 @@ async fn execute_submit_and_verify(
                     },
                 };
             }
+            let reading = read_outcome(
+                page_id,
+                browser,
+                vision,
+                purpose.as_deref(),
+                command_deadline,
+            )
+            .await;
             let error = CommandError {
                 code: ErrorCode::VerificationFailed,
                 message: format!(
-                    "submit click landed but the expected post-state did not hold ({}): {}{}. \
+                    "submit click landed but the expected post-state did not hold ({}): {}{}{}. \
                      Do not resubmit blindly — inspect the page for a server rejection or \
                      confirmation, then re-verify with intent_wait_for_state or correct the \
                      rejected fields",
@@ -2442,11 +2470,29 @@ async fn execute_submit_and_verify(
                         ""
                     } else {
                         "; a dialog opened over the page"
-                    }
+                    },
+                    reading
+                        .as_ref()
+                        .map(|reading| format!("; {}", describe_outcome_reading(reading)))
+                        .unwrap_or_default()
                 ),
                 layer: error.layer,
                 retryable: false,
             };
+            if reading.is_some() {
+                if let Ok((_, mut screenshot)) = browser
+                    .capture_screenshot(
+                        page_id,
+                        &CaptureScreenshotCommand {
+                            mode: ScreenshotMode::Viewport,
+                        },
+                    )
+                    .await
+                {
+                    click_evidence.append(&mut screenshot);
+                }
+            }
+            click_evidence.extend(reading);
             let verification = if opened.is_empty() {
                 "verifyFailed"
             } else {
@@ -2553,6 +2599,16 @@ async fn execute_submit_and_verify(
     let mut evidence = vec![resolution];
     evidence.append(&mut click_evidence);
     evidence.append(&mut wait_evidence);
+    evidence.extend(
+        read_outcome(
+            page_id,
+            browser,
+            vision,
+            purpose.as_deref(),
+            command_deadline,
+        )
+        .await,
+    );
     evidence.push(intent_evidence(execution_record(
         "submitAndVerify",
         purpose,
@@ -2562,6 +2618,127 @@ async fn execute_submit_and_verify(
         settlement_verification,
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// Longest a post-submit reading may take; a slower provider leaves none.
+const OUTCOME_READING_CAP: std::time::Duration = std::time::Duration::from_secs(10);
+/// A reading starts only with at least this much command time left, and
+/// leaves a second of it for the result.
+const OUTCOME_READING_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+/// Longest quoted message a reading keeps.
+const OUTCOME_MESSAGE_CHARS: usize = 300;
+
+/// The vision model's reading of what the page shows after a landed submit,
+/// from a frame with typed values masked. `None` when a vision gate is
+/// closed, too little command time is left, or the provider fails, answers
+/// off-task or answers under the confidence floor. A reading never changes
+/// whether the submit verified.
+async fn read_outcome(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purpose: Option<&str>,
+    command_deadline: Option<tokio::time::Instant>,
+) -> Option<Evidence> {
+    let assist = vision
+        .assist
+        .as_ref()
+        .filter(|_| vision.session_ok && vision.capability_ok)?;
+    let budget = match command_deadline {
+        Some(deadline) => deadline
+            .checked_duration_since(tokio::time::Instant::now())?
+            .saturating_sub(std::time::Duration::from_secs(1))
+            .min(OUTCOME_READING_CAP),
+        None => OUTCOME_READING_CAP,
+    };
+    if budget < OUTCOME_READING_MIN {
+        return None;
+    }
+    let reading = async {
+        let png = browser.capture_sanitized_screenshot(page_id).await.ok()?;
+        let metric_context = assist.operational_metrics();
+        let started = std::time::Instant::now();
+        let proposal = assist
+            .propose(VisionProposeRequest {
+                purpose: purpose.unwrap_or("submit").to_owned(),
+                intent_kind: "readOutcome".into(),
+                screenshot_png: Some(png),
+                corpus_screenshot_png: None,
+                stuck: StuckKind::VerifyNoDomSignal,
+                context: vision.prompt_context.clone(),
+            })
+            .await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let Ok(proposal) = proposal else {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                None,
+                VisionProposalOutcome::Failed,
+                None,
+            );
+            return None;
+        };
+        let VisionAction::OutcomeRead { outcome, message } = proposal.action else {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
+            return None;
+        };
+        if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
+            return None;
+        }
+        record_vision_metric(
+            metric_context.as_ref(),
+            latency_ms,
+            Some(proposal.confidence),
+            VisionProposalOutcome::Accepted,
+            Some(VerificationMetricResult::Accepted),
+        );
+        let message = message
+            .map(|text| {
+                text.trim()
+                    .chars()
+                    .take(OUTCOME_MESSAGE_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|text| !text.is_empty());
+        Some(Evidence::OutcomeReading {
+            outcome,
+            message,
+            confidence: proposal.confidence,
+        })
+    };
+    tokio::time::timeout(budget, reading).await.ok().flatten()
+}
+
+fn describe_outcome_reading(reading: &Evidence) -> String {
+    let Evidence::OutcomeReading {
+        outcome, message, ..
+    } = reading
+    else {
+        return String::new();
+    };
+    let shown = match outcome {
+        types::PageOutcome::Confirmed => "a confirmation",
+        types::PageOutcome::Rejected => "a rejection",
+        types::PageOutcome::NoMessage => return "the page shows no confirmation or error".into(),
+    };
+    match message {
+        Some(message) => format!("the page shows {shown}: {message:?}"),
+        None => format!("the page shows {shown}"),
+    }
 }
 
 fn post_navigation_context_loss(error: &CommandError) -> bool {
@@ -5376,16 +5553,16 @@ async fn execute_vision_action(
             layer: ErrorLayer::Page,
             retryable: false,
         }),
-        // Classification answers, consumed by `execute_detect_challenge`
-        // before dispatch; detection never acts on the page.
-        VisionAction::ChallengeDetected { .. } | VisionAction::NoChallengeDetected => {
-            Err(CommandError {
-                code: ErrorCode::VisionAssistFailed,
-                message: "detection vision action is not an actionable page operation".into(),
-                layer: ErrorLayer::Page,
-                retryable: false,
-            })
-        }
+        // Classification answers, consumed by `execute_detect_challenge` and
+        // the post-submit reading before dispatch; neither acts on the page.
+        VisionAction::ChallengeDetected { .. }
+        | VisionAction::NoChallengeDetected
+        | VisionAction::OutcomeRead { .. } => Err(CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: "detection vision action is not an actionable page operation".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }),
     }
 }
 

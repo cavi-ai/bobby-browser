@@ -167,6 +167,7 @@ export type Evidence =
   | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "structuredExtraction"; pageId: Id; value: JsonValue; truncated: boolean; pageDerived?: true }
   | { kind: "challengeDetection"; confidence: number; detection: ChallengeDetection | null; priorKind?: string }
+  | { kind: "outcomeReading"; outcome: PageOutcome; message?: string; confidence: number; pageDerived?: true }
   | { kind: "cookieState"; pageId: Id | null; cookies: CookieRecord[] }
   | { kind: "pdfArtifact"; artifactId: string; mediaType: string; bytes: number; sha256: string }
   | { kind: "dialog"; dialogType: string; message: string; action: "accept" | "dismiss" }
@@ -269,6 +270,8 @@ export interface ControlActionEvidence { operation: FormControlOperation; target
 export interface ViewportSize { width: number; height: number; }
 export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy?: number | null; }
 export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry";
+/** What the page showed after a submit, as read by the vision provider. */
+export type PageOutcome = "confirmed" | "rejected" | "noMessage";
 export interface ChallengeDetectionRegion { x: number; y: number; width: number; height: number; }
 export interface ChallengeDetectionHints { target_field_purpose?: string; instruction_text?: string; }
 export interface ChallengeDetection { challenge_type: ChallengeType; confidence: number; region?: ChallengeDetectionRegion; blocking: boolean; hints?: ChallengeDetectionHints; }

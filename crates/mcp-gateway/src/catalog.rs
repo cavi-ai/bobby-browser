@@ -273,7 +273,7 @@ tools! {
             types::Capability::VisionAssist,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SolveChallenge", "Reconciliable"), hints: (false, false, false, false) }
-    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. networkQuiet returns submitSettlement=settled|validationRejected; on rejection, do not inspect or blindly resubmit. On failure with needsReconciliation, call recovery_status.",
+    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. networkQuiet returns submitSettlement=settled|validationRejected; on rejection, do not inspect or blindly resubmit. With visionAssist, outcomeReading evidence says what the page shows; no screenshot needed. On failure with needsReconciliation, call recovery_status.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
@@ -439,6 +439,10 @@ mod tests {
                 && submit.contains("submitSettlement=settled|validationRejected")
                 && submit.contains("do not inspect or blindly resubmit"),
             "verified submit must identify the exactly-once settled stopping condition"
+        );
+        assert!(
+            submit.contains("outcomeReading"),
+            "verified submit must name the evidence that reports what the page shows"
         );
     }
 

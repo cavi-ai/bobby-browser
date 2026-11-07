@@ -79,6 +79,11 @@ enum ActionBody {
         blocking: bool,
     },
     NoChallengeDetected,
+    OutcomeRead {
+        outcome: types::PageOutcome,
+        #[serde(default)]
+        message: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -346,6 +351,24 @@ impl VisionAssist for HttpVisionAssist {
             ActionBody::NoChallengeDetected => {
                 return Err(provider_error(format!(
                     "vision noChallengeDetected action is incompatible with intent {}",
+                    request.intent_kind
+                )));
+            }
+            ActionBody::OutcomeRead { message, .. }
+                if message
+                    .as_ref()
+                    .is_some_and(|text| text.len() > MAX_TEXT_BYTES) =>
+            {
+                return Err(provider_error("vision outcome message exceeded its bound"));
+            }
+            ActionBody::OutcomeRead { outcome, message }
+                if request.intent_kind == "readOutcome" =>
+            {
+                VisionAction::OutcomeRead { outcome, message }
+            }
+            ActionBody::OutcomeRead { .. } => {
+                return Err(provider_error(format!(
+                    "vision outcomeRead action is incompatible with intent {}",
                     request.intent_kind
                 )));
             }

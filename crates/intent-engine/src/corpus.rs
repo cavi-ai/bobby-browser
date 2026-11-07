@@ -490,6 +490,13 @@ pub fn raw_action(action: &VisionAction, target_index: Option<usize>) -> serde_j
         VisionAction::NoChallengeDetected => {
             serde_json::json!({"kind": "noChallengeDetected"})
         }
+        // The message is page text; the corpus keeps only the classification.
+        VisionAction::OutcomeRead { outcome, .. } => {
+            serde_json::json!({
+                "kind": "outcomeRead",
+                "outcome": serde_json::to_value(outcome).unwrap_or_default(),
+            })
+        }
     }
 }
 

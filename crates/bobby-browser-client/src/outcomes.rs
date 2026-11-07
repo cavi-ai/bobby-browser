@@ -416,6 +416,19 @@ pub enum SubmitSettlementOutcome {
     ValidationRejected,
 }
 
+/// What the page showed after a landed submit, as the vision model read it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum PageOutcome {
+    /// A success or confirmation message.
+    Confirmed,
+    /// An error, rejection or validation message.
+    Rejected,
+    /// Neither.
+    NoMessage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
@@ -589,6 +602,14 @@ pub enum Evidence {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prior_kind: Option<String>,
     },
+    /// The vision model's reading of the page after a landed submit.
+    /// `message` is page-derived text the model quoted.
+    OutcomeReading {
+        outcome: PageOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        confidence: f32,
+    },
     CookieState {
         page_id: Option<PageId>,
         cookies: Vec<crate::CookieRecord>,
@@ -677,6 +698,7 @@ impl Evidence {
                 | Self::FormSnapshot { .. }
                 | Self::CodeEntry { .. }
                 | Self::StructuredExtraction { .. }
+                | Self::OutcomeReading { .. }
         )
     }
 
@@ -751,7 +773,13 @@ pub fn annotate_page_derived_evidence(outcome: &mut serde_json::Value) {
     for item in evidence {
         if matches!(
             item.get("kind").and_then(serde_json::Value::as_str),
-            Some("inspection" | "accessibilitySnapshot" | "formSnapshot" | "structuredExtraction")
+            Some(
+                "inspection"
+                    | "accessibilitySnapshot"
+                    | "formSnapshot"
+                    | "structuredExtraction"
+                    | "outcomeReading"
+            )
         ) {
             item["pageDerived"] = serde_json::Value::Bool(true);
         }
