@@ -1649,8 +1649,8 @@ pub async fn pointing_vision_node() -> String {
 fn mark_center(width: u32, rgb: &[u8]) -> Option<(f64, f64)> {
     let width = width as usize;
     let (mut left, mut top, mut right, mut bottom) = (usize::MAX, usize::MAX, 0, 0);
-    for (at, pixel) in rgb.chunks_exact(3).enumerate() {
-        if pixel == VISION_MARK {
+    for (at, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
+        if *pixel == VISION_MARK {
             let (x, y) = (at % width, at / width);
             left = left.min(x);
             top = top.min(y);
