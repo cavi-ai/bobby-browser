@@ -79,6 +79,51 @@ pub(crate) struct WorkflowObserveArgs {
     pub(crate) target: Option<types::TargetSpec>,
 }
 
+/// The workflows `workflow_run` runs.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NamedWorkflow {
+    FillForm,
+    ExtractPage,
+    CollectLinks,
+}
+
+impl NamedWorkflow {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::FillForm => "fillForm",
+            Self::ExtractPage => "extractPage",
+            Self::CollectLinks => "collectLinks",
+        }
+    }
+}
+
+/// `fields`, `submit`, `list` and `next` are passed to the tools a workflow
+/// runs, which validate them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkflowRunArgs {
+    pub(crate) session_id: types::SessionId,
+    pub(crate) page_id: types::PageId,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
+    pub(crate) workflow: NamedWorkflow,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) fields: Option<Vec<Value>>,
+    #[serde(default)]
+    pub(crate) submit: Option<Value>,
+    #[serde(default)]
+    pub(crate) screenshot: Option<bool>,
+    #[serde(default)]
+    pub(crate) list: Option<Value>,
+    #[serde(default)]
+    pub(crate) next: Option<Value>,
+    #[serde(default)]
+    pub(crate) max_pages: Option<u32>,
+}
+
 impl WorkflowObserveArgs {
     /// JSON Schema string lengths are Unicode scalar counts, unlike the
     /// gateway's byte-oriented internal string validator.

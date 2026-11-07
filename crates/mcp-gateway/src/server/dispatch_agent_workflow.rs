@@ -201,6 +201,7 @@ impl Server {
                 )
                 .await
             }
+            "workflow_run" => self.dispatch_workflow_run(id, call.arguments).await,
             _ => unreachable!("dispatch_agent_workflow received a tool it does not own"),
         }
     }

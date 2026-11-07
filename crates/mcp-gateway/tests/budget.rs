@@ -359,6 +359,8 @@ const DESTRUCTIVE: &[&str] = &[
     "intent_enter_code",
     "intent_follow",
     "job_cancel",
+    // Runs intent_submit_and_verify and intent_follow.
+    "workflow_run",
 ];
 
 // `command_execute` accepts an arbitrary `RuntimeCommand`, including `Navigate` and
@@ -377,6 +379,7 @@ const OPEN_WORLD: &[&str] = &[
     "intent_follow",
     "intent_submit_and_verify",
     "intent_enter_code",
+    "workflow_run",
 ];
 
 // `idempotentHint` is unconditional under MCP: repeating the call with the same arguments

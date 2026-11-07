@@ -12,6 +12,7 @@
 - A `form_snapshot` file control's state lists `names`: the files it holds or, holding none, the file names its widget shows, and its `count` includes them.
 - `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
 - `screenshot` evidence names its `sessionId`, `workflowId`, `pageId`, `url` and `capturedAt`, and `upload` evidence lists each file's `sha256`; an upload's journaled source reads `upload://source/`, a digest of its path.
+- `workflow_run` runs a named workflow in one call through the existing tools and their checks: `fillForm` fills and optionally submits a form, `extractPage` reads fields, and `collectLinks` gathers a list's links across pages.
 
 ### Changed
 

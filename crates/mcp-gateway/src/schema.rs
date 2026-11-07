@@ -401,6 +401,31 @@ pub(crate) fn intent_submit_and_verify_schema() -> (Value, Vec<&'static str>) {
     )
 }
 
+pub(crate) fn workflow_run_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "workflow": {"type":"string","enum":["fillForm","extractPage","collectLinks"]},
+            "url": string(1, MAX_URL_BYTES),
+            // The step tools validate these.
+            "fields": nonempty_array(any_value(), MAX_COLLECTION_ITEMS),
+            "submit": {"type":"object"},
+            "screenshot": {"type":"boolean"},
+            "list": {"type":"object"},
+            "next": {"type":"object"},
+            "maxPages": {"type":"integer","minimum":1,"maximum":MAX_WORKFLOW_PAGES}
+        }),
+        vec!["sessionId", "pageId", "workflow"],
+    )
+}
+
+/// Most pages `collectLinks` reads in one call.
+pub(crate) const MAX_WORKFLOW_PAGES: u32 = 20;
+/// Most links `collectLinks` returns.
+pub(crate) const MAX_WORKFLOW_LINKS: usize = 512;
+
 pub(crate) fn intent_wait_for_state_schema() -> (Value, Vec<&'static str>) {
     (
         intent_scope(json!({
@@ -774,6 +799,13 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("download_url", "saveAs") => "Absolute path to save the file to.",
         ("download_url", "expectedContentType") => "Content type the response must have.",
         ("intent_complete_form", "fields") => "Fields to fill, in order.",
+        ("workflow_run", "workflow") => "Steps to run.",
+        ("workflow_run", "url") => "Opened first.",
+        ("workflow_run", "fields") => "intent_complete_form or intent_extract fields.",
+        ("workflow_run", "submit") => "intent_submit_and_verify args; omit to not submit.",
+        ("workflow_run", "list") => "Target of the link list.",
+        ("workflow_run", "next") => "intent_follow args for the next page.",
+        ("workflow_run", "maxPages") => "Pages to read; default 1.",
         ("intent_enter_code", "code") => "The code. Spaces and dashes are ignored.",
         ("intent_enter_code", "hints") => "Names the code field; omit to use the one the page shows.",
         ("intent_enter_code", "submit") => "Press the step's submit control; default true.",
@@ -1385,6 +1417,26 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // like every primitive/intent command below, so their real output
         // is `CommandOutcome` plus `workflowId`, not a `PageState`.
         "form_snapshot" => output_ref("FormSnapshot"),
+        "workflow_run" => object(
+            json!({
+                "status": command_outcome_properties()["status"].clone(),
+                "workflow": {"type":"string","enum":["fillForm","extractPage","collectLinks"]},
+                "workflowId": id(),
+                "steps": array(
+                    object(json!({"tool":string(1, 64),"result":{"type":"object"}}), &["tool", "result"]),
+                    MAX_COLLECTION_ITEMS,
+                ),
+                "stoppedAt": string(1, 64),
+                "error": {"type":"object"},
+                "evidence": {"type":"array","items":{"type":"object"}},
+                "links": array(
+                    object(json!({"name":string(0, MAX_STRING_BYTES),"url":string(1, MAX_URL_BYTES)}), &["name", "url"]),
+                    MAX_WORKFLOW_LINKS,
+                ),
+                "pages": {"type":"integer","minimum":0,"maximum":MAX_WORKFLOW_PAGES}
+            }),
+            &["status", "workflow", "workflowId", "steps"],
+        ),
         // Every other tool (~30) submits a command envelope through `submit_envelope`,
         // which returns the envelope's `CommandOutcome` with `workflowId` inserted at
         // the top level. Stays self-contained (no `$ref`, no `$defs`) for the reason
@@ -1419,7 +1471,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
 /// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
 /// advertise-only collapses for tools whose nested `$defs` dominate the entry
 /// (`form_snapshot`, `workflow_recover`, `recovery_status`, `page_open`,
-/// `session_create`, `session_list`, `checkpoint_save`); wire types stay
+/// `session_create`, `session_list`, `checkpoint_save`, `workflow_run`); wire types stay
 /// unchanged. Every entry also drops the constant `$schema` URL (see
 /// [`advertised_tool_schema`]).
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
@@ -1465,6 +1517,9 @@ fn advertised_output_shape(name: &str) -> Value {
             json!({"sessions":array(json!({"type":"object"}), MAX_COLLECTION_ITEMS)}),
             &["sessions"],
         ),
+        "workflow_run" => {
+            json!({"type":"object","required":["status", "workflow", "workflowId", "steps"]})
+        }
         "recovery_status" => {
             let mut schema = object(
                 json!({

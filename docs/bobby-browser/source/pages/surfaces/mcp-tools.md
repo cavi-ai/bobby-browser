@@ -93,6 +93,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `wait_for` | `browser:mutate` | Wait for a page condition |
 | `workflow_observe` | `browser:mutate` (+ `page:read` with `includeForms`) | Read page context for a goal |
 | `workflow_recover` | `recovery:write` | Resume or restart from the last verified checkpoint |
+| `workflow_run` | `browser:mutate`, `intent:execute` (+ what each step's tool needs) | Run a named workflow of existing tools in one call |
 | `workflow_start` | `session:read`, `session:write`, `page:write` (+ `browser:mutate` with `url`) | Create session, page and workflow in one call |
 
 ## Parameters
@@ -164,6 +165,20 @@ Boundary tools (`click_and_wait_for_*`, `intent_follow` with `boundary`, `intent
 
 Intent tools find controls by purpose and verify the result. Behavior and parameters are in [Intent commands](../guides/intents.md). All of them accept an optional `idempotencyKey`.
 
+### Named workflows
+
+`workflow_run` runs a fixed sequence of the tools above in one call, on the page its `workflowHandle` (or `sessionId` and `pageId`) names. Every step is a normal call of its tool, with that tool's capability checks, guards and evidence, under one `workflowId`. `url`, when set, is opened first with `navigate`.
+
+| `workflow` | Parameters | Steps |
+|---|---|---|
+| `fillForm` | `fields` (required, as in `intent_complete_form`), `submit` (`purpose`, `hints`, `expectedState`), `screenshot` | `intent_complete_form`, then `intent_submit_and_verify` when `submit` is set |
+| `extractPage` | `fields` (required, as in `intent_extract`) | `intent_extract` |
+| `collectLinks` | `list` (required, a target), `next` (`purpose`, `hints`, `expectedState`), `maxPages` (1 to 20, default 1) | `a11y_snapshot` of `list`, then `intent_follow` of `next`, per page |
+
+A `fillForm` without `submit` stops after filling, so the form can be checked before it is sent. Field values take every `intent_complete_form` kind, so a sign-in form takes `credential` or `passwordManagerFill` and an upload takes `setFiles`.
+
+The result has `status`, `workflow`, `workflowId` and `steps`, each `{tool, result}` with that call's result. The run stops at the first step that does not complete: `stoppedAt` names its tool, and `status` and `error` are that step's. `evidence` lists every screenshot the steps took. `collectLinks` adds `links` (`{name, url}`, in page order, each URL once, at most 512) and `pages`; it ends without an error when `next` is not on the page.
+
 ### Recovery, events and jobs
 
 | Tool | Parameters |
@@ -185,7 +200,7 @@ See [Events and recovery](../guides/events-recovery.md).
 |---|---|
 | `explore` | Observation, lifecycle, navigation, click, type, upload, `intent_complete_form`, `intent_submit_and_verify` |
 | `act` | Page-changing tools, `command_execute`, `evaluate_javascript`, jobs |
-| `intent` | The `intent_*` family |
+| `intent` | The `intent_*` family and `workflow_run` |
 | `verify` | Evidence, checkpoints, recovery, jobs |
 | `full` | Everything the caller may use |
 

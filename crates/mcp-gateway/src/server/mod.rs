@@ -47,6 +47,7 @@ mod dispatch_lifecycle;
 mod dispatch_page_ops;
 mod dispatch_primitives;
 mod dispatch_workflow;
+mod dispatch_workflow_run;
 mod tool_dispatch;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
