@@ -823,7 +823,7 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         (_, "executionPolicy") => "Opt-in features.",
         (_, "zigzagzig") => "All flags plus recovery.",
         (_, "toolset") => "Phase to list.",
-        (_, "clearFirst") => "Clear first.",
+        (_, "clearFirst") => "Replace the text (default); false appends.",
         (_, "paths") => "Absolute file paths.",
         (_, "controlId") => "form_snapshot control id.",
         (_, "expression") => "JavaScript expression to evaluate.",

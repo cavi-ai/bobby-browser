@@ -193,6 +193,10 @@ enum CliCommand {
         /// Override the provider model (required to select a non-default MLX model)
         #[arg(long, value_name = "MODEL")]
         vision_model: Option<String>,
+        /// OpenAI-compatible server that holds the MLX model, such as one
+        /// `mlx-agent serve` started (selects mlx; an empty value clears it)
+        #[arg(long, value_name = "URL")]
+        vision_model_server: Option<String>,
         /// Explicitly allow downloading the selected MLX model
         #[arg(long, requires = "vision_model")]
         download_vision_model: bool,
@@ -873,6 +877,7 @@ pub async fn run() -> Result<()> {
             no_vision,
             vision_provider,
             vision_model,
+            vision_model_server,
             download_vision_model,
             collect_training_data,
             no_collect_training_data,
@@ -902,6 +907,7 @@ pub async fn run() -> Result<()> {
                     no_vision,
                     vision_provider,
                     vision_model,
+                    vision_model_server,
                     download_vision_model,
                     collect_training_data,
                     no_collect_training_data,

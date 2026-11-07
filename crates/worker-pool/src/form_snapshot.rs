@@ -432,6 +432,8 @@ fn control_kind(control: &RawFormControl) -> FormControlKind {
         Some("combobox") => return FormControlKind::Combobox,
         Some("listbox") => return FormControlKind::Listbox,
         Some("button") => return FormControlKind::Other,
+        Some("checkbox") => return FormControlKind::Checkbox,
+        Some("radio") => return FormControlKind::Radio,
         _ => {}
     }
     if control.content_editable {
@@ -775,7 +777,7 @@ pub fn decode_form_control(
     Ok(control)
 }
 
-const CONTROL_SELECTOR: &str = r#"input,textarea,select,button,[contenteditable="true"],[role="switch"],[role="combobox"],[role="listbox"],[role="button"]"#;
+const CONTROL_SELECTOR: &str = r#"input,textarea,select,button,[contenteditable]:not([contenteditable="false"]),[role="switch"],[role="combobox"],[role="listbox"],[role="button"],[role="checkbox"],[role="radio"]"#;
 
 const RAW_CONTROL_FUNCTIONS: &str = r#"const clip=(v,n)=>{let s=String(v??'').replace(/[\u0000-\u001f\u007f-\u009f]/gu,' ');const enc=new TextEncoder();let bytes=enc.encode(s).length;while(bytes>n&&s){s=s.slice(0,Math.max(0,Math.floor(s.length*n/bytes)));bytes=enc.encode(s).length}return s};
 const text=(v,n=2048)=>{const s=clip(v,n).trim().replace(/\s+/gu,' ');return s||null};

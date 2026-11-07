@@ -393,12 +393,20 @@ fn score<'a>(
         .as_ref()
         .filter(|_| !crate::is_stamped_control_target(target));
     if let Some(wanted) = name {
-        if comparable_name(candidate.name.as_deref().unwrap_or_default()) != comparable_name(wanted)
-        {
+        let actual = candidate.name.as_deref().unwrap_or_default();
+        if comparable_name(actual) != comparable_name(wanted) {
             return None;
         }
-        score += 50;
-        reasons.push("exactAccessibleName".into());
+        // A name equal only once its required marker is dropped ranks below
+        // the exact one.
+        let collapsed = |name: &str| name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed(actual) == collapsed(wanted) {
+            score += 50;
+            reasons.push("exactAccessibleName".into());
+        } else {
+            score += 49;
+            reasons.push("accessibleNameWithoutMarker".into());
+        }
     }
     exact!(
         target.label.as_ref(),

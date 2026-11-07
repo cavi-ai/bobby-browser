@@ -904,6 +904,8 @@ pub struct InstallOptions {
     pub no_vision: bool,
     pub vision_provider: Option<String>,
     pub vision_model: Option<String>,
+    /// OpenAI-compatible server holding the MLX model; empty clears it.
+    pub vision_model_server: Option<String>,
     pub download_vision_model: bool,
     pub collect_training_data: bool,
     pub no_collect_training_data: bool,
@@ -935,6 +937,7 @@ fn use_install_defaults(options: &InstallOptions) -> bool {
         && !options.no_vision
         && options.vision_provider.is_none()
         && options.vision_model.is_none()
+        && options.vision_model_server.is_none()
         && !options.download_vision_model
         && !options.collect_training_data
         && !options.no_collect_training_data
@@ -969,11 +972,16 @@ const MLX_MODELS: [(&str, &str); 5] = [
     ("Large (32B)", "mlx-community/Qwen2.5-VL-32B-Instruct-4bit"),
 ];
 
+/// Address `mlx-agent serve` listens on by default.
+const DEFAULT_MODEL_SERVER: &str = "http://127.0.0.1:8083";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VisionInstallState {
     enabled: bool,
     provider: String,
     profile: config::VisionProviderConfig,
+    /// Server holding the MLX model; unset loads it in the managed server.
+    model_server: Option<String>,
     collect_training_data: bool,
     training_data_dir: PathBuf,
 }
@@ -986,6 +994,7 @@ impl Default for VisionInstallState {
             profile: crate::vision_connect::preset("ollama")
                 .expect("ollama preset")
                 .1,
+            model_server: None,
             collect_training_data: false,
             training_data_dir: "data/vision".into(),
         }
@@ -1001,8 +1010,16 @@ impl VisionInstallState {
         if self.provider != provider {
             self.provider = provider;
             self.profile = profile;
+            self.model_server = None;
         }
         Ok(())
+    }
+
+    fn summary(&self) -> String {
+        match &self.model_server {
+            Some(url) => format!("{} / {} via {url}", self.provider, self.profile.model),
+            None => format!("{} / {}", self.provider, self.profile.model),
+        }
     }
 }
 
@@ -1263,6 +1280,27 @@ fn configure_mlx_model_interactive(state: &mut VisionInstallState) -> Result<boo
     }
 }
 
+/// Ask for the model server's address and the model it serves.
+fn configure_model_server_interactive(state: &mut VisionInstallState) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let url = dialoguer::Input::<String>::with_theme(&theme)
+        .with_prompt("Model server URL")
+        .default(
+            state
+                .model_server
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL_SERVER.to_owned()),
+        )
+        .interact_text()?;
+    let model = dialoguer::Input::<String>::with_theme(&theme)
+        .with_prompt("Model the server serves (its ID or local path)")
+        .default(state.profile.model.clone())
+        .interact_text()?;
+    state.model_server = Some(url.trim().to_owned());
+    state.profile.model = model.trim().to_owned();
+    Ok(())
+}
+
 fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
     loop {
         let training = if state.collect_training_data {
@@ -1274,16 +1312,18 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
             "Off".to_owned(),
             "Ollama (recommended, portable)".to_owned(),
             "MLX-VLM (Apple Silicon)".to_owned(),
+            "MLX on a model server (mlx-agent serve)".to_owned(),
             "LM Studio".to_owned(),
             "OpenAI".to_owned(),
             format!("Training data collection: {training}"),
             "Back".to_owned(),
         ];
-        let default = match state.provider.as_str() {
-            "ollama" => 1,
-            "mlx" => 2,
-            "lmstudio" => 3,
-            "openai" => 4,
+        let default = match (state.provider.as_str(), &state.model_server) {
+            ("ollama", _) => 1,
+            ("mlx", None) => 2,
+            ("mlx", Some(_)) => 3,
+            ("lmstudio", _) => 4,
+            ("openai", _) => 5,
             _ => 1,
         };
         let choice = Select::with_theme(&ColorfulTheme::default())
@@ -1296,11 +1336,11 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
                 state.enabled = false;
                 return Ok(true);
             }
-            1 | 3 | 4 => {
+            1 | 4 | 5 => {
                 let previous = state.clone();
                 let provider = match choice {
                     1 => "ollama",
-                    3 => "lmstudio",
+                    4 => "lmstudio",
                     _ => "openai",
                 };
                 state.select_provider(provider)?;
@@ -1313,13 +1353,19 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
             2 => {
                 let previous = state.clone();
                 state.select_provider("mlx")?;
+                state.model_server = None;
                 if configure_mlx_model_interactive(state)? {
                     return Ok(true);
                 }
                 *state = previous;
             }
-            5 => state.collect_training_data = !state.collect_training_data,
-            6 => return Ok(false),
+            3 => {
+                state.select_provider("mlx")?;
+                configure_model_server_interactive(state)?;
+                return Ok(true);
+            }
+            6 => state.collect_training_data = !state.collect_training_data,
+            7 => return Ok(false),
             _ => unreachable!(),
         }
     }
@@ -1332,15 +1378,15 @@ fn apply_vision_install(config_path: &Path, state: &VisionInstallState) -> Resul
         state.enabled,
         &state.provider,
         profile,
+        state.model_server.as_deref(),
         state.collect_training_data,
         &state.training_data_dir,
     )
     .map_err(|error| anyhow!("{error}"))?;
     Ok(format!(
-        "vision {} with {} / {} (training collection {}) in {}",
+        "vision {} with {} (training collection {}) in {}",
         if state.enabled { "enabled" } else { "disabled" },
-        state.provider,
-        state.profile.model,
+        state.summary(),
         if state.collect_training_data {
             "on"
         } else {
@@ -1378,6 +1424,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         no_vision,
         vision_provider,
         vision_model,
+        vision_model_server,
         download_vision_model,
         collect_training_data,
         no_collect_training_data,
@@ -1408,8 +1455,10 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let yes = *yes;
     let restart_runtime = *restart_runtime;
     let disconnect_agents = *disconnect_agents;
-    let readiness_requested =
-        vision_provider.is_some() || vision_model.is_some() || download_vision_model;
+    let readiness_requested = vision_provider.is_some()
+        || vision_model.is_some()
+        || vision_model_server.is_some()
+        || download_vision_model;
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
     let use_defaults = use_install_defaults(&options);
@@ -1417,6 +1466,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         || no_vision
         || vision_provider.is_some()
         || vision_model.is_some()
+        || vision_model_server.is_some()
         || download_vision_model
         || collect_training_data
         || no_collect_training_data;
@@ -1433,8 +1483,26 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         && !vision_named
         && success_screenshots_flag.is_none()
         && !force;
-    if no_vision && (vision_provider.is_some() || vision_model.is_some() || download_vision_model) {
-        anyhow::bail!("--no-vision cannot be combined with provider, model, or download flags");
+    if no_vision
+        && (vision_provider.is_some()
+            || vision_model.is_some()
+            || vision_model_server.is_some()
+            || download_vision_model)
+    {
+        anyhow::bail!(
+            "--no-vision cannot be combined with provider, model, model server, or download flags"
+        );
+    }
+    if vision_model_server
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+        && vision_provider
+            .as_deref()
+            .is_some_and(|provider| !provider.trim().eq_ignore_ascii_case("mlx"))
+    {
+        anyhow::bail!(
+            "--vision-model-server serves the mlx provider; drop --vision-provider or pass mlx"
+        );
     }
     let mut vision_state = VisionInstallState {
         enabled: !no_vision,
@@ -1455,6 +1523,9 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         if let Some((provider, profile)) = existing.vision.selected_provider() {
             vision_state.provider = provider.to_owned();
             vision_state.profile = profile.clone();
+            if provider.eq_ignore_ascii_case("mlx") {
+                vision_state.model_server = existing.vision.model_server.clone();
+            }
             model_selected = vision_model.is_some()
                 || vision_provider
                     .as_deref()
@@ -1463,6 +1534,14 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     }
     if let Some(provider) = vision_provider.as_deref() {
         vision_state.select_provider(provider)?;
+    }
+    match vision_model_server.as_deref().map(str::trim) {
+        Some("") => vision_state.model_server = None,
+        Some(url) => {
+            vision_state.select_provider("mlx")?;
+            vision_state.model_server = Some(url.to_owned());
+        }
+        None => {}
     }
     if let Some(model) = vision_model.as_deref() {
         if model.trim().is_empty() {
@@ -1482,9 +1561,15 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         && vision_model.is_none()
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if vision_state.model_server.is_some() && download_vision_model {
+        anyhow::bail!(
+            "--download-vision-model does not apply to a model server, which holds its model"
+        );
+    }
     if configure_vision
         && vision_state.enabled
         && vision_state.provider == "mlx"
+        && vision_state.model_server.is_none()
         && !interactive
         && !pick_model
     {
@@ -1708,7 +1793,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             labels.push(format!(
                 "Vision: {}{}",
                 if vision_state.enabled {
-                    format!("{} / {}", vision_state.provider, vision_state.profile.model)
+                    vision_state.summary()
                 } else {
                     "off".to_owned()
                 },
@@ -1760,7 +1845,9 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     }
 
     if pick_model {
-        if vision_state.provider == "mlx" {
+        if vision_state.model_server.is_some() {
+            configure_model_server_interactive(&mut vision_state)?;
+        } else if vision_state.provider == "mlx" {
             if !configure_mlx_model_interactive(&mut vision_state)? {
                 println!("nothing changed");
                 return Ok(());
@@ -1841,18 +1928,26 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     }
     if vision_state.enabled && (readiness_requested || interactive || pick_model) {
         let profile = &vision_state.profile;
-        match crate::vision_readiness::check_provider_readiness(
-            &vision_state.provider,
-            profile,
-            &crate::vision_readiness::ReadinessOptions {
-                timeout: std::time::Duration::from_secs(45),
-                allow_download: false,
-                allow_start: true,
-                python: config::AppConfig::load(&config_path)
-                    .ok()
-                    .and_then(|loaded| loaded.vision.python),
-            },
-        )? {
+        let outcome = match &vision_state.model_server {
+            Some(url) => crate::vision_readiness::check_model_server_readiness(
+                url,
+                &profile.model,
+                std::time::Duration::from_secs(5),
+            ),
+            None => crate::vision_readiness::check_provider_readiness(
+                &vision_state.provider,
+                profile,
+                &crate::vision_readiness::ReadinessOptions {
+                    timeout: std::time::Duration::from_secs(45),
+                    allow_download: false,
+                    allow_start: true,
+                    python: config::AppConfig::load(&config_path)
+                        .ok()
+                        .and_then(|loaded| loaded.vision.python),
+                },
+            )?,
+        };
+        match outcome {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
                 println!("ok: configured and readiness-tested {provider} / {model}");
             }

@@ -569,6 +569,33 @@ fn pull_ollama_model(model: &str) -> bool {
         .is_some_and(|status| status.success())
 }
 
+/// Whether the OpenAI-compatible server holding the `mlx` model answers its
+/// models list.
+pub(crate) fn check_model_server_readiness(
+    url: &str,
+    model: &str,
+    timeout: Duration,
+) -> ReadinessOutcome {
+    let server = VisionProviderConfig {
+        base_url: format!("{}/v1", url.trim().trim_end_matches('/')),
+        model: model.to_owned(),
+        api_key_env: None,
+    };
+    match openai_compatible_models_probe("mlx", &server, None, timeout) {
+        ProbeResult::Reachable { .. } => ReadinessOutcome::Ready {
+            provider: "mlx".to_owned(),
+            model: model.to_owned(),
+        },
+        ProbeResult::Unreachable => ReadinessOutcome::NeedsAction {
+            provider: "mlx".to_owned(),
+            model: model.to_owned(),
+            detail: format!(
+                "model server is not reachable at {url}; start it, for example with `mlx-agent serve`"
+            ),
+        },
+    }
+}
+
 /// Starts the MLX vision server itself and waits for it to accept connections:
 /// a proxy binds before its server has loaded anything, so it proves nothing.
 fn check_mlx_readiness(

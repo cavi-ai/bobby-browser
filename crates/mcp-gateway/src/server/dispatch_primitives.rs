@@ -201,6 +201,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // Text replaces what the field holds; a lone line break presses
+                // Enter on it.
+                let clear_first = input
+                    .clear_first
+                    .unwrap_or_else(|| !input.value.trim_matches(['\n', '\r']).is_empty());
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
@@ -210,7 +215,7 @@ impl Server {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
                         value: input.value,
-                        clear_first: input.clear_first.unwrap_or(false),
+                        clear_first,
                         expected_url: input.expected_url,
                     }),
                 );

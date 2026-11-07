@@ -153,6 +153,7 @@ bobby context forget --profile <profile-id> <site>
 bobby vision connect --provider ollama
 bobby install --vision --vision-provider ollama
 bobby install --yes --vision-provider ollama --vision-model qwen3-vl:8b-instruct
+bobby install --yes --vision-model-server http://127.0.0.1:8083 --vision-model /path/to/served-model
 bobby vision connect --yes --provider mlx
 bobby vision connect --yes --provider mlx --activate --download-model
 bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised

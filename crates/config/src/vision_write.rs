@@ -111,11 +111,13 @@ fn apply_vision_platform(
 /// Persist installer-owned vision state while retaining configured provider
 /// profiles when vision is disabled. The active node is the sole on/off
 /// switch; provider/model choices remain available for reversible re-enable.
+/// `model_server` sets `[vision].model_server`, and `None` removes it.
 pub fn set_vision_install_state(
     path: &Path,
     enabled: bool,
     provider: &str,
     profile: &VisionProviderConfig,
+    model_server: Option<&str>,
     collect_training_data: bool,
     training_data_dir: &Path,
 ) -> Result<(), ConfigWriteError> {
@@ -137,6 +139,12 @@ pub fn set_vision_install_state(
     let vision = ensure_table(doc.as_table_mut(), "vision")?;
     vision["collect_training_data"] = value(collect_training_data);
     vision["training_data_dir"] = value(training_data_dir.to_string_lossy().as_ref());
+    match model_server {
+        Some(url) => vision["model_server"] = value(url),
+        None => {
+            vision.remove("model_server");
+        }
+    }
     if !enabled {
         if let Some(nodes) = doc.get_mut("nodes").and_then(Item::as_table_mut) {
             nodes.remove("vision");
@@ -413,8 +421,16 @@ mod tests {
             api_key_env: None,
         };
 
-        set_vision_install_state(&path, false, "ollama", &profile, true, Path::new("train"))
-            .unwrap();
+        set_vision_install_state(
+            &path,
+            false,
+            "ollama",
+            &profile,
+            None,
+            true,
+            Path::new("train"),
+        )
+        .unwrap();
         let off = AppConfig::load(&path).unwrap();
         assert!(!off.nodes.contains_key("vision"));
         assert_eq!(off.vision.provider.as_deref(), Some("ollama"));
@@ -427,6 +443,7 @@ mod tests {
             true,
             "ollama",
             &profile,
+            None,
             false,
             Path::new("data/vision"),
         )
