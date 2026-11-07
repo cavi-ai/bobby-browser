@@ -5,6 +5,7 @@ Canonical usage:
     from providers import create_provider
     provider = create_provider()                     # env-driven default
     provider = create_provider("mlx-vlm")            # direct local MLX
+    provider = create_provider("mlx-server")         # MLX model on an OpenAI-compatible server
     provider = create_provider("ollama")             # Ollama HTTP
     provider = create_provider("lmstudio")           # LM Studio HTTP
 
@@ -13,6 +14,7 @@ Model and endpoint overrides via env:
 
     VISION_PROVIDER=mlx-vlm
     VISION_MLX_MODEL=mlx-community/Qwen2.5-VL-7B-Instruct-4bit
+    VISION_MLX_SERVER_URL=http://127.0.0.1:8083
     VISION_OLLAMA_MODEL=qwen3-vl:8b-instruct
     VISION_OLLAMA_BASE_URL=http://127.0.0.1:11434
     VISION_LMSTUDIO_MODEL=local-model
@@ -27,6 +29,7 @@ import os
 from .base import ProposeRequest, ProposeResponse, VisionProvider
 from .lmstudio_provider import LmStudioProvider, DEFAULT_BASE_URL as LMSTUDIO_URL, DEFAULT_MODEL as LMSTUDIO_MODEL
 from .mlx_vlm_provider import MlxVlmProvider, DEFAULT_MODEL as MLX_MODEL
+from .mlx_server_provider import MlxServerProvider, DEFAULT_BASE_URL as MLX_SERVER_URL
 from .ollama_provider import OllamaProvider, DEFAULT_BASE_URL as OLLAMA_URL, DEFAULT_MODEL as OLLAMA_MODEL
 from .v1_provider import MlxV1Provider, DEFAULT_MODEL as V1_MODEL
 
@@ -36,6 +39,7 @@ DEFAULT_PROVIDER = "mlx-vlm"
 
 _PROVIDERS = {
     "mlx-vlm": MlxVlmProvider,
+    "mlx-server": MlxServerProvider,
     "ollama": OllamaProvider,
     "lmstudio": LmStudioProvider,
     "v1": MlxV1Provider,
@@ -48,6 +52,11 @@ def create_provider(kind: str | None = None, model: str | None = None) -> Vision
 
     if kind == "mlx-vlm":
         return MlxVlmProvider(model_name=model or os.environ.get("VISION_MLX_MODEL", MLX_MODEL))
+    if kind == "mlx-server":
+        return MlxServerProvider(
+            model_name=model or os.environ.get("VISION_MLX_MODEL", MLX_MODEL),
+            base_url=os.environ.get("VISION_MLX_SERVER_URL", MLX_SERVER_URL),
+        )
     if kind == "ollama":
         return OllamaProvider(
             model=os.environ.get("VISION_OLLAMA_MODEL", OLLAMA_MODEL),
@@ -74,6 +83,7 @@ __all__ = [
     "ProposeRequest",
     "ProposeResponse",
     "MlxVlmProvider",
+    "MlxServerProvider",
     "OllamaProvider",
     "LmStudioProvider",
     "MlxV1Provider",

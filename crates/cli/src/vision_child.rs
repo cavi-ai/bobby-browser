@@ -297,6 +297,9 @@ pub(crate) fn configure_vision_proxy_command(
         cmd.arg("--upstream").arg("ollama");
     } else if is_mlx {
         cmd.arg("--upstream").arg("mlx").arg("--spawn-server");
+        if let Some(url) = &vision.model_server {
+            cmd.arg("--model-server").arg(url);
+        }
     } else {
         cmd.arg("--upstream").arg("openai");
     }
@@ -420,6 +423,37 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--upstream", "mlx"]));
         assert!(args.contains(&"--spawn-server".to_owned()));
         assert!(!args.iter().any(|arg| arg.starts_with("--text")));
+    }
+
+    #[test]
+    fn a_model_server_reaches_the_mlx_proxy_and_no_other() {
+        let decision = VisionChildDecision {
+            should_spawn: true,
+            bind: "127.0.0.1:9100".parse().unwrap(),
+            path: "/vision".into(),
+            reason: "test".into(),
+        };
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "vision-model".into(),
+            api_key_env: None,
+        };
+        let vision = VisionConfig {
+            model_server: Some("http://127.0.0.1:8083".into()),
+            ..VisionConfig::default()
+        };
+        let args = |provider: &str| {
+            let mut command = Command::new("bobby");
+            configure_vision_proxy_command(&mut command, &decision, provider, &profile, &vision);
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(args("mlx")
+            .windows(2)
+            .any(|pair| pair == ["--model-server", "http://127.0.0.1:8083"]));
+        assert!(!args("ollama").contains(&"--model-server".to_owned()));
     }
 
     fn proxy_args(text_tier: &VisionTextTierConfig) -> Vec<String> {

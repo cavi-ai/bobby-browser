@@ -82,6 +82,11 @@ pub struct VisionConfig {
     /// text tier). Unset runs `python3` from PATH.
     #[serde(default)]
     pub python: Option<std::path::PathBuf>,
+    /// OpenAI-compatible server that already holds the `mlx` provider's
+    /// model, such as one `mlx-agent serve` started. The managed MLX vision
+    /// server sends each request there instead of loading the model itself.
+    #[serde(default, alias = "modelServer")]
+    pub model_server: Option<String>,
 }
 
 impl Default for VisionConfig {
@@ -107,6 +112,7 @@ impl Default for VisionConfig {
             text_tier: None,
             detector_model: None,
             python: None,
+            model_server: None,
         }
     }
 }

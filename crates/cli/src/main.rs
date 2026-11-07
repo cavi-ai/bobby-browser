@@ -393,6 +393,10 @@ enum CliCommand {
         /// Python interpreter for the spawned vision servers (env BOBBY_VISION_PYTHON; default python3 on PATH)
         #[arg(long)]
         python: Option<PathBuf>,
+        /// OpenAI-compatible server the spawned MLX vision server sends its
+        /// requests to, in place of loading --model itself
+        #[arg(long, requires = "spawn_server")]
+        model_server: Option<String>,
         /// Enable training data collection (logs all vision proposals to disk)
         #[arg(long)]
         collect_training_data: bool,
@@ -998,6 +1002,7 @@ pub async fn run() -> Result<()> {
             spawn_server,
             server_script,
             python,
+            model_server,
             collect_training_data,
             training_data_dir,
             api_key_env,
@@ -1016,6 +1021,7 @@ pub async fn run() -> Result<()> {
                 spawn_server,
                 server_script,
                 python,
+                model_server,
                 collect_training_data,
                 training_data_dir,
                 api_key_env,
@@ -1237,6 +1243,7 @@ struct VisionProxyRunArgs {
     spawn_server: bool,
     server_script: Option<PathBuf>,
     python: Option<PathBuf>,
+    model_server: Option<String>,
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
@@ -1282,6 +1289,7 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         spawn_server: provider.eq_ignore_ascii_case("mlx"),
         server_script: None,
         python: config.vision.python.clone(),
+        model_server: config.vision.model_server.clone(),
         collect_training_data: config.vision.collect_training_data,
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
@@ -1369,6 +1377,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         spawn_server,
         server_script,
         python,
+        model_server,
         collect_training_data,
         training_data_dir,
         api_key_env,
@@ -1426,11 +1435,17 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                 let base_url = vision_base_url
                     .unwrap_or_else(|| vision_proxy::MLX_DEFAULT_BASE_URL.to_string());
                 if spawn_server {
+                    let provider = if model_server.is_some() {
+                        "mlx-server"
+                    } else {
+                        "mlx-vlm"
+                    };
                     _python_child = Some(spawn_vision_server(
                         &base_url,
-                        "mlx-vlm",
+                        provider,
                         &model,
                         None,
+                        model_server.as_deref(),
                         server_script.clone(),
                         python.as_deref(),
                     )?);
@@ -1456,6 +1471,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                     "v1",
                     &model,
                     text_adapter.as_deref(),
+                    None,
                     server_script,
                     python.as_deref(),
                 )?);
@@ -1509,12 +1525,14 @@ pub(crate) fn vision_python(configured: Option<&Path>) -> PathBuf {
 }
 
 /// Spawn the canonical Python vision server for `provider` as a managed child.
-/// The child is killed when it goes out of scope.
+/// `model_server` is the OpenAI-compatible server an `mlx-server` provider
+/// sends its requests to. The child is killed when it goes out of scope.
 fn spawn_vision_server(
     base_url: &str,
     provider: &str,
     model: &str,
     adapter: Option<&Path>,
+    model_server: Option<&str>,
     server_script: Option<PathBuf>,
     python: Option<&Path>,
 ) -> Result<ManagedPythonServer> {
@@ -1546,6 +1564,9 @@ fn spawn_vision_server(
         .arg(model);
     if let Some(adapter) = adapter {
         cmd.env("VISION_V1_ADAPTER", adapter);
+    }
+    if let Some(url) = model_server {
+        cmd.env("VISION_MLX_SERVER_URL", url);
     }
     // Homebrew Python + MLX both link libomp; without this the child dies
     // on startup with a duplicate-runtime abort.
