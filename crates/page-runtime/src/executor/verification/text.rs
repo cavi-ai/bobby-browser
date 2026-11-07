@@ -76,20 +76,35 @@ impl CommandVerifier for Text {
                     matches!(item, Evidence::Configuration { name, value }
                         if name == "typedControlReplaced" && value == "true")
                 });
-                let inspected_control = if read_before_submit || replaced {
-                    Ok(Vec::new())
-                } else {
+                let inspect = |target: Option<types::TargetSpec>| async {
                     worker_pool::observation_or_default(lease.worker().observation())
                         .inspect(
                             page_id,
                             &InspectCommand {
                                 selector: (!command.selector.is_empty())
                                     .then(|| command.selector.clone()),
-                                target: command.target.clone(),
+                                target,
                                 include_html: false,
                             },
                         )
                         .await
+                };
+                let inspected_control = if read_before_submit || replaced {
+                    Ok(Vec::new())
+                } else {
+                    // The worker typed into the text box an ambiguous
+                    // role-less target narrows to; the read narrows the same.
+                    match inspect(command.target.clone()).await {
+                        Err(error) if error.code == ErrorCode::TargetAmbiguous => match command
+                            .target
+                            .as_ref()
+                            .and_then(worker_pool::textbox_target)
+                        {
+                            Some(textbox) => inspect(Some(textbox)).await.map_err(|_| error),
+                            None => Err(error),
+                        },
+                        inspected => inspected,
+                    }
                 };
                 let verification = match inspected_control {
                     Ok(verification) => verification,

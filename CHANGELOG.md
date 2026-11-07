@@ -8,6 +8,8 @@
 - `[vision].assist_profiles` names browser profiles whose sessions always run with vision assist, so their escalations reach the vision corpus.
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 - `[vision].model_server` sends the managed MLX vision server's requests to an OpenAI-compatible server that holds the model, such as one `mlx-agent serve` started; `bobby install` sets it with `--vision-model-server` or from its vision menu.
+- On Chromium, a button that opens a menu or listbox takes `selectOne` and `selectMany`, which check its menu items and close the menu.
+- A `form_snapshot` file control's state lists `names`: the files it holds or, holding none, the file names its widget shows.
 - `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
 
 ### Changed
@@ -18,6 +20,7 @@
 - A `form_snapshot` control ID stays with its control in later snapshots of the page, and an unnamed control gets a target that `controlId`, `control_action` and intent `hints.attributes` accept.
 - Intent hints with a `role` and an `ordinal` but no name pick the control by position among that role instead of using `purpose` as its name.
 - `type_text` replaces the field's text unless `clearFirst` is false; a value of only line breaks presses Enter without clearing.
+- On Chromium, `upload_files` and `setFiles` refuse a file control that already holds or shows another file until it is cleared.
 
 ### Fixed
 
@@ -35,7 +38,8 @@
 - `boundaryAlreadyExecuted` guards a submit control on its own page only, so one workflow can submit the same control on another page.
 - A screenshot too large to inline returns a downscaled inline preview that names its scale; the artifact keeps the full image.
 - `intent_enter_code` fills split code boxes when only the first box has a name, typing the code from it and reading every box back.
-- On Chromium, `selectOne` on an ARIA combobox, including a text combobox that filters as it is typed in, clicks the option whose text is the value.
+- On Chromium, `selectOne` on an ARIA combobox or a text box, including one that filters as it is typed in or whose suggestions have no option role, clicks the option whose text is the value; a value no option reads fails listing every option offered.
+- A role-less `type_text` target that also matches a text box's wrappers types into the text box.
 - An `intent_extract` vision fallback goes to the image provider with the screenshot, never to the text tier, which cannot read the value.
 - An unlabeled select is not named by the text of its options.
 - A vision click lands on its control on a display with more than one device pixel per CSS pixel.

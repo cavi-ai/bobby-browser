@@ -970,9 +970,7 @@ async fn type_into_candidate_rejects_incompatible_control_kind_without_mutation(
         &fill(
             "Account field",
             "textbox",
-            ControlAction::SelectOne {
-                value: "runtime-ca".into(),
-            },
+            ControlAction::SetChecked { checked: true },
         ),
         &PageId::new(),
         &browser,

@@ -87,6 +87,8 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
       // An input's type is a fixed vocabulary, kept even when page metadata is
       // redacted and normalized the way the accessibility tree reports it.
       if(element.localName==='input')attributes.type=String(element.type||'text').toLowerCase();
+      const popup=element.getAttribute('aria-haspopup');
+      if(['menu','listbox','true'].includes(popup))attributes['aria-haspopup']=popup;
       const aria=element.getAttribute('aria-label');
       const uniqueId=Boolean(element.id)&&element.getRootNode().querySelector('#'+CSS.escape(element.id))===element;
       const css=publicMetadata?path(element):uniqueId?`#${CSS.escape(element.id)}`:aria?`[aria-label="${aria.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"]`:tag;

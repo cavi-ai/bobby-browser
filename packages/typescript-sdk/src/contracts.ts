@@ -237,7 +237,7 @@ export type FormControlOperation = "setText" | "setChecked" | "selectOne" | "sel
 export type FormValidityFlag = "valueMissing" | "typeMismatch" | "patternMismatch" | "tooLong" | "tooShort" | "rangeUnderflow" | "rangeOverflow" | "stepMismatch" | "badInput" | "customError";
 export interface SemanticTargetSegment { role: string; accessibleName: string; ordinal: number | null; }
 export interface FormControlTarget { attributes?: Record<string, string>; role: string; accessibleName: string; ordinal?: number | null; framePath?: SemanticTargetSegment[]; shadowPath?: SemanticTargetSegment[]; }
-export type FormControlState = { kind: "empty" } | { kind: "text"; value: string } | { kind: "redacted"; present: boolean } | { kind: "checked"; checked: boolean } | { kind: "selection"; values: string[] } | { kind: "files"; count: number };
+export type FormControlState = { kind: "empty" } | { kind: "text"; value: string } | { kind: "redacted"; present: boolean } | { kind: "checked"; checked: boolean } | { kind: "selection"; values: string[] } | { kind: "files"; count: number; names?: string[] };
 export interface FormControlConstraints { required?: boolean; readOnly?: boolean; disabled?: boolean; pattern?: string | null; minLength?: number | null; maxLength?: number | null; min?: string | null; max?: string | null; step?: string | null; multiple?: boolean; accept?: string[]; }
 export interface FormControlValidity { willValidate: boolean; valid: boolean; flags?: FormValidityFlag[]; message?: string | null; describedBy?: string[]; }
 export interface FormValidationIssue { controlId: string; controlKind: FormControlKind; accessibleName: string | null; target: FormControlTarget | null; validity: FormControlValidity; }

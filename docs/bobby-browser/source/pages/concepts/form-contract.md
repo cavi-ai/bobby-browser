@@ -33,6 +33,14 @@ A password control never exposes its value. Its state is:
 
 `present` says only whether a value exists.
 
+A file control's state counts the files it holds. `names` lists them or, when it holds none, the file names its widget shows:
+
+```json
+{ "kind": "files", "count": 0, "names": ["resume.pdf"] }
+```
+
+On Chromium, an upload into a file control that already holds or shows another file is refused until the control is cleared.
+
 For uploads, pass the current file control's `id` as `upload_files.controlId`. Hidden file inputs are eligible. An unnamed file target carries `attributes: {"type": "file"}` and an empty `accessibleName`; its ordinal is scoped to unnamed files in the same frame and shadow root. Upload capability and configured upload roots still apply.
 
 ## Act on controls
@@ -43,8 +51,8 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 |---|---|---|
 | `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text |
 | `setChecked` | `{kind, checked}` | Set a checkbox or radio |
-| `selectOne` | `{kind, value}` | Select an option by value or visible label |
-| `selectMany` | `{kind, values}` | Select several options |
+| `selectOne` | `{kind, value}` | Select an option by value or visible label; a text box takes the suggestion that reads the value |
+| `selectMany` | `{kind, values}` | Select several options, or check a menu button's items |
 | `setFiles` | `{kind, paths}` | Set file input paths. Needs `file:upload` |
 | `clear` | `{kind}` | Empty the control |
 | `activate` | `{kind}` | Activate a link or button |

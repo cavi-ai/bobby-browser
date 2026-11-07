@@ -37,8 +37,28 @@ cases::every_case!(
     type_text_replaces_a_prefilled_value,
     an_exact_name_outranks_one_with_a_required_marker,
     snapshot_targets_reach_controls_inside_custom_elements,
-    complete_form_honors_a_field_ordinal
+    complete_form_honors_a_field_ordinal,
+    button_menus_take_select_one_and_select_many,
+    text_boxes_pick_a_suggestion_without_a_role,
+    a_combobox_without_the_value_lists_its_options,
+    type_text_css_prefers_the_editable_node
 );
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_file_control_reports_the_file_its_widget_shows() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_file_control_reports_the_file_its_widget_shows(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn uploads_by_label_refuse_a_slot_that_shows_a_file() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::uploads_by_label_refuse_a_slot_that_shows_a_file(&rig, dir.path()).await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]

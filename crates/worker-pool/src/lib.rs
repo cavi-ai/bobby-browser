@@ -50,9 +50,9 @@ pub use accessibility_targets::{
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_control, decode_form_snapshot, form_control_script,
-    form_snapshot_expression, form_snapshot_expression_with_limit, password_manager_filled,
-    target_specs_equivalent, validate_control_action, PASSWORD_MANAGER_FILL_POLL,
-    PASSWORD_MANAGER_FILL_WAIT,
+    form_snapshot_expression, form_snapshot_expression_with_limit, other_files_shown,
+    password_manager_filled, presses_options, target_specs_equivalent, validate_control_action,
+    PASSWORD_MANAGER_FILL_POLL, PASSWORD_MANAGER_FILL_WAIT,
 };
 pub use har::{har_document, HarEntry, HarRecorder};
 pub use network_quiet::{
@@ -74,6 +74,15 @@ pub use skill_adapter::{
     PRODUCTION_SKILL_CAPABILITIES,
 };
 pub use targeting::validate_target_spec;
+
+/// A text action whose role-less target also matches the text box's wrappers
+/// means the text box: the target narrowed to it.
+pub fn textbox_target(target: &types::TargetSpec) -> Option<types::TargetSpec> {
+    target.role.is_none().then(|| types::TargetSpec {
+        role: Some("textbox".into()),
+        ..target.clone()
+    })
+}
 
 /// Most frames an action's candidate census reads; frames past it are left
 /// out. Each costs a browser round trip, and the census repeats while its

@@ -66,6 +66,12 @@ pub struct RawFormControl {
     pub value_present: bool,
     pub checked: bool,
     pub file_count: usize,
+    /// Names of the files a file input holds or, holding none, its widget shows.
+    #[serde(default)]
+    pub file_names: Vec<String>,
+    /// `aria-haspopup`, when the control opens a menu or listbox.
+    #[serde(default)]
+    pub has_popup: Option<String>,
     pub required: bool,
     pub read_only: bool,
     pub disabled: bool,
@@ -351,6 +357,7 @@ fn normalize_control(
         }
         FormControlKind::File => FormControlState::Files {
             count: raw.file_count,
+            names: raw.file_names.clone(),
         },
         _ => raw
             .value
@@ -365,6 +372,7 @@ fn normalize_control(
         raw.read_only,
         &raw.tag,
         raw.content_editable,
+        opens_popup(&raw),
     );
     FormControl {
         id,
@@ -426,7 +434,27 @@ fn normalize_control(
     }
 }
 
+/// A button that opens a menu or listbox of choices.
+fn opens_popup(control: &RawFormControl) -> bool {
+    let button = match control.explicit_role.as_deref() {
+        Some(role) => role == "button",
+        None => {
+            control.tag.eq_ignore_ascii_case("button")
+                || (control.tag.eq_ignore_ascii_case("input")
+                    && control.input_type.as_deref() == Some("button"))
+        }
+    };
+    button
+        && matches!(
+            control.has_popup.as_deref(),
+            Some("menu" | "listbox" | "true")
+        )
+}
+
 fn control_kind(control: &RawFormControl) -> FormControlKind {
+    if opens_popup(control) {
+        return FormControlKind::Combobox;
+    }
     match control.explicit_role.as_deref() {
         Some("switch") => return FormControlKind::Switch,
         Some("combobox") => return FormControlKind::Combobox,
@@ -470,6 +498,9 @@ fn control_kind(control: &RawFormControl) -> FormControlKind {
 }
 
 fn control_role(control: &RawFormControl) -> Option<String> {
+    if opens_popup(control) {
+        return Some("button".into());
+    }
     control.explicit_role.clone().or_else(|| {
         Some(
             match control_kind(control) {
@@ -498,18 +529,37 @@ fn supported_operations(
     read_only: bool,
     tag: &str,
     content_editable: bool,
+    popup: bool,
 ) -> Vec<FormControlOperation> {
     if disabled || read_only {
         return Vec::new();
     }
+    // A text input's selectOne types the value and presses the suggestion
+    // that reads it.
+    let input = tag.eq_ignore_ascii_case("input");
     match kind {
+        FormControlKind::Text if input => vec![
+            FormControlOperation::SetText,
+            FormControlOperation::SelectOne,
+            FormControlOperation::Clear,
+            FormControlOperation::PasswordManagerFill,
+        ],
         FormControlKind::Text | FormControlKind::Email | FormControlKind::Password => vec![
             FormControlOperation::SetText,
             FormControlOperation::Clear,
             FormControlOperation::PasswordManagerFill,
         ],
-        FormControlKind::Search
-        | FormControlKind::Number
+        FormControlKind::Search => vec![
+            FormControlOperation::SetText,
+            FormControlOperation::SelectOne,
+            FormControlOperation::Clear,
+        ],
+        FormControlKind::Combobox if popup => vec![
+            FormControlOperation::SelectOne,
+            FormControlOperation::SelectMany,
+            FormControlOperation::Activate,
+        ],
+        FormControlKind::Number
         | FormControlKind::Date
         | FormControlKind::Time
         | FormControlKind::DateTimeLocal
@@ -608,6 +658,40 @@ pub fn password_manager_filled(state: &FormControlState) -> bool {
     }
 }
 
+/// Kinds whose selection is the options the worker presses rather than a
+/// native `<select>` state.
+pub fn presses_options(kind: FormControlKind) -> bool {
+    matches!(
+        kind,
+        FormControlKind::Combobox | FormControlKind::Text | FormControlKind::Search
+    )
+}
+
+/// Whether a file control's shown `names` are exactly the files at `paths`.
+fn shows_files(paths: &[String], names: &[String]) -> bool {
+    let wanted = paths
+        .iter()
+        .filter_map(|path| std::path::Path::new(path).file_name()?.to_str())
+        .collect::<BTreeSet<_>>();
+    !wanted.is_empty() && wanted == names.iter().map(String::as_str).collect()
+}
+
+/// The files a file control already holds or shows when they are not the
+/// files at `paths`: an upload there would replace another file.
+pub fn other_files_shown<'a>(
+    state: &'a FormControlState,
+    paths: &[String],
+) -> Option<&'a [String]> {
+    match state {
+        FormControlState::Files { names, .. }
+            if !names.is_empty() && !shows_files(paths, names) =>
+        {
+            Some(names)
+        }
+        _ => None,
+    }
+}
+
 /// `committed`: the option values the driver actually selected, when the
 /// action resolved them — selection requests may name an option by *label*
 /// (snapshots surface labels), while the post-action snapshot state carries
@@ -638,11 +722,14 @@ pub fn control_action_evidence(
             };
             &projected
         }
-        // An ARIA combobox has no native selection: its choice is the option
-        // the worker clicked, already read back from what the combobox shows.
-        (ControlAction::SelectOne { .. }, _, Some(committed))
-            if control.control_kind == FormControlKind::Combobox =>
-        {
+        // An ARIA combobox, menu button or text box has no native selection:
+        // its choice is the option the worker pressed, already read back from
+        // what the control or its menu shows.
+        (
+            ControlAction::SelectOne { .. } | ControlAction::SelectMany { .. },
+            _,
+            Some(committed),
+        ) if presses_options(control.control_kind) => {
             projected = FormControl {
                 state: FormControlState::Selection {
                     values: committed.to_vec(),
@@ -682,15 +769,15 @@ pub fn control_action_evidence(
                 }
             }
         }
-        (ControlAction::SetFiles { paths }, FormControlState::Files { count }) => {
-            paths.len() == *count
+        (ControlAction::SetFiles { paths }, FormControlState::Files { count, names }) => {
+            paths.len() == *count || (*count == 0 && shows_files(paths, names))
         }
         (ControlAction::Clear, FormControlState::Empty) => true,
         (ControlAction::Clear, FormControlState::Text { value }) => value.is_empty(),
         (ControlAction::Clear, FormControlState::Redacted { present }) => !present,
         (ControlAction::Clear, FormControlState::Checked { checked }) => !checked,
         (ControlAction::Clear, FormControlState::Selection { values }) => values.is_empty(),
-        (ControlAction::Clear, FormControlState::Files { count }) => *count == 0,
+        (ControlAction::Clear, FormControlState::Files { count, .. }) => *count == 0,
         (ControlAction::Activate, _) => true,
         (ControlAction::PasswordManagerFill, state) => password_manager_filled(state),
         (ControlAction::Credential { .. }, state) => password_manager_filled(state),
@@ -784,7 +871,8 @@ const text=(v,n=2048)=>{const s=clip(v,n).trim().replace(/\s+/gu,' ');return s||
 const resolveRefs=(element,attribute)=>{const ids=(element.getAttribute(attribute)||'').trim().split(/\s+/).filter(Boolean).slice(0,512);return ids.map(id=>text(element.ownerDocument.getElementById(id)?.textContent)).filter(Boolean)};
 const controlLabel=__CONTROL_LABEL_FUNCTION__;
 const label=(element)=>{const isButton=element.getAttribute('role')==='button'||element.tagName.toLowerCase()==='button';return text(element.getAttribute('aria-label'))||text(resolveRefs(element,'aria-labelledby').join(' '))||text(controlLabel(element))||(isButton?text(element.textContent):null)||text(element.getAttribute('placeholder'))};
-const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:('value'in e?clip(e.value,4096):clip(e.textContent||'',4096)),valuePresent:Boolean('value'in e?e.value:e.textContent),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false,validityFlags,validationMessage:isPassword?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
+const fileNames=e=>{if(e.files?.length)return [...e.files].slice(0,32).map(f=>clip(f.name,256));let box=null;for(let node=e.parentElement,hop=0;node&&hop<3&&!/^(FORM|FIELDSET|BODY)$/.test(node.tagName);node=node.parentElement,hop++){if([...node.querySelectorAll('input[type="file"]')].some(other=>other!==e))break;box=node}const shown=new Set();const walker=box&&box.ownerDocument.createTreeWalker(box,NodeFilter.SHOW_TEXT);for(let node=walker?.nextNode();node&&shown.size<8;node=walker.nextNode()){for(const match of node.data.matchAll(/[^\s\/\\:*?"<>|]+\.(?:pdf|docx?|odt|rtf|txt|md|pages|png|jpe?g|gif|webp|heic|csv|xlsx?|pptx?|zip)\b/giu))shown.add(clip(match[0],256))}return [...shown].slice(0,8)};
+const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:('value'in e?clip(e.value,4096):clip(e.textContent||'',4096)),valuePresent:Boolean('value'in e?e.value:e.textContent),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false,validityFlags,validationMessage:isPassword?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
 "#;
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -850,6 +938,8 @@ mod tests {
             value_present: false,
             checked: false,
             file_count: 0,
+            file_names: Vec::new(),
+            has_popup: None,
             required: false,
             read_only: false,
             disabled: false,
