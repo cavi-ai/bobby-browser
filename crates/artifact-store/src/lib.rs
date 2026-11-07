@@ -1,3 +1,5 @@
+pub mod image;
+
 use std::{
     future::Future,
     path::{Path, PathBuf},

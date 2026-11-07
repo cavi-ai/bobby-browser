@@ -115,7 +115,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `a11y_snapshot` | `maxNodes` 1 to 2048 (default 256), `target` to scope. See [Accessibility snapshot](../guides/accessibility-snapshot.md) |
 | `form_snapshot` | `maxControls` 1 to 512. Passwords are redacted |
 | `inspect` | `selector` or `target`, `includeHtml` |
-| `screenshot` | `mode`: viewport, full page or element |
+| `screenshot` | `mode`: viewport, full page or element. `maxEdge` shrinks the stored image to that many pixels on its longest side |
 | `pdf` | `landscape`, `printBackground`, `scale` 0.1 to 2.0, `pageRanges` |
 | `network_log` | `clear`. Recording starts at the first call; `clear: false` keeps the buffer |
 | `context_ask`, `context_neighbors` | `description` (required, up to 256 bytes) |

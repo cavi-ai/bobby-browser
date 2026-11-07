@@ -209,6 +209,12 @@ enum CliCommand {
         /// Training-data output directory
         #[arg(long, default_value = "data/vision")]
         training_data_dir: PathBuf,
+        /// Attach a compact screenshot to completed form and submit intents by default
+        #[arg(long, conflicts_with = "no_success_screenshots")]
+        success_screenshots: bool,
+        /// Attach success screenshots only when an intent call asks for one
+        #[arg(long, conflicts_with = "success_screenshots")]
+        no_success_screenshots: bool,
         /// Bobby config file updated by vision setup
         #[arg(long)]
         config: Option<PathBuf>,
@@ -876,6 +882,8 @@ pub async fn run() -> Result<()> {
             collect_training_data,
             no_collect_training_data,
             training_data_dir,
+            success_screenshots,
+            no_success_screenshots,
             config,
             force,
             yes,
@@ -904,6 +912,13 @@ pub async fn run() -> Result<()> {
                     collect_training_data,
                     no_collect_training_data,
                     training_data_dir,
+                    success_screenshots: if success_screenshots {
+                        Some(true)
+                    } else if no_success_screenshots {
+                        Some(false)
+                    } else {
+                        None
+                    },
                     config,
                     force,
                     yes,

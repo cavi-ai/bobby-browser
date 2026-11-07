@@ -279,6 +279,9 @@ pub struct Server {
     /// Optional job scheduler. When absent, job_* tools are not advertised.
     jobs: Option<Arc<dyn crate::jobs::JobPort>>,
     operational_metrics: Option<observability::OperationalMetrics>,
+    /// Whether a completed form or submit intent attaches a screenshot when
+    /// its call does not say.
+    success_screenshots: bool,
 }
 
 impl Server {
@@ -329,7 +332,15 @@ impl Server {
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
             jobs: None,
             operational_metrics: None,
+            success_screenshots: false,
         }
+    }
+
+    /// Attach a compact screenshot to a completed `intent_complete_form` or
+    /// `intent_submit_and_verify` whose call does not set `screenshot`.
+    pub fn with_success_screenshots(mut self, enabled: bool) -> Self {
+        self.success_screenshots = enabled;
+        self
     }
 
     /// Attach a job port so `job_submit` / `job_status` / `job_cancel` advertise.

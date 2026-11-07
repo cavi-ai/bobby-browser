@@ -1407,6 +1407,15 @@
       "properties": {
         "mode": {
           "$ref": "#/$defs/ScreenshotMode"
+        },
+        "maxEdge": {
+          "description": "Longest side, in pixels, of the stored screenshot; a larger capture\nis shrunk to it. Unset stores the capture as taken.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "required": [

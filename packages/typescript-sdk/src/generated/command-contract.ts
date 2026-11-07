@@ -2,7 +2,7 @@ export const COMMAND_CONTRACT = {
   primitive: {
     "accessibilitySnapshot": { fields: ["maxNodes","target"], required: [] },
     "activatePage": { fields: ["pageId"], required: ["pageId"] },
-    "captureScreenshot": { fields: ["mode"], required: ["mode"] },
+    "captureScreenshot": { fields: ["maxEdge","mode"], required: ["mode"] },
     "click": { fields: ["boundary","expectedUrl","modifiers","selector","target"], required: ["boundary","selector"] },
     "clickAndWaitForDownload": { fields: ["selector","target","timeoutMs"], required: ["selector","timeoutMs"] },
     "clickAndWaitForPopup": { fields: ["selector","target","timeoutMs"], required: ["selector","timeoutMs"] },

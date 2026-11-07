@@ -237,6 +237,7 @@ version = "0.23.0"
 dependencies = [
  "anyhow",
  "hex",
+ "png",
  "serde",
  "serde_json",
  "sha2",
@@ -2414,6 +2415,7 @@ dependencies = [
 name = "intent-engine"
 version = "0.23.0"
 dependencies = [
+ "artifact-store",
  "async-trait",
  "base64 0.23.1",
  "context-store",

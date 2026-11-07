@@ -316,7 +316,8 @@ pub(crate) fn intent_complete_form_schema() -> (Value, Vec<&'static str>) {
     (
         intent_properties(json!({
             "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS),
-            "evidenceDetail":{"type":"string","enum":["compact","full"]}
+            "evidenceDetail":{"type":"string","enum":["compact","full"]},
+            "screenshot":{"type":"boolean"}
         })),
         intent_required(&["purpose", "fields"]),
     )
@@ -393,7 +394,8 @@ pub(crate) fn intent_submit_and_verify_schema() -> (Value, Vec<&'static str>) {
             "expectedState":{"$ref":"#/$defs/WaitForCommand"},
             "evidenceDetail":{"type":"string","enum":["compact","full"]},
             "autoCheckpoint":{"type":"boolean"},
-            "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
+            "reSubmit":{"type":"boolean","description":"Submit again despite boundaryAlreadyExecuted."},
+            "screenshot":{"type":"boolean"}
         })),
         intent_required(&["purpose"]),
     )
@@ -525,7 +527,8 @@ pub(crate) fn screenshot_schema() -> (Value, Vec<&'static str>) {
             "workflowId": id(),
             "sessionId": id(),
             "pageId": id(),
-            "mode": {"$ref":"#/$defs/ScreenshotMode"}
+            "mode": {"$ref":"#/$defs/ScreenshotMode"},
+            "maxEdge": {"type":"integer","minimum":1,"description":"Shrink the stored image so its longest side is at most this many pixels."}
         }),
         vec!["sessionId", "pageId"],
     )
@@ -797,6 +800,7 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         (_, "autoCheckpoint") => "Save checkpoint.",
         (_, "boundary") => "Run at most once.",
         (_, "evidenceDetail") => "Detail level.",
+        (_, "screenshot") => "Shot on success.",
         (_, "selector") => "CSS selector.",
         (_, "target") => "Target from a fresh snapshot, or a locator such as {css:\"#submit\"} or {role:\"button\",accessibleName:\"Submit\"}.",
         (_, "value") => "Typed field action with its kind and value fields.",
@@ -2693,7 +2697,10 @@ fn primitive_commands() -> Vec<Value> {
         ),
         tagged_input(
             "captureScreenshot",
-            object(json!({"mode":{"$ref":"#/$defs/ScreenshotMode"}}), &["mode"]),
+            object(
+                json!({"mode":{"$ref":"#/$defs/ScreenshotMode"},"maxEdge":{"type":"integer","minimum":1}}),
+                &["mode"],
+            ),
         ),
         tagged_input(
             "setFocusEmulation",

@@ -240,6 +240,7 @@ fn semantic_target_wait_and_screenshot_contracts_are_stable() {
         mode: ScreenshotMode::Element {
             target: Box::new(target),
         },
+        max_edge: None,
     });
     let click = PrimitiveCommand::Click(ClickCommand {
         selector: String::new(),

@@ -94,6 +94,7 @@ async fn a_chromium_workflow_replays_with_its_screenshots() {
         RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(
             CaptureScreenshotCommand {
                 mode: ScreenshotMode::Viewport,
+                max_edge: None,
             },
         ))
     };

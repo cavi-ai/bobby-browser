@@ -297,6 +297,7 @@ async fn run_rust_sample(
                 CommandId::new(),
                 PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 }),
             ),
         )

@@ -815,6 +815,7 @@ async fn collect_prefill_batch(
                 page_id,
                 &CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )
             .await
@@ -1867,6 +1868,7 @@ async fn fill_with_password_manager(
                 page_id,
                 &CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )
             .await
@@ -2888,6 +2890,7 @@ async fn viewport_screenshot(page_id: &PageId, browser: &dyn IntentBrowser) -> V
             page_id,
             &CaptureScreenshotCommand {
                 mode: ScreenshotMode::Viewport,
+                max_edge: None,
             },
         )
         .await
@@ -3834,6 +3837,7 @@ async fn escalate_extract_field_with_vision(
             page_id,
             &CaptureScreenshotCommand {
                 mode: ScreenshotMode::Viewport,
+                max_edge: None,
             },
         )
         .await
@@ -4250,6 +4254,7 @@ async fn execute_solve_challenge(
                 page_id,
                 &CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )
             .await
@@ -4496,6 +4501,7 @@ async fn execute_detect_challenge(
                 page_id,
                 &CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )
             .await
@@ -5142,6 +5148,7 @@ async fn escalate_with_vision(
                 page_id,
                 &CaptureScreenshotCommand {
                     mode: ScreenshotMode::Viewport,
+                    max_edge: None,
                 },
             )
             .await

@@ -10,6 +10,7 @@
 - `[vision].model_server` sends the managed MLX vision server's requests to an OpenAI-compatible server that holds the model, such as one `mlx-agent serve` started; `bobby install` sets it with `--vision-model-server` or from its vision menu.
 - On Chromium, a button that opens a menu or listbox takes `selectOne` and `selectMany`, which check its menu items and close the menu.
 - A `form_snapshot` file control's state lists `names`: the files it holds or, holding none, the file names its widget shows.
+- `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
 
 ### Changed
 

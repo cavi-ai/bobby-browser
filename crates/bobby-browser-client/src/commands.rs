@@ -1115,6 +1115,10 @@ pub enum ScreenshotMode {
 #[serde(rename_all = "camelCase")]
 pub struct CaptureScreenshotCommand {
     pub mode: ScreenshotMode,
+    /// Longest side, in pixels, of the stored screenshot; a larger capture
+    /// is shrunk to it. Unset stores the capture as taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_edge: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

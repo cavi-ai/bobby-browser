@@ -10,9 +10,9 @@ pub use vision::{
     VisionTextTierConfig,
 };
 pub use vision_write::{
-    ensure_loopback_vision_defaults, set_vision_install_state, upsert_vision_acp_profile,
-    upsert_vision_detector_model, upsert_vision_platform, upsert_vision_python,
-    upsert_vision_text_tier, ConfigWriteError,
+    ensure_loopback_vision_defaults, set_success_screenshots, set_vision_install_state,
+    upsert_vision_acp_profile, upsert_vision_detector_model, upsert_vision_platform,
+    upsert_vision_python, upsert_vision_text_tier, ConfigWriteError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +191,11 @@ pub struct McpConfig {
     /// `toolset_select` at any time. `BOBBY_MCP_TOOLSET` overrides this.
     #[serde(default)]
     pub startup_toolset: Option<String>,
+    /// Attach a viewport screenshot, at most 1280 px on its longest side, to
+    /// a completed `intent_complete_form` or `intent_submit_and_verify` whose
+    /// call does not set `screenshot`.
+    #[serde(default)]
+    pub success_screenshots: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
