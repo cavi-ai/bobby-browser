@@ -253,3 +253,65 @@ fn a_model_server_makes_the_mlx_vision_server_send_its_requests_there() {
         })
     );
 }
+
+/// Answers one request with an empty OpenAI models list and returns its
+/// request line.
+fn models_server() -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{BufRead, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut header = String::new();
+        while reader.read_line(&mut header).unwrap() > 2 {
+            header.clear();
+        }
+        let body = r#"{"object":"list","data":[]}"#;
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line.trim_end().to_owned()
+    });
+    (port, server)
+}
+
+#[test]
+fn install_selects_a_model_server_and_tests_that_it_answers() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config.toml");
+    let (port, server) = models_server();
+    let model_server = format!("http://127.0.0.1:{port}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobby"))
+        .args(["install", "--yes", "--vision-model-server", &model_server])
+        .args(["--vision-model", "/models/served-vision-model"])
+        .arg("--config")
+        .arg(&config)
+        .arg("--path")
+        .arg(root.path().join("bootstrap.env"))
+        .env_remove("BOBBY_BROWSER_CONFIG")
+        .current_dir(root.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("ok: configured and readiness-tested mlx / /models/served-vision-model"),
+        "{stdout}\n{stderr}"
+    );
+    assert_eq!(server.join().unwrap(), "GET /v1/models HTTP/1.1");
+    let vision = config::AppConfig::load(&config).unwrap().vision;
+    assert_eq!(vision.model_server.as_deref(), Some(model_server.as_str()));
+    let (provider, profile) = vision.selected_provider().unwrap();
+    assert_eq!(provider, "mlx");
+    assert_eq!(profile.model, "/models/served-vision-model");
+}
