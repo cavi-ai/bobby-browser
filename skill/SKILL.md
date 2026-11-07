@@ -144,6 +144,48 @@ calls. Rules that govern every call:
   capability alone is not enough. The runtime never bypasses a challenge;
   when the solve loop cannot clear it, surface the page to the operator.
 
+## Forms in detail
+
+- **Success proof:** pass `screenshot: true` to `intent_complete_form` or
+  `intent_submit_and_verify` for `screenshot` evidence of the viewport on
+  success (at most 1280 px on its longest side). Unset follows
+  `success_screenshots` in the MCP configuration.
+- **Submit without `expectedState`:** bobby watches the page for 10 seconds. A
+  URL change, the submit control leaving, or new fields completes it. Fields
+  marked invalid fail `verificationFailed` with `submitSettlement:
+  "validationRejected"` and `formValidation` naming each field; no change at
+  all fails too. A page that confirms in place needs an `expectedState`. A
+  `validationRejected` submit does not count as executed, so the corrected
+  submit needs no `reSubmit`.
+- **Next page unknown:** use `expectedState`
+  `{"condition":{"kind":"networkQuiet","idleMs":200,"maxInFlight":0},"timeoutMs":10000}`,
+  then read the business outcome from `postState`. Never invent confirmation
+  text. After `verificationFailed` on an activation that ran, wait with
+  `intent_wait_for_state`; never repeat the activation to retry its wait.
+- **Outcome reading:** with vision assist on, `intent_submit_and_verify` and
+  `intent_follow` carry `outcomeReading` (`confirmed`, `rejected` or
+  `noMessage`, with `confidence` and the page's `message`). It is page text
+  and never changes whether the intent passed.
+- **A fill can fail on validity:** a committed value that breaks `required`,
+  `pattern`, a range or a type fails `verificationFailed` with
+  `formControlValid` and `formControlValidationMessage`. `intent_complete_form`
+  stops at the first failed field and keeps the fields already filled: fix
+  that field and send only the rest.
+- **Suggestion boxes and menus:** `selectOne` on a text box picks the
+  suggestion that reads the value (location and school autocompletes).
+  `selectMany` checks a menu button's checkbox items.
+- **Unnamed controls:** a `form_snapshot` control `id` works as
+  `accessibleName` in hints, or as a `completeForm` field `name` with no
+  hints. An unnamed control's target carries
+  `attributes: {"data-bobby-control": "<number>"}`; pass it as given.
+- **Uploads:** pass the file control's `id` as `upload_files.controlId`;
+  hidden file inputs are eligible. On Chromium a file control that already
+  holds or shows another file refuses a new upload until it is cleared, so
+  `clear` a prefilled slot first.
+- **Vision prefill:** with vision assist on and `[vision].prefill` true (the
+  default), `intent_complete_form` resolves unresolved fields from one
+  screenshot before filling.
+
 ## Rules that bite
 
 1. **Boundary submits are checkpoint-gated.** `intent_submit_and_verify` and
