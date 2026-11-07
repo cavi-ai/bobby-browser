@@ -961,7 +961,7 @@ impl ChromiumWorker {
     }
 
     /// Best-effort `Page.bringToFront`, run immediately before dispatching a
-    /// click or keyboard event so the target page is not backgrounded — on a
+    /// click, keyboard event or screenshot so the target page is not backgrounded — on a
     /// background target in headless Chrome, chromiumoxide's own click path
     /// (scroll-into-view + clickable-point + `Input.dispatchMouseEvent`)
     /// never resolves. A visible page is left alone: bringing it to front
@@ -993,9 +993,6 @@ impl ChromiumWorker {
         value: &str,
         clear_first: bool,
     ) -> Result<(u32, u64, bool), CommandError> {
-        // Headless pages have no focus by default; without this the element
-        // click cannot focus the input and every key event lands on <body>.
-        page.activate().await.map_err(command_failed)?;
         resolved.click(page).await?;
         let replaced = resolved.settle_focus(page).await?;
         let actions = {
@@ -3330,6 +3327,7 @@ impl crate::CaptureEngine for ChromiumWorker {
 
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        self.bring_page_to_front(&page).await;
         let bytes = page
             .screenshot(
                 ScreenshotParams::builder()
@@ -3353,6 +3351,7 @@ impl crate::CaptureEngine for ChromiumWorker {
         command: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        self.bring_page_to_front(&page).await;
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
                 bounded_cdp(

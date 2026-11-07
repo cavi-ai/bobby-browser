@@ -421,7 +421,6 @@ impl PageInner {
     }
 
     pub async fn screenshot(&self, params: impl Into<ScreenshotParams>) -> Result<Vec<u8>> {
-        self.activate().await?;
         let params = params.into();
         let full_page = params.full_page();
         let omit_background = params.omit_background();
