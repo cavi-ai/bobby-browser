@@ -331,7 +331,11 @@ export interface LocateIntent { purpose: string; hints?: IntentHints; }
 export interface FillIntent { purpose: string; hints?: IntentHints; value: ControlAction; }
 export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: ControlAction; }
 export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
-export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
+/**
+ * Submit once and verify. Without `expectedState` the page verifies it: a URL
+ * change, the submit control leaving, or other form fields.
+ */
+export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState?: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /**
  * Follow a control and wait for the expected destination.

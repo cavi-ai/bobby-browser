@@ -45,7 +45,7 @@ pub(super) async fn read_code_step(
     Ok(code_entry::detect(&snapshot, &text, hints))
 }
 
-fn target_spec(target: &FormControlTarget) -> TargetSpec {
+pub(super) fn target_spec(target: &FormControlTarget) -> TargetSpec {
     let segment = |segment: &SemanticTargetSegment| {
         Box::new(TargetSpec {
             role: Some(segment.role.clone()),

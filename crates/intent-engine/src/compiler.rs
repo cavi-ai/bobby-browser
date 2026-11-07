@@ -22,7 +22,8 @@ pub enum IntentPlan {
     },
     SubmitAndVerify {
         target: TargetSpec,
-        expected_state: WaitForCommand,
+        /// `None` verifies by the page changing after the submit.
+        expected_state: Option<WaitForCommand>,
     },
     WaitForState {
         condition: WaitCondition,

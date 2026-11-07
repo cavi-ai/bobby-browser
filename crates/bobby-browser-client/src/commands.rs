@@ -212,7 +212,11 @@ pub struct SubmitAndVerifyIntent {
     pub purpose: String,
     #[serde(default)]
     pub hints: IntentHints,
-    pub expected_state: WaitForCommand,
+    /// The state that proves the submit took. Without one, the submit is
+    /// verified by the page changing URL, the submit control leaving it, or
+    /// the form showing other fields; fields the page marks invalid fail it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_state: Option<WaitForCommand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

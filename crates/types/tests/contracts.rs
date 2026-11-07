@@ -850,12 +850,12 @@ fn intent_commands_round_trip_and_classes() {
     let submit = IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
         purpose: "Submit application".into(),
         hints: IntentHints::default(),
-        expected_state: WaitForCommand {
+        expected_state: Some(WaitForCommand {
             condition: WaitCondition::Url {
                 matcher: TextMatch::Contains("/thanks".into()),
             },
             timeout_ms: 5_000,
-        },
+        }),
     });
     assert_eq!(submit.class(), CommandClass::Boundary);
 

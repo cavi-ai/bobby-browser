@@ -373,12 +373,12 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                     role: Some("button".into()),
                     ..IntentHints::default()
                 },
-                expected_state: WaitForCommand {
+                expected_state: Some(WaitForCommand {
                     condition: WaitCondition::Url {
                         matcher: TextMatch::Contains("/complete".into()),
                     },
                     timeout_ms: 5_000,
-                },
+                }),
             }),
         ))
         .await;

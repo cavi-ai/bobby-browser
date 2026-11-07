@@ -395,7 +395,7 @@ pub(crate) fn intent_submit_and_verify_schema() -> (Value, Vec<&'static str>) {
             "autoCheckpoint":{"type":"boolean"},
             "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
         })),
-        intent_required(&["purpose", "expectedState"]),
+        intent_required(&["purpose"]),
     )
 }
 
@@ -2218,7 +2218,7 @@ fn intent_commands() -> Vec<Value> {
                     "hints":{"$ref":"#/$defs/IntentHints"},
                     "expectedState":{"$ref":"#/$defs/WaitForCommand"}
                 }),
-                &["purpose", "expectedState"],
+                &["purpose"],
             ),
         ),
         tagged_input(

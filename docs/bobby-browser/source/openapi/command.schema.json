@@ -2149,12 +2149,19 @@
           }
         },
         "expectedState": {
-          "$ref": "#/$defs/WaitForCommand"
+          "description": "The state that proves the submit took. Without one, the submit is\nverified by the page changing URL, the submit control leaving it, or\nthe form showing other fields; fields the page marks invalid fail it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WaitForCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "purpose",
-        "expectedState"
+        "purpose"
       ]
     },
     "WaitForStateIntent": {

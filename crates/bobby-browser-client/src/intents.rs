@@ -240,10 +240,11 @@ pub fn fill_envelope(
 }
 
 /// Convenience: [`submit_and_verify`] runtime command + [`intent_envelope`].
+/// `None` verifies by the page changing after the submit.
 pub fn submit_and_verify_envelope(
     meta: IntentEnvelopeMeta,
     purpose: &str,
-    expected_state: WaitForCommand,
+    expected_state: Option<WaitForCommand>,
     hints: Option<IntentHints>,
 ) -> CommandEnvelope {
     intent_envelope(
@@ -375,12 +376,12 @@ mod tests {
         let envelope = submit_and_verify_envelope(
             meta(),
             "Submit the customer priority",
-            WaitForCommand {
+            Some(WaitForCommand {
                 condition: WaitCondition::Document {
                     ready: WaitUntil::Interactive,
                 },
                 timeout_ms: 1_000,
-            },
+            }),
             None,
         );
         assert_eq!(envelope.schema_version, CommandEnvelope::SCHEMA_VERSION);
@@ -388,10 +389,10 @@ mod tests {
             RuntimeCommand::Intent(IntentCommand::SubmitAndVerify(submit)) => {
                 assert_eq!(submit.purpose, "Submit the customer priority");
                 assert_eq!(
-                    submit.expected_state.condition,
-                    WaitCondition::Document {
+                    submit.expected_state.as_ref().map(|state| &state.condition),
+                    Some(&WaitCondition::Document {
                         ready: WaitUntil::Interactive
-                    }
+                    })
                 );
             }
             other => panic!("expected intent submitAndVerify, got {other:?}"),

@@ -259,7 +259,8 @@ impl Server {
                 //   double-apply.
                 // Everything else (resolution failures, actFailed,
                 // retryableFailure, policyDenied) means nothing landed, so
-                // the fix-and-resubmit flow stays open.
+                // the fix-and-resubmit flow stays open. So does a submit the
+                // page rejected with invalid fields.
                 if let Some(boundary_key) = &boundary_key {
                     let landed = match &result {
                         Ok(value) => {
@@ -268,12 +269,24 @@ impl Server {
                                 .get("error")
                                 .and_then(|error| error.get("code"))
                                 .and_then(Value::as_str);
-                            matches!(status, Some("completed") | Some("needsReconciliation"))
-                                || (matches!(status, Some("failed"))
+                            let rejected = value
+                                .get("evidence")
+                                .and_then(Value::as_array)
+                                .is_some_and(|evidence| {
+                                    evidence.iter().any(|item| {
+                                        item["kind"] == "submitSettlement"
+                                            && item["outcome"] == "validationRejected"
+                                    })
+                                });
+                            !rejected
+                                && (matches!(
+                                    status,
+                                    Some("completed") | Some("needsReconciliation")
+                                ) || (matches!(status, Some("failed"))
                                     && matches!(
                                         code,
                                         Some("verificationFailed" | "verificationCodeRequired")
-                                    ))
+                                    )))
                         }
                         Err(_) => false,
                     };

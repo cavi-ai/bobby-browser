@@ -11,6 +11,7 @@
 ### Changed
 
 - An ACP vision harness starts once and serves every task in its own session, instead of one harness process per task.
+- `intent_submit_and_verify` no longer requires `expectedState`: without one it verifies a URL change, the submit control leaving or new form fields, and a submit the page rejects with invalid fields fails naming them without counting toward `boundaryAlreadyExecuted`.
 
 ### Fixed
 

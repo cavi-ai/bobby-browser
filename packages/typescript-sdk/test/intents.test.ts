@@ -458,6 +458,13 @@ test("assertIntentPurpose enforces the 256-byte bound", () => {
   assert.throws(() => locateEnvelope(META, "a".repeat(257)), /256/);
 });
 
+test("submitAndVerifyEnvelope omits an absent expectedState", () => {
+  const submit = submitAndVerifyEnvelope(META, "Submit application", undefined);
+  if (submit.command.kind !== "intent") throw new Error("expected intent");
+  assert.equal(submit.command.input.kind, "submitAndVerify");
+  assert.deepEqual(Object.keys(submit.command.input.input), ["purpose", "hints"]);
+});
+
 test("enterCodeRuntimeCommand submits by default and omits an absent expectedState", () => {
   const command = enterCodeRuntimeCommand({ code: "123-456" });
   assert.equal(command.kind, "intent");

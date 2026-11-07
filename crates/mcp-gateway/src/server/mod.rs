@@ -2351,9 +2351,10 @@ fn requested_wait_ms(command: &types::RuntimeCommand) -> Option<u64> {
     use types::{IntentCommand as Intent, PrimitiveCommand as Primitive, RuntimeCommand};
     match command {
         RuntimeCommand::Intent(Intent::WaitForState(intent)) => Some(intent.timeout_ms),
-        RuntimeCommand::Intent(Intent::SubmitAndVerify(intent)) => {
-            Some(intent.expected_state.timeout_ms)
-        }
+        RuntimeCommand::Intent(Intent::SubmitAndVerify(intent)) => intent
+            .expected_state
+            .as_ref()
+            .map(|expected| expected.timeout_ms),
         RuntimeCommand::Intent(Intent::Follow(intent)) => {
             Some(intent.expected_destination.timeout_ms)
         }

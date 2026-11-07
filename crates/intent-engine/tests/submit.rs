@@ -183,7 +183,7 @@ fn submit_with_hints(
     IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
         purpose: purpose.into(),
         hints,
-        expected_state,
+        expected_state: Some(expected_state),
     })
 }
 

@@ -464,9 +464,9 @@ pub enum Evidence {
         text: String,
         html: Option<String>,
     },
-    /// Result of a boundary submit that used `networkQuiet` as its
-    /// postcondition. This classifies the settled page without requiring the
-    /// caller to predict confirmation copy or risk a second submit.
+    /// Result of a boundary submit that used `networkQuiet` or no expected
+    /// state as its postcondition. This classifies the settled page without
+    /// requiring the caller to predict confirmation copy or risk a second submit.
     SubmitSettlement {
         outcome: SubmitSettlementOutcome,
     },

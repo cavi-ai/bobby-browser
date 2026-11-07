@@ -914,7 +914,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
                         accessible_name: Some("Save priority".into()),
                         ..IntentHints::default()
                     },
-                    expected_state: WaitForCommand {
+                    expected_state: Some(WaitForCommand {
                         condition: WaitCondition::Text {
                             target: Box::new(TargetSpec {
                                 css: Some("body".into()),
@@ -923,7 +923,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
                             matcher: types::TextMatch::Contains("Priority saved".into()),
                         },
                         timeout_ms: 20_000,
-                    },
+                    }),
                 },
             )),
         })
