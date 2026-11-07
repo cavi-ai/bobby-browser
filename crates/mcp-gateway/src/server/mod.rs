@@ -2255,12 +2255,21 @@ const MAX_COMMAND_DEADLINE_MS: i64 = 300_000;
 /// Keeping the caller's is what makes `checkpoint_save` and `workflow_recover`
 /// reachable from the flat tools.
 fn command_envelope(
-    context: types::RequestContext,
+    mut context: types::RequestContext,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
     workflow_id: Option<types::WorkflowId>,
     command: types::RuntimeCommand,
 ) -> (types::RequestContext, types::CommandEnvelope) {
+    // A command that waits outlasts its own timeout by the default command budget,
+    // within the furthest deadline a runtime accepts, so the wait reports its own timeout.
+    if let Some(wait_ms) = requested_wait_ms(&command) {
+        let budget_ms = wait_ms
+            .saturating_add(DEFAULT_COMMAND_TIMEOUT_MS)
+            .min(MAX_COMMAND_DEADLINE_MS as u64);
+        let needed = Utc::now() + Duration::milliseconds(budget_ms as i64);
+        context.deadline = context.deadline.max(needed);
+    }
     let deadline = context.deadline;
     (
         context,
@@ -2275,6 +2284,27 @@ fn command_envelope(
             command,
         },
     )
+}
+
+/// The wait a command asks for in its own input, if any.
+fn requested_wait_ms(command: &types::RuntimeCommand) -> Option<u64> {
+    use types::{IntentCommand as Intent, PrimitiveCommand as Primitive, RuntimeCommand};
+    match command {
+        RuntimeCommand::Intent(Intent::WaitForState(intent)) => Some(intent.timeout_ms),
+        RuntimeCommand::Intent(Intent::SubmitAndVerify(intent)) => {
+            Some(intent.expected_state.timeout_ms)
+        }
+        RuntimeCommand::Intent(Intent::Follow(intent)) => {
+            Some(intent.expected_destination.timeout_ms)
+        }
+        RuntimeCommand::Intent(Intent::EnterCode(intent)) => intent
+            .expected_state
+            .as_ref()
+            .map(|expected| expected.timeout_ms),
+        RuntimeCommand::Primitive(Primitive::WaitFor(command)) => Some(command.timeout_ms),
+        RuntimeCommand::Primitive(Primitive::Navigate(command)) => Some(command.timeout_ms),
+        _ => None,
+    }
 }
 
 /// Caller-pinned ids for Boundary flows: a Boundary command's pre-action
@@ -2498,6 +2528,56 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_envelope_outlasts_the_wait_its_command_asks_for() {
+        let short = Utc::now() + Duration::seconds(60);
+        let context = || {
+            types::RequestContext::new_for_test(
+                types::PrincipalId::from_uuid(uuid::Uuid::from_u128(704)),
+                [],
+                short,
+            )
+        };
+        let wait = |timeout_ms: u64| -> types::IntentCommand {
+            serde_json::from_value(json!({"kind":"waitForState","input":{
+                "condition":{"kind":"url","matcher":{"kind":"contains","value":"done"}},
+                "timeoutMs":timeout_ms
+            }}))
+            .expect("wait intent")
+        };
+        let session = types::SessionId::new();
+        let page = types::PageId::new();
+        let before = Utc::now();
+        let (context_out, envelope) = intent_envelope(
+            context(),
+            session.clone(),
+            page.clone(),
+            None,
+            wait(120_000),
+        );
+        assert!(envelope.deadline >= before + Duration::milliseconds(120_000));
+        assert_eq!(context_out.deadline, envelope.deadline);
+        let (_, envelope) =
+            intent_envelope(context(), session.clone(), page.clone(), None, wait(1_000));
+        assert_eq!(envelope.deadline, short);
+        let wait_for: types::PrimitiveCommand =
+            serde_json::from_value(json!({"kind":"waitFor","input":{
+                "condition":{"kind":"url","matcher":{"kind":"contains","value":"done"}},
+                "timeoutMs":90_000
+            }}))
+            .expect("wait_for command");
+        let (_, envelope) = primitive_envelope(context(), session, Some(page), None, wait_for);
+        assert!(envelope.deadline >= before + Duration::milliseconds(90_000));
+        let (_, envelope) = intent_envelope(
+            context(),
+            types::SessionId::new(),
+            types::PageId::new(),
+            None,
+            wait(300_000),
+        );
+        assert!(envelope.deadline <= Utc::now() + Duration::milliseconds(MAX_COMMAND_DEADLINE_MS));
+    }
 
     #[test]
     fn interface_error_metadata_is_preserved_while_diagnostic_is_redacted() {
