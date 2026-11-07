@@ -254,15 +254,7 @@ impl Run<'_> {
             let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
                 return Ok(());
             };
-            let wrong: Vec<&(&CodeField, String)> = fields
-                .iter()
-                .filter(|(field, expected)| {
-                    code_entry::find_control(&snapshot, &field.id)
-                        .filter(|control| control.target == field.target)
-                        .and_then(|control| code_entry::holds(control, expected))
-                        == Some(false)
-                })
-                .collect();
+            let wrong = wrong_fields(&snapshot, fields);
             if wrong.is_empty() {
                 return Ok(());
             }
@@ -277,6 +269,34 @@ impl Run<'_> {
             Self::error(
                 ErrorCode::VerificationFailed,
                 "the page did not keep the entered code in every code field",
+            ),
+            Vec::new(),
+            "verifyFailed",
+        ))
+    }
+
+    /// Reads back boxes filled by typing the whole code from the first box,
+    /// giving the page a few polls to move each character into its box.
+    async fn verify_typed_through(
+        &mut self,
+        fields: &[(&CodeField, String)],
+    ) -> Result<(), IntentOutcome> {
+        for pass in 0..=REFILL_PASSES {
+            if pass > 0 {
+                tokio::time::sleep(Duration::from_millis(CODE_STEP_POLL_MS)).await;
+            }
+            let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
+                return Ok(());
+            };
+            if wrong_fields(&snapshot, fields).is_empty() {
+                return Ok(());
+            }
+        }
+        Err(self.failed(
+            Self::error(
+                ErrorCode::VerificationFailed,
+                "the code was typed from the first code box, but the page did not move each \
+                 character into its own box",
             ),
             Vec::new(),
             "verifyFailed",
@@ -308,7 +328,13 @@ impl Run<'_> {
                     .await
             }
             None => {
-                let Some(last) = step.fields.last().and_then(|field| field.target.as_ref()) else {
+                // Enter goes to the last box the page names.
+                let Some(last) = step
+                    .fields
+                    .iter()
+                    .rev()
+                    .find_map(|field| field.target.as_ref())
+                else {
                     return Ok(Vec::new());
                 };
                 let located = self.locate(last).await?;
@@ -337,6 +363,24 @@ impl Run<'_> {
             Err(error) => Err(self.failed(error, Vec::new(), "actFailed")),
         }
     }
+}
+
+/// The fields whose control in `snapshot` shows something other than its
+/// expected character. A field whose control is gone or unreadable is not
+/// counted.
+fn wrong_fields<'a, 'b>(
+    snapshot: &types::FormSnapshot,
+    fields: &'a [(&'b CodeField, String)],
+) -> Vec<&'a (&'b CodeField, String)> {
+    fields
+        .iter()
+        .filter(|(field, expected)| {
+            code_entry::find_control(snapshot, &field.id)
+                .filter(|control| control.target == field.target)
+                .and_then(|control| code_entry::holds(control, expected))
+                == Some(false)
+        })
+        .collect()
 }
 
 pub(super) async fn execute_enter_code(
@@ -414,13 +458,27 @@ pub(super) async fn execute_enter_code(
     } else {
         vec![(&step.fields[0], code.clone())]
     };
-    for (field, chunk) in &chunks {
-        if let Err(outcome) = run.fill(field, chunk, split).await {
+    // Boxes with no name after a named first box cannot be targeted: the
+    // code is typed from the first box, and the page moves focus on input.
+    let typed_through = split
+        && step.fields[0].target.is_some()
+        && step.fields[1..].iter().any(|field| field.target.is_none());
+    if typed_through {
+        if let Err(outcome) = run.fill(&step.fields[0], &code, true).await {
             return outcome;
         }
-    }
-    if let Err(outcome) = run.verify_filled(&chunks, split).await {
-        return outcome;
+        if let Err(outcome) = run.verify_typed_through(&chunks).await {
+            return outcome;
+        }
+    } else {
+        for (field, chunk) in &chunks {
+            if let Err(outcome) = run.fill(field, chunk, split).await {
+                return outcome;
+            }
+        }
+        if let Err(outcome) = run.verify_filled(&chunks, split).await {
+            return outcome;
+        }
     }
 
     let mut evidence = std::mem::take(&mut run.resolutions);

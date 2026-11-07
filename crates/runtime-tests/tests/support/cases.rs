@@ -5633,6 +5633,55 @@ pub async fn a_split_code_takes_one_character_per_box(rig: &Rig) {
     live.close().await;
 }
 
+/// Eight boxes where only the first has a name: the code is typed from the
+/// first box while the page moves focus on input, and every box is read back.
+pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {
+    const CODE: &str = "48291337";
+    let mut boxes = String::from(
+        r#"<input class="digit" aria-label="Security code" inputmode="numeric" maxlength="1">"#,
+    );
+    for _ in 2..=8 {
+        boxes.push_str(r#"<input class="digit" inputmode="numeric" maxlength="1">"#);
+    }
+    let step = format!(
+        r#"<h1>Enter the code</h1><p>We sent a code to your phone ending in 42</p>
+        <div id="boxes">{boxes}</div><p id="note"></p>"#
+    );
+    let verify = format!(
+        r#"app.addEventListener("input", (event) => {{
+          const digits = [...document.querySelectorAll(".digit")];
+          const at = digits.indexOf(event.target);
+          if (at >= 0 && event.target.value && digits[at + 1]) digits[at + 1].focus();
+        }});
+        app.addEventListener("keydown", (event) => {{
+          if (event.key !== "Enter" || !event.target.classList.contains("digit")) return;
+          const typed = [...document.querySelectorAll(".digit")].map((box) => box.value).join("");
+          typed === "{CODE}" ? accept() : reject();
+        }});"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(&step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let submitted = submit_sign_in(&live).await;
+    assert_code_required(&submitted);
+    assert_eq!(code_entry(&submitted)["codeLength"], 8, "{submitted}");
+
+    let entered = live
+        .call("intent_enter_code", json!({"code":"4829-1337"}))
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    assert!(
+        !entered.to_string().contains(CODE),
+        "code echoed: {entered}"
+    );
+    let page = live.snapshot(json!({})).await;
+    assert!(page.to_string().contains("Welcome back"), "{page}");
+    live.close().await;
+}
+
 /// A wrong code fails verification and the page keeps its code step; the
 /// right code then gets through. The code never appears in either result.
 pub async fn a_wrong_code_fails_without_echoing_it(rig: &Rig) {
