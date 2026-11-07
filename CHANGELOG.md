@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
+
+### Changed
+
+- An ACP vision harness starts once and serves every task in its own session, instead of one harness process per task.
+
 ### Fixed
 
+- Harness warnings no longer corrupt an ACP vision result: bobby advertises `session.notices`.
 - After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
 - `bobby install` keeps an existing `[vision].collect_training_data = true` unless `--no-collect-training-data` is passed.
 

@@ -13,6 +13,7 @@ auth-broker.workspace = true
 async-trait.workspace = true
 config.workspace = true
 intent-engine.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 types.workspace = true

@@ -1,17 +1,16 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
 use agent_client_protocol::{
     schema::{
         v1::{
-            AuthenticateRequest, CloseSessionRequest, ContentBlock, ImageContent,
-            InitializeRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+            AuthenticateRequest, ClientCapabilities, ClientSessionCapabilities,
+            CloseSessionRequest, ContentBlock, ImageContent, InitializeRequest, Meta,
+            NewSessionRequest, NoticeCapabilities, PromptRequest, RequestPermissionOutcome,
             RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
             SessionUpdate, TextContent,
         },
@@ -24,7 +23,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use intent_engine::{VisionAction, VisionBackendResult, VisionTaskPacket};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::{sync::Mutex, time::timeout};
+use tokio::{
+    sync::{oneshot, Mutex},
+    task::JoinHandle,
+    time::{timeout_at, Instant},
+};
 use types::{CommandError, ErrorCode, ErrorLayer};
 
 use crate::auth_driver::AcpAuthDriver;
@@ -67,12 +70,88 @@ pub enum AcpClientError {
     PermissionDenied,
 }
 
+/// One harness process, shared by clones, serves every task in its own session.
+/// A transport failure or timeout retires it; the next task starts a new one.
 #[derive(Debug, Clone)]
 pub struct AcpHarnessClient {
     launch: AcpAgentConfig,
     cwd: PathBuf,
     timeout: Duration,
     auth_strategy: AuthStrategy,
+    session_meta: Meta,
+    harness: Arc<SharedHarness>,
+}
+
+#[derive(Default)]
+struct SharedHarness {
+    live: Mutex<Option<Arc<LiveHarness>>>,
+    outputs: Arc<SessionOutputs>,
+}
+
+impl std::fmt::Debug for SharedHarness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedHarness").finish_non_exhaustive()
+    }
+}
+
+struct LiveHarness {
+    connection: ConnectionTo<Agent>,
+    capabilities: AcpHarnessCapabilities,
+    /// Dropping it ends the connection, which kills the harness process group.
+    _shutdown: oneshot::Sender<()>,
+    task: JoinHandle<Result<(), agent_client_protocol::Error>>,
+}
+
+/// Streamed output per open session, keyed by session id.
+type SessionOutputs = StdMutex<HashMap<String, SessionOutput>>;
+
+#[derive(Default)]
+struct SessionOutput {
+    text: String,
+    overflowed: bool,
+    permission_requested: bool,
+}
+
+impl SessionOutput {
+    fn push(&mut self, text: &str) {
+        if self.text.len().saturating_add(text.len()) > MAX_STREAMED_RESULT_BYTES {
+            self.overflowed = true;
+        } else {
+            self.text.push_str(text);
+        }
+    }
+}
+
+fn lock_outputs(outputs: &SessionOutputs) -> MutexGuard<'_, HashMap<String, SessionOutput>> {
+    outputs.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Collects one session's output while it is open; dropping it unregisters.
+struct OpenSession {
+    outputs: Arc<SessionOutputs>,
+    id: String,
+}
+
+impl OpenSession {
+    fn register(outputs: &Arc<SessionOutputs>, id: String) -> Self {
+        lock_outputs(outputs).insert(id.clone(), SessionOutput::default());
+        Self {
+            outputs: Arc::clone(outputs),
+            id,
+        }
+    }
+
+    fn finish(self) -> SessionOutput {
+        lock_outputs(&self.outputs)
+            .remove(&self.id)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for OpenSession {
+    fn drop(&mut self) {
+        lock_outputs(&self.outputs).remove(&self.id);
+    }
 }
 
 impl AcpHarnessClient {
@@ -82,6 +161,8 @@ impl AcpHarnessClient {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             timeout: Duration::from_secs(30),
             auth_strategy: AuthStrategy::Advertised,
+            session_meta: Meta::new(),
+            harness: Arc::default(),
         }
     }
 
@@ -100,6 +181,22 @@ impl AcpHarnessClient {
     #[must_use]
     pub fn with_auth_strategy(mut self, strategy: AuthStrategy) -> Self {
         self.auth_strategy = strategy;
+        self.harness = Arc::default();
+        self
+    }
+
+    /// Environment set on the harness process, over the caller's own.
+    #[must_use]
+    pub fn with_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.launch = self.launch.envs(env);
+        self.harness = Arc::default();
+        self
+    }
+
+    /// Sent as `_meta` on every `session/new`; empty sends none.
+    #[must_use]
+    pub fn with_session_meta(mut self, meta: Meta) -> Self {
+        self.session_meta = meta;
         self
     }
 
@@ -121,14 +218,97 @@ impl AcpHarnessClient {
         &self,
         packet: VisionTaskPacket,
     ) -> Result<AcpVisionReply, AcpClientError> {
-        let launch = self.launch.clone();
-        let cwd = self.cwd.clone();
-        timeout(
-            self.timeout,
-            run_task(launch, cwd, packet, self.auth_strategy),
-        )
-        .await
-        .map_err(|_| AcpClientError::Timeout)?
+        let deadline = Instant::now() + self.timeout;
+        let live = timeout_at(deadline, self.live_harness())
+            .await
+            .map_err(|_| AcpClientError::Timeout)??;
+        let outcome = timeout_at(deadline, self.run_task(&live, packet))
+            .await
+            .unwrap_or(Err(AcpClientError::Timeout));
+        if matches!(
+            outcome,
+            Err(AcpClientError::Transport(_) | AcpClientError::Timeout)
+        ) {
+            self.retire(&live).await;
+        }
+        outcome
+    }
+
+    async fn live_harness(&self) -> Result<Arc<LiveHarness>, AcpClientError> {
+        let mut live = self.harness.live.lock().await;
+        if let Some(current) = live.as_ref().filter(|current| !current.task.is_finished()) {
+            return Ok(Arc::clone(current));
+        }
+        *live = None;
+        let started = Arc::new(
+            start_harness(
+                self.launch.clone(),
+                self.auth_strategy,
+                Arc::clone(&self.harness.outputs),
+            )
+            .await?,
+        );
+        *live = Some(Arc::clone(&started));
+        Ok(started)
+    }
+
+    async fn retire(&self, used: &Arc<LiveHarness>) {
+        let mut live = self.harness.live.lock().await;
+        if live
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, used))
+        {
+            *live = None;
+        }
+    }
+
+    async fn run_task(
+        &self,
+        live: &LiveHarness,
+        packet: VisionTaskPacket,
+    ) -> Result<AcpVisionReply, AcpClientError> {
+        let mut new_session = NewSessionRequest::new(self.cwd.clone());
+        if !self.session_meta.is_empty() {
+            new_session = new_session.meta(self.session_meta.clone());
+        }
+        let session_id = live
+            .connection
+            .send_request(new_session)
+            .block_task()
+            .await
+            .map_err(transport)?
+            .session_id;
+        let open = OpenSession::register(&self.harness.outputs, session_id.0.to_string());
+        let prompt_result = live
+            .connection
+            .send_request(PromptRequest::new(
+                session_id.clone(),
+                build_prompt(&packet),
+            ))
+            .block_task()
+            .await;
+        let close_result = live
+            .connection
+            .send_request(CloseSessionRequest::new(session_id.clone()))
+            .block_task()
+            .await;
+        let output = open.finish();
+        if output.permission_requested {
+            close_result.map_err(transport)?;
+            return Err(AcpClientError::PermissionDenied);
+        }
+        prompt_result.map_err(transport)?;
+        close_result.map_err(transport)?;
+        if output.overflowed {
+            return Err(AcpClientError::OutputTooLarge);
+        }
+        Ok(AcpVisionReply {
+            result: decode_result(&output.text)?,
+            capabilities: live.capabilities.clone(),
+            child: AcpChildSession {
+                session_id: session_id.0.to_string(),
+            },
+        })
     }
 }
 
@@ -162,6 +342,18 @@ impl AcpVisionAssist {
     #[must_use]
     pub fn with_advertised_auth(mut self, enabled: bool) -> Self {
         self.client = self.client.with_advertised_auth(enabled);
+        self
+    }
+
+    #[must_use]
+    pub fn with_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.client = self.client.with_env(env);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_meta(mut self, meta: Meta) -> Self {
+        self.client = self.client.with_session_meta(meta);
         self
     }
 
@@ -245,33 +437,28 @@ fn vision_error(message: &str) -> CommandError {
     }
 }
 
-async fn run_task(
-    launch: AcpAgentConfig,
-    cwd: PathBuf,
-    packet: VisionTaskPacket,
-    auth_strategy: AuthStrategy,
-) -> Result<AcpVisionReply, AcpClientError> {
-    let output = Arc::new(Mutex::new(String::new()));
-    let overflowed = Arc::new(Mutex::new(false));
-    let permission_requested = Arc::new(AtomicBool::new(false));
-    let output_for_notification = Arc::clone(&output);
-    let overflow_for_notification = Arc::clone(&overflowed);
-    let permission_for_request = Arc::clone(&permission_requested);
-    let agent = AcpAgent::new(launch);
+type Ready = Result<(ConnectionTo<Agent>, AcpHarnessCapabilities), AcpClientError>;
 
-    agent_client_protocol::Client
+/// Spawns the harness, initializes and authenticates it, and keeps the
+/// connection open until the returned handle is dropped.
+async fn start_harness(
+    launch: AcpAgentConfig,
+    auth_strategy: AuthStrategy,
+    outputs: Arc<SessionOutputs>,
+) -> Result<LiveHarness, AcpClientError> {
+    let (ready_tx, ready_rx) = oneshot::channel::<Ready>();
+    let (shutdown, shutdown_rx) = oneshot::channel::<()>();
+    let chunk_outputs = Arc::clone(&outputs);
+    let builder = agent_client_protocol::Client
         .builder()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
                     if let ContentBlock::Text(text) = chunk.content {
-                        let mut collected = output_for_notification.lock().await;
-                        if collected.len().saturating_add(text.text.len())
-                            > MAX_STREAMED_RESULT_BYTES
+                        if let Some(output) =
+                            lock_outputs(&chunk_outputs).get_mut(&*notification.session_id.0)
                         {
-                            *overflow_for_notification.lock().await = true;
-                        } else {
-                            collected.push_str(&text.text);
+                            output.push(&text.text);
                         }
                     }
                 }
@@ -280,76 +467,77 @@ async fn run_task(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |_request: RequestPermissionRequest, responder, _connection| {
-                permission_for_request.store(true, Ordering::Relaxed);
+            async move |request: RequestPermissionRequest, responder, _connection| {
+                if let Some(output) = lock_outputs(&outputs).get_mut(&*request.session_id.0) {
+                    output.permission_requested = true;
+                }
                 responder.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ))
             },
             agent_client_protocol::on_receive_request!(),
+        );
+    let agent = AcpAgent::new(launch);
+    let task = tokio::spawn(async move {
+        builder
+            .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
+                let ready = initialize(&connection, auth_strategy).await;
+                let failed = ready.is_err();
+                let handed_out = ready_tx
+                    .send(ready.map(|capabilities| (connection.clone(), capabilities)))
+                    .is_ok();
+                if handed_out && !failed {
+                    let _ = shutdown_rx.await;
+                }
+                Ok(())
+            })
+            .await
+    });
+    match ready_rx.await {
+        Ok(Ok((connection, capabilities))) => Ok(LiveHarness {
+            connection,
+            capabilities,
+            _shutdown: shutdown,
+            task,
+        }),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(match task.await {
+            Ok(Err(error)) => transport(error),
+            Ok(Ok(())) => transport("harness exited before initialization"),
+            Err(error) => transport(error),
+        }),
+    }
+}
+
+async fn initialize(
+    connection: &ConnectionTo<Agent>,
+    auth_strategy: AuthStrategy,
+) -> Result<AcpHarnessCapabilities, AcpClientError> {
+    // With `session.notices` advertised, harness warnings arrive as notices
+    // instead of message text, so they never reach the structured result.
+    let initialized = connection
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                ClientCapabilities::new()
+                    .session(ClientSessionCapabilities::new().notices(NoticeCapabilities::new())),
+            ),
         )
-        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
-            let initialized = connection
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                .block_task()
-                .await?;
-            let capabilities = AcpHarnessCapabilities {
-                image: initialized.agent_capabilities.prompt_capabilities.image,
-                auth_method_ids: initialized
-                    .auth_methods
-                    .iter()
-                    .map(|method| method.id().0.to_string())
-                    .collect(),
-            };
-            if !capabilities.image {
-                return Ok(Err(AcpClientError::ImageUnsupported));
-            }
-            if let Err(error) =
-                authenticate_for_strategy(&connection, &initialized.auth_methods, auth_strategy)
-                    .await
-            {
-                return Ok(Err(error));
-            }
-
-            let session = connection
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await?;
-            let session_id = session.session_id.clone();
-            let prompt = build_prompt(&packet);
-            let prompt_result = connection
-                .send_request(PromptRequest::new(session_id.clone(), prompt))
-                .block_task()
-                .await;
-            let close_result = connection
-                .send_request(CloseSessionRequest::new(session_id.clone()))
-                .block_task()
-                .await;
-            if permission_requested.load(Ordering::Relaxed) {
-                close_result?;
-                return Ok(Err(AcpClientError::PermissionDenied));
-            }
-            prompt_result?;
-            close_result?;
-
-            if *overflowed.lock().await {
-                return Ok(Err(AcpClientError::OutputTooLarge));
-            }
-            let raw = output.lock().await.clone();
-            let result = match decode_result(&raw) {
-                Ok(result) => result,
-                Err(error) => return Ok(Err(error)),
-            };
-            Ok(Ok(AcpVisionReply {
-                result,
-                capabilities,
-                child: AcpChildSession {
-                    session_id: session_id.0.to_string(),
-                },
-            }))
-        })
+        .block_task()
         .await
-        .map_err(transport)?
+        .map_err(transport)?;
+    let capabilities = AcpHarnessCapabilities {
+        image: initialized.agent_capabilities.prompt_capabilities.image,
+        auth_method_ids: initialized
+            .auth_methods
+            .iter()
+            .map(|method| method.id().0.to_string())
+            .collect(),
+    };
+    if !capabilities.image {
+        return Err(AcpClientError::ImageUnsupported);
+    }
+    authenticate_for_strategy(connection, &initialized.auth_methods, auth_strategy).await?;
+    Ok(capabilities)
 }
 
 fn build_prompt(packet: &VisionTaskPacket) -> Vec<ContentBlock> {

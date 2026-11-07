@@ -267,7 +267,7 @@ The proxy reads at most 1 MiB from an upstream response, counted after decompres
 
 ### ACP backend
 
-An ACP harness that already holds the model login (Codex, Claude, OpenCode, Hermes, OpenClaw) can serve vision. bobby never receives that provider token. Each task runs in a fresh child session with bounded text and image content and a strict JSON result.
+An ACP harness that already holds the model login (Codex, Claude, OpenCode, Hermes, OpenClaw) can serve vision. bobby never receives that provider token. bobby starts the harness on the first task and keeps it running; each task opens its own session with bounded text and image content and a strict JSON result, then closes it. A transport failure or timeout stops the harness, and the next task starts a new one.
 
 ```bash
 bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised
@@ -285,6 +285,34 @@ auth = "advertised"
 ```
 
 `auth` is one of `advertised`, `oauth-authorization-code`, `oauth-device-code`, `environment`, `existing-session` or `none`. bobby calls the harness's `authenticate` method that matches the strategy and fails closed if none is advertised. Log in through the harness first. bobby does not read keychains.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `env` | `{}` | Environment for the harness process, over bobby's own; `bobby vision login` uses it too |
+| `session_meta` | `{}` | Sent as `_meta` on every `session/new` |
+
+By default a harness loads its user's own instructions, hooks, plugins, skills and MCP servers into every vision session. A vision profile can leave them out. For `claude-agent-acp`:
+
+```toml
+[vision.acp_profiles.claude]
+command = "claude-agent-acp"
+auth = "existing-session"
+
+[vision.acp_profiles.claude.session_meta.claudeCode.options]
+settingSources = []
+tools = []
+mcpServers = {}
+strictMcpConfig = true
+promptSuggestions = false
+systemPrompt = "Answer each request with exactly the JSON object it specifies."
+```
+
+For Codex, point `CODEX_HOME` at a directory whose `config.toml` sets only the model and provider, then run `bobby vision login codex` once to sign in there:
+
+```toml
+[vision.acp_profiles.codex.env]
+CODEX_HOME = "/path/to/vision-codex-home"
+```
 
 ### Corpus and training data
 
