@@ -5109,7 +5109,7 @@ fn password_manager_page() -> String {
             <label>Password <input id="pass" type="password" autocomplete="current-password webauthn"></label>
             <button>Sign in</button>
         </form>
-        <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#222;color:#fff;display:flex;align-items:center;justify-content:center">Saved login</div>
+        <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#ff00aa;color:#fff;display:flex;align-items:center;justify-content:center">Saved login</div>
         <p role="status" aria-label="Result" id="result">idle</p>
         <p role="status" aria-label="Field" id="field">untouched</p>
         <script>
@@ -5131,6 +5131,57 @@ fn password_manager_page() -> String {
             });
         </script>"#,
     )
+}
+
+/// Needs a rig whose loopback vision node points at the
+/// [`runtime_tests::VISION_MARK`] control. The control is outside the
+/// accessibility tree, so only vision can find it, and records a trusted click.
+pub async fn a_vision_click_lands_on_the_control_the_screenshot_shows(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/step",
+        Route::Html(page(
+            "Step",
+            r#"<div id="go" aria-hidden="true" style="position:fixed;top:120px;left:160px;width:200px;height:60px;background:#ff00aa"></div>
+            <p role="status" aria-label="Result" id="result">idle</p>
+            <script>
+                document.getElementById("go").addEventListener("click", (event) => {
+                    if (event.isTrusted) document.getElementById("result").textContent = "continued";
+                });
+            </script>"#,
+        )),
+    )])
+    .await;
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":site.url("/step"),
+                   "executionPolicy":{"visionAssist":true}}),
+        )
+        .await;
+    assert_eq!(started["status"], "completed", "workflow_start: {started}");
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({"purpose":"Continue",
+                   "hints":{"role":"button","accessibleName":"Continue"},
+                   "expectedState":{"condition":{"kind":"text",
+                       "target":{"role":"status","accessibleName":"Result"},
+                       "matcher":{"kind":"contains","value":"continued"}},"timeoutMs":5000}}),
+        )
+        .await;
+    assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    let landed = wait_for_result(&live, "continued").await;
+    assert_eq!(
+        landed["status"], "completed",
+        "the vision click missed the control: {landed}"
+    );
+    live.close().await;
 }
 
 async fn start_password_manager_session(rig: &Rig, url: &str, policy: Value) -> Value {

@@ -51,6 +51,24 @@ async fn password_manager_fill_clicks_the_managers_prompt() {
     cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
 }
 
+/// Screenshots of a display with two device pixels per CSS pixel are twice
+/// the viewport's size; a vision click read off one lands on its control.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_vision_click_lands_on_a_high_density_display() {
+    let endpoint = runtime_tests::pointing_vision_node().await;
+    let rig = Rig::chromium_with_vision_node_at(&endpoint, 2.0).await;
+    cases::a_vision_click_lands_on_the_control_the_screenshot_shows(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn password_manager_fill_clicks_the_prompt_on_a_high_density_display() {
+    let endpoint = runtime_tests::pointing_vision_node().await;
+    let rig = Rig::chromium_with_vision_node_at(&endpoint, 2.0).await;
+    cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
+}
+
 /// Local models report modest confidence even on a correct point; the click is
 /// still refused on page controls and verified by the fill.
 #[tokio::test(flavor = "multi_thread")]

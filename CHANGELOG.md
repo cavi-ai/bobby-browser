@@ -35,6 +35,7 @@
 - On Chromium, `selectOne` on an ARIA combobox, including a text combobox that filters as it is typed in, clicks the option whose text is the value.
 - An `intent_extract` vision fallback goes to the image provider with the screenshot, never to the text tier, which cannot read the value.
 - An unlabeled select is not named by the text of its options.
+- A vision click lands on its control on a display with more than one device pixel per CSS pixel.
 
 ## 0.23.0 - 2026-11-04
 
