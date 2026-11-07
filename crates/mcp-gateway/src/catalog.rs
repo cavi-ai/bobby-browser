@@ -254,7 +254,7 @@ tools! {
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_fill_schema, args: IntentFillArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Fill", "Reconciliable"), hints: (false, false, false, false) }
-    intent_follow { order: 16, title: "Follow link", description: "Prefer over click + wait_for. Unknown next text: networkQuiet, then inspect postState. On failure inspect postState. On needsReconciliation do not retry; call recovery_status. Requires browser:mutate and intent:execute.",
+    intent_follow { order: 16, title: "Follow link", description: "Prefer over click + wait_for. Unknown next text: networkQuiet, then inspect postState. On failure inspect postState. With visionAssist, outcomeReading evidence says what the page shows. On needsReconciliation do not retry; call recovery_status. Requires browser:mutate and intent:execute.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
@@ -443,6 +443,10 @@ mod tests {
         assert!(
             submit.contains("outcomeReading"),
             "verified submit must name the evidence that reports what the page shows"
+        );
+        assert!(
+            tool_description("intent_follow").contains("outcomeReading"),
+            "follow must name the evidence that reports what the page shows"
         );
     }
 
