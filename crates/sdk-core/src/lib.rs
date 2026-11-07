@@ -52,6 +52,22 @@ fn zigzagzig_unavailable(reason: &str) -> CommandError {
     }
 }
 
+/// Names the workflow on every screenshot an outcome carries.
+fn name_screenshot_workflow(outcome: &mut CommandOutcome, workflow: &WorkflowId) {
+    let evidence = match outcome {
+        CommandOutcome::Completed { evidence, .. }
+        | CommandOutcome::NeedsReconciliation { evidence, .. }
+        | CommandOutcome::Restarted { evidence, .. }
+        | CommandOutcome::Failed { evidence, .. } => evidence,
+        _ => return,
+    };
+    for item in evidence {
+        if let Evidence::Screenshot { origin, .. } = item {
+            origin.workflow_id.get_or_insert_with(|| workflow.clone());
+        }
+    }
+}
+
 /// The unauthenticated application service is not a public interface adapter.
 ///
 /// ```compile_fail
@@ -674,10 +690,12 @@ impl RuntimeService {
     ) -> CommandOutcome {
         use tracing::Instrument;
         let mut trace = command_trace::CommandTrace::new(&envelope);
-        let outcome = self
+        let workflow_id = envelope.workflow_id.clone();
+        let mut outcome = self
             .submit_with_vision_grant_inner(envelope, vision_capability_ok, one_shot_session_ok)
             .instrument(trace.span.clone())
             .await;
+        name_screenshot_workflow(&mut outcome, &workflow_id);
         trace.finish(&outcome);
         let bytes = serde_json::to_vec(&outcome)
             .expect("command outcomes must serialize at the runtime boundary")

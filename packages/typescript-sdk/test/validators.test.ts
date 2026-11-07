@@ -83,6 +83,7 @@ function evidenceFixtures(): Evidence[] {
     { kind: "submitSettlement", outcome: "settled" },
     { kind: "element", selector: "#save", text: null },
     { kind: "upload", selector: "input", paths: ["/tmp/a"] },
+    { kind: "upload", selector: "input", paths: ["/tmp/a"], sha256: [SHA] },
     { kind: "page", pageId: ID, url: "https://example.test/", title: "Example" },
     { kind: "pageGeneration", pageId: ID, generation: 2 },
     { kind: "pages", pages: [{ pageId: ID, url: "https://example.test/", title: "Example" }] },
@@ -98,6 +99,7 @@ function evidenceFixtures(): Evidence[] {
     { kind: "wait", condition: { kind: "networkQuiet", idleMs: 1, maxInFlight: 0 }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "networkQuiet", idleMs: 50, maxInFlight: 0, ignoreUrlSubstrings: ["analytics"], ignoreResourceTypes: ["Image"], ignoreLongLived: true }, elapsedMs: 10, observations: 2, excludedClasses: ["urlSubstring:analytics", "eventSource"] },
     { kind: "screenshot", artifactId: "artifact-1", mediaType: "image/png", width: 1, height: 1, bytes: 4, sha256: SHA },
+    { kind: "screenshot", artifactId: "artifact-2", mediaType: "image/png", width: 1, height: 1, bytes: 4, sha256: SHA, sessionId: ID, workflowId: ID_2, pageId: ID, url: "https://example.test/", capturedAt: "2026-01-01T00:00:00Z" },
     { kind: "configuration", name: "focusEmulation", value: "true" },
     { kind: "browserExecution", engine: "firefox", browserVersion: "128.0", profileId: ID, interactionPath: "engineNative" },
     { kind: "javaScriptResult", value: { answer: 42 }, truncated: false },
@@ -149,7 +151,14 @@ test("evidence fixtures cover every Rust wire variant and field", () => {
   assert.deepEqual(fixtureKinds, rustKinds);
   for (const variant of variants) {
     const kind = `${variant[1]![0]!.toLowerCase()}${variant[1]!.slice(1)}`;
-    const expected = ["kind", ...[...variant[2]!.matchAll(/^        ([a-z][a-z0-9_]*):/gm)].map((field) => field[1]!.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()))].sort();
+    // A `#[serde(flatten)]` field puts its struct's fields on the variant.
+    const flattened = (type: string) => {
+      const at = source.indexOf(`pub struct ${type} {`);
+      assert.notEqual(at, -1, type);
+      return [...source.slice(at, source.indexOf("\n}\n", at)).matchAll(/^    pub ([a-z][a-z0-9_]*):/gm)].map((field) => field[1]!);
+    };
+    const fields = [...variant[2]!.matchAll(/^        (#\[serde\(flatten\)\]\n        )?([a-z][a-z0-9_]*): ([A-Za-z0-9_]+)/gm)].flatMap((field) => field[1] ? flattened(field[3]!) : [field[2]!]);
+    const expected = ["kind", ...fields.map((field) => field.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()))].sort();
     const fixtures = evidenceFixtures().filter((evidence) => evidence.kind === kind);
     if (fixtures.some((evidence) => "pageDerived" in evidence)) {
       assert.ok(["inspection", "accessibilitySnapshot", "formSnapshot", "structuredExtraction", "outcomeReading"].includes(kind));

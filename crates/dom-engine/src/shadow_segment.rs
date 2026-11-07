@@ -108,7 +108,8 @@ pub fn resolve_shadow_segment(
 }
 
 /// A form snapshot names a host without a role and label by `group` and its
-/// `aria-label`, else its id, else `shadow root`; that name resolves it too.
+/// `aria-label`, else its id, else its custom element tag, else `shadow
+/// root`; that name resolves it too.
 fn host_by_snapshot_name(
     target: &TargetSpec,
     candidates: &[Candidate],
@@ -128,6 +129,7 @@ fn host_by_snapshot_name(
                     .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|value| !value.is_empty())
             })
+            .or_else(|| candidate.tag.clone().filter(|tag| tag.contains('-')))
             .unwrap_or_else(|| "shadow root".to_owned())
     };
     let matches = candidates

@@ -78,7 +78,7 @@ async fn quiet_window_contract(engine: Engine) {
         .await;
     assert_eq!(uploaded["status"], "completed", "{uploaded}");
     assert!(
-        uploaded.to_string().contains("upload://sha256/"),
+        uploaded.to_string().contains("upload://source/"),
         "{uploaded}"
     );
     assert!(

@@ -4064,7 +4064,7 @@ async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
     assert_eq!(set_files.params["element"]["sharedId"], "file-input");
     let serialized = serde_json::to_string(&evidence).unwrap();
     assert!(!serialized.contains(root.path().to_string_lossy().as_ref()));
-    assert!(serialized.contains("upload://sha256/"));
+    assert!(serialized.contains("upload://source/"));
 }
 
 #[tokio::test]

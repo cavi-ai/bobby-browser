@@ -123,6 +123,7 @@ impl IntentBrowser for FakeBrowser {
                 height: 1,
                 bytes: 3,
                 sha256: "abc".into(),
+                origin: Default::default(),
             }],
         ))
     }

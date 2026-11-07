@@ -871,6 +871,7 @@ async fn fill_files_uploads_and_verifies() {
         upload_evidence: vec![Evidence::Upload {
             selector: "#Resume".into(),
             paths: vec!["/tmp/resume.txt".into()],
+            sha256: Vec::new(),
         }],
     };
     let page_id = PageId::new();

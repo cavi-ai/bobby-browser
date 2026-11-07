@@ -166,6 +166,7 @@ impl worker_pool::CaptureEngine for ChallengeWorker {
             height: 1,
             bytes: 3,
             sha256: "abc".into(),
+            origin: Default::default(),
         }])
     }
 

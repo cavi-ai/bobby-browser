@@ -543,6 +543,7 @@ impl worker_pool::InputEngine for FakeWorker {
         Ok(vec![Evidence::Upload {
             selector: command.selector.clone(),
             paths: command.paths.clone(),
+            sha256: Vec::new(),
         }])
     }
 }

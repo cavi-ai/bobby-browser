@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{AttemptId, CommandId, PageId};
+use crate::{AttemptId, CommandId, PageId, SessionId, WorkflowId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -401,6 +401,24 @@ pub enum CommandOutcome {
     },
 }
 
+/// The session, workflow and page a screenshot was taken in, the page's
+/// address and when it was taken.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<WorkflowId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_id: Option<PageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Upper bound on [`Evidence::Wait`]'s `observed` value, in characters.
 ///
 /// A verification value -- a matched label, a URL, a ready state -- not page
@@ -477,6 +495,9 @@ pub enum Evidence {
     Upload {
         selector: String,
         paths: Vec<String>,
+        /// The SHA-256 of each uploaded file's content, in `paths` order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sha256: Vec<String>,
     },
     Page {
         page_id: PageId,
@@ -550,6 +571,8 @@ pub enum Evidence {
         height: u32,
         bytes: u64,
         sha256: String,
+        #[serde(flatten)]
+        origin: ScreenshotOrigin,
     },
     BrowserExecution {
         engine: String,

@@ -552,6 +552,7 @@ mod tests {
                         height: 1,
                         bytes: 4,
                         sha256: sha256_hex(b"png!"),
+                        origin: Default::default(),
                     }],
                 }),
             ))

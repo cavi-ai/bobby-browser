@@ -2829,12 +2829,14 @@ impl crate::InputEngine for ChromiumWorker {
             let control = crate::decode_form_control(&encoded, unnamed_control_target())?;
             refuse_shown_files(&control.state, &path_strings)?;
         }
+        let digests = crate::upload::content_digests(paths)?;
         upload_cache.commit(resolved_uploads);
         resolved.set_files(&page, path_strings.clone()).await?;
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
                 paths: crate::upload::opaque_upload_paths(&command.paths),
+                sha256: digests,
             },
             resolved.evidence,
         ])
@@ -3379,6 +3381,7 @@ impl crate::CaptureEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
         self.bring_page_to_front(&page).await;
+        let captured_at = chrono::Utc::now();
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
                 bounded_cdp(
@@ -3456,6 +3459,13 @@ impl crate::CaptureEngine for ChromiumWorker {
             height: record.height,
             bytes: record.bytes,
             sha256: record.sha256,
+            origin: types::ScreenshotOrigin {
+                session_id: Some(self.session_id.clone()),
+                workflow_id: None,
+                page_id: Some(page_id.clone()),
+                url: page.url().await.ok().flatten(),
+                captured_at: Some(captured_at),
+            },
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);

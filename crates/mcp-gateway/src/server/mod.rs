@@ -1165,6 +1165,7 @@ impl Server {
             .filter_map(|item| item.get("artifactId").and_then(Value::as_str))
             .collect::<BTreeSet<_>>();
         let mut content = vec![json!({"type":"text","text":text})];
+        let mut images: Vec<Vec<Value>> = Vec::new();
         for artifact_id in referenced.intersection(&trusted) {
             content.push(json!({
                 "type":"resource_link",
@@ -1183,11 +1184,11 @@ impl Server {
                         && artifact.media_type.starts_with("image/")
                     {
                         if artifact.bytes.len().div_ceil(3) * 4 <= MAX_RESOURCE_ENCODED_BYTES {
-                            content.push(json!({
+                            images.push(vec![json!({
                                 "type":"image",
                                 "data":BASE64.encode(&artifact.bytes),
                                 "mimeType":artifact.media_type
-                            }));
+                            })]);
                         } else if artifact.media_type == "image/png" {
                             // Too large to inline: a downscaled preview, with
                             // its scale, and the full image stays the artifact.
@@ -1202,18 +1203,20 @@ impl Server {
                             .ok()
                             .flatten();
                             if let Some(preview) = preview {
-                                content.push(json!({
-                                    "type":"image",
-                                    "data":BASE64.encode(&preview.png),
-                                    "mimeType":"image/png"
-                                }));
-                                content.push(json!({
-                                    "type":"text",
-                                    "text":format!(
-                                        "Preview at 1/{} scale ({}x{}); full size: artifact://{artifact_id}",
-                                        preview.factor, preview.width, preview.height
-                                    )
-                                }));
+                                images.push(vec![
+                                    json!({
+                                        "type":"image",
+                                        "data":BASE64.encode(&preview.png),
+                                        "mimeType":"image/png"
+                                    }),
+                                    json!({
+                                        "type":"text",
+                                        "text":format!(
+                                            "Preview at 1/{} scale ({}x{}); full size: artifact://{artifact_id}",
+                                            preview.factor, preview.width, preview.height
+                                        )
+                                    }),
+                                ]);
                             }
                         }
                     }
@@ -1234,6 +1237,26 @@ impl Server {
                     | "failed"
             )
         );
+        // Images go in while the frame stays under MAX_FRAME_BYTES; the rest
+        // stay readable through their resource links.
+        let frame_len = |content: &Vec<Value>| {
+            serde_json::to_vec(&success(
+                id.clone(),
+                json!({"content":content,"structuredContent":value,"isError":is_error}),
+            ))
+            .map_or(usize::MAX, |bytes| bytes.len())
+        };
+        let mut room = MAX_FRAME_BYTES.saturating_sub(frame_len(&content));
+        for group in images {
+            let size = group
+                .iter()
+                .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |bytes| bytes.len() + 1))
+                .fold(0usize, usize::saturating_add);
+            if size <= room {
+                room -= size;
+                content.extend(group);
+            }
+        }
         success(
             id,
             json!({

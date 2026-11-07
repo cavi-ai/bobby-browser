@@ -198,6 +198,7 @@ impl IntentBrowser for FakeBrowser {
                 height: 1,
                 bytes: self.screenshot_png.len() as u64,
                 sha256: "abc".into(),
+                origin: Default::default(),
             }],
         ))
     }
@@ -634,6 +635,7 @@ async fn type_into_candidate_uploads_runtime_files_without_disclosing_paths() {
         upload_files_evidence: vec![Evidence::Upload {
             selector: String::new(),
             paths: vec![PRIVATE_PATH.into()],
+            sha256: Vec::new(),
         }],
         screenshot_png: b"png".to_vec(),
         ..FakeBrowser::default()
