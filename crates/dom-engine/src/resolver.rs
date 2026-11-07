@@ -316,6 +316,22 @@ fn parse_attr(body: &str) -> Option<(String, String)> {
 /// same role: Chrome's a11y tree moved from `img` to `image`, but the DOM
 /// collector's implicit-role mapping still emits `img` for an `<img>`
 /// element, so a snapshot role fed back as a target must resolve either way.
+/// Marks a label appends to a required control's name.
+const REQUIRED_MARKERS: [char; 4] = ['*', '✱', '＊', '∗'];
+
+/// An accessible name with whitespace collapsed and a trailing required marker
+/// dropped: engines include marker text from CSS or hidden spans inconsistently.
+fn comparable_name(name: &str) -> String {
+    let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let unmarked =
+        collapsed.trim_end_matches(|c: char| REQUIRED_MARKERS.contains(&c) || c.is_whitespace());
+    if unmarked.is_empty() {
+        collapsed
+    } else {
+        unmarked.to_owned()
+    }
+}
+
 fn roles_match(wanted: &str, actual: &str) -> bool {
     if wanted.eq_ignore_ascii_case(actual) {
         return true;
@@ -372,7 +388,8 @@ fn score<'a>(
         reasons.push("exactRole".into());
     }
     if let Some(wanted) = target.accessible_name.as_ref() {
-        if candidate.name.as_deref().unwrap_or_default().trim() != wanted.trim() {
+        if comparable_name(candidate.name.as_deref().unwrap_or_default()) != comparable_name(wanted)
+        {
             return None;
         }
         score += 50;
