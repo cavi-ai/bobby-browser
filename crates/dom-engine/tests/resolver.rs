@@ -425,3 +425,64 @@ fn ambiguous_contenders_name_the_iframe_they_sit_in() {
         other => panic!("expected ambiguity, got {other:?}"),
     }
 }
+
+fn textbox(id: &str, name: &str) -> Candidate {
+    let mut item = candidate(id, name, true);
+    item.role = Some("textbox".into());
+    item
+}
+
+fn named(role: &str, name: &str) -> TargetSpec {
+    TargetSpec {
+        role: Some(role.into()),
+        accessible_name: Some(name.into()),
+        ..TargetSpec::default()
+    }
+}
+
+#[test]
+fn a_required_marker_does_not_split_a_snapshot_name_from_the_dom_name() {
+    for (dom_name, wanted) in [
+        ("Name", "Name*"),
+        ("Name*", "Name"),
+        (
+            "Are you authorized to work here? *",
+            "Are you authorized to work here?",
+        ),
+        (
+            "Are you authorized to work here? *",
+            "Are you authorized to work here?*",
+        ),
+        ("Full name ✱", "Full name"),
+        ("Email  address", "Email address"),
+    ] {
+        let candidates = vec![textbox("field", dom_name), textbox("other", "Company")];
+        let decision = resolve_candidates(
+            &named("textbox", wanted),
+            &candidates,
+            &ResolutionPolicy::default(),
+        )
+        .unwrap_or_else(|error| panic!("{wanted:?} vs {dom_name:?}: {error:?}"));
+        assert_eq!(
+            resolved_id(decision).as_deref(),
+            Some("field"),
+            "{wanted:?} vs {dom_name:?}"
+        );
+    }
+}
+
+#[test]
+fn names_that_differ_beyond_a_required_marker_still_do_not_match() {
+    for (dom_name, wanted) in [("Names", "Name"), ("Name", "*"), ("Last name*", "Name")] {
+        let candidates = vec![textbox("field", dom_name)];
+        let decision = resolve_candidates(
+            &named("textbox", wanted),
+            &candidates,
+            &ResolutionPolicy::default(),
+        );
+        assert!(
+            !matches!(decision, Ok(ResolutionDecision::Resolved { .. })),
+            "{wanted:?} must not resolve to {dom_name:?}"
+        );
+    }
+}

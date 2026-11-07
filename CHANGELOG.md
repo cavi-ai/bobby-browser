@@ -4,6 +4,7 @@
 
 ### Added
 
+- `[vision].assist_profiles` names browser profiles whose sessions always run with vision assist, so their escalations reach the vision corpus.
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 
 ### Changed
@@ -15,6 +16,11 @@
 - Harness warnings no longer corrupt an ACP vision result: bobby advertises `session.notices`.
 - After a runtime restart, the managed vision server waits for the previous server to release its address instead of exiting.
 - `bobby install` keeps an existing `[vision].collect_training_data = true` unless `--no-collect-training-data` is passed.
+- A target's `accessibleName` resolves when it differs from the control's name only by a trailing required marker or whitespace.
+- `hints.accessibleName` accepts names up to 2048 characters, the same limit as a target.
+- A typed phone number verifies when an input mask reformats it and keeps the same digits.
+- A failed `intent_complete_form` error message names the failing field and its position, so only the remaining fields need resending.
+- A tool call whose `timeoutMs` reaches one minute reports its own timeout instead of `deadlineExceeded`.
 
 ## 0.23.0 - 2026-11-04
 

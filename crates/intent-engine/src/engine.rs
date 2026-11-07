@@ -356,7 +356,18 @@ async fn execute_complete_form(
 ) -> IntentOutcome {
     let mut evidence = Vec::new();
     proactive_prefill(page_id, browser, vision, &fields, prefill_deadline).await;
-    for field in &fields {
+    for (index, field) in fields.iter().enumerate() {
+        // Suffixed, so repairs keyed on the message prefix still apply.
+        let failed = |mut error: CommandError| {
+            error.message = format!(
+                "{} (completeForm field {:?}, {} of {}; the fields before it are filled)",
+                error.message,
+                field.name,
+                index + 1,
+                fields.len()
+            );
+            error
+        };
         if let Some(reveal_target) = &field.revealed_by {
             match reveal_field(
                 page_id,
@@ -377,7 +388,10 @@ async fn execute_complete_form(
                     evidence: mut fail_evidence,
                 } => {
                     evidence.append(&mut fail_evidence);
-                    return IntentOutcome::Failed { error, evidence };
+                    return IntentOutcome::Failed {
+                        error: failed(error),
+                        evidence,
+                    };
                 }
             }
         }
@@ -408,7 +422,10 @@ async fn execute_complete_form(
                 evidence: mut field_evidence,
             } => {
                 evidence.append(&mut field_evidence);
-                return IntentOutcome::Failed { error, evidence };
+                return IntentOutcome::Failed {
+                    error: failed(error),
+                    evidence,
+                };
             }
         }
     }

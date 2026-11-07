@@ -59,6 +59,10 @@ pub struct VisionConfig {
     /// are written.
     #[serde(default, alias = "corpusDir")]
     pub corpus_dir: Option<std::path::PathBuf>,
+    /// Browser profiles whose sessions always run with vision assist, so every
+    /// escalation on them reaches the corpus. Applies while a vision provider is configured.
+    #[serde(default, alias = "assistProfiles")]
+    pub assist_profiles: Vec<String>,
     /// Capture masked proxy request/proposal pairs for later outcome labeling.
     /// This remains off unless the operator explicitly enables it.
     #[serde(default, alias = "collectTrainingData")]
@@ -97,6 +101,7 @@ impl Default for VisionConfig {
             provider_profiles: BTreeMap::new(),
             prefill: default_vision_prefill(),
             corpus_dir: None,
+            assist_profiles: Vec::new(),
             collect_training_data: false,
             training_data_dir: default_training_data_dir(),
             text_tier: None,
