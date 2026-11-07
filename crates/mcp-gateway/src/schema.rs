@@ -407,15 +407,11 @@ pub(crate) fn workflow_run_schema() -> (Value, Vec<&'static str>) {
             "workflowId": id(),
             "sessionId": id(),
             "pageId": id(),
-            "workflow": {"type":"string","enum":["fillForm","extractPage","collectLinks"]},
-            "url": string(1, MAX_URL_BYTES),
-            // The step tools validate these.
-            "fields": nonempty_array(any_value(), MAX_COLLECTION_ITEMS),
-            "submit": {"type":"object"},
-            "screenshot": {"type":"boolean"},
-            "list": {"type":"object"},
-            "next": {"type":"object"},
-            "maxPages": {"type":"integer","minimum":1,"maximum":MAX_WORKFLOW_PAGES}
+            "workflow": string(1, 64),
+            // Checked against the workflow's own inputs.
+            "inputs": {"type":"object"},
+            "runId": string(1, 64),
+            "from": string(1, 32)
         }),
         vec!["sessionId", "pageId", "workflow"],
     )
@@ -799,13 +795,10 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("download_url", "saveAs") => "Absolute path to save the file to.",
         ("download_url", "expectedContentType") => "Content type the response must have.",
         ("intent_complete_form", "fields") => "Fields to fill, in order.",
-        ("workflow_run", "workflow") => "Steps to run.",
-        ("workflow_run", "url") => "Opened first.",
-        ("workflow_run", "fields") => "intent_complete_form or intent_extract fields.",
-        ("workflow_run", "submit") => "intent_submit_and_verify args; omit to not submit.",
-        ("workflow_run", "list") => "Target of the link list.",
-        ("workflow_run", "next") => "intent_follow args for the next page.",
-        ("workflow_run", "maxPages") => "Pages to read; default 1.",
+        ("workflow_run", "workflow") => "Name in bobby://workflows.",
+        ("workflow_run", "inputs") => "Its inputs.",
+        ("workflow_run", "runId") => "Rerun this earlier run.",
+        ("workflow_run", "from") => "Step to rerun from.",
         ("intent_enter_code", "code") => "The code. Spaces and dashes are ignored.",
         ("intent_enter_code", "hints") => "Names the code field; omit to use the one the page shows.",
         ("intent_enter_code", "submit") => "Press the step's submit control; default true.",
@@ -1420,15 +1413,22 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "workflow_run" => object(
             json!({
                 "status": command_outcome_properties()["status"].clone(),
-                "workflow": {"type":"string","enum":["fillForm","extractPage","collectLinks"]},
+                "workflow": string(1, 64),
                 "workflowId": id(),
+                "runId": string(1, 64),
+                // A forEach step's result is the array of its items' results.
                 "steps": array(
-                    object(json!({"tool":string(1, 64),"result":{"type":"object"}}), &["tool", "result"]),
+                    object(
+                        json!({"id":string(1, 32),"tool":string(1, 64),"workflow":string(1, 64),
+                               "result":{"type":["object","array"]},"reused":{"type":"boolean"}}),
+                        &["result"],
+                    ),
                     MAX_COLLECTION_ITEMS,
                 ),
                 "stoppedAt": string(1, 64),
                 "error": {"type":"object"},
                 "evidence": {"type":"array","items":{"type":"object"}},
+                "outputs": {"type":"object"},
                 "links": array(
                     object(json!({"name":string(0, MAX_STRING_BYTES),"url":string(1, MAX_URL_BYTES)}), &["name", "url"]),
                     MAX_WORKFLOW_LINKS,
@@ -4768,6 +4768,12 @@ fn push_pointer(pointer: &str, token: &str) -> String {
 
 fn validate(root: &Value, schema: &Value, value: &Value) -> Validated {
     validate_at(root, schema, value, 0, "")
+}
+
+/// Validates `value` against a whole schema document whose `$ref`s point
+/// into its own `$defs`.
+pub(crate) fn validate_document(schema: &Value, value: &Value) -> Validated {
+    validate(schema, schema, value)
 }
 
 /// Bounds validator recursion independently of schema shape. `AccessibilityNode` is

@@ -132,7 +132,8 @@ async fn run() -> anyhow::Result<()> {
         EventStore::new(config.interface.max_event_retention),
         resources,
     )
-    .with_success_screenshots(config.mcp.success_screenshots);
+    .with_success_screenshots(config.mcp.success_screenshots)
+    .with_workflow_dirs(config.mcp.workflow_search_dirs());
     if let Some(configured) = config.mcp.startup_toolset.as_deref() {
         // A typo here is worth failing on: config is edited deliberately, and
         // silently serving the full surface would look like the setting worked.

@@ -146,6 +146,7 @@ pub(crate) async fn connect(
                             )
                             .with_connection_toolset(toolset)
                             .with_success_screenshots(state.mcp_success_screenshots)
+                            .with_workflow_dirs(state.mcp_workflow_dirs.clone())
                             .with_jobs(std::sync::Arc::new(mcp_gateway::InProcessJobPort::new(
                                 state.scheduler.clone(),
                             )));

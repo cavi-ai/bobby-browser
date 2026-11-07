@@ -7264,7 +7264,8 @@ pub async fn a_fill_form_workflow_fills_and_submits(rig: &Rig) {
     let filled = live
         .call(
             "workflow_run",
-            json!({"workflow":"fillForm","url":site.url("/form"),"fields":fields,"screenshot":true}),
+            json!({"workflow":"fillForm",
+                   "inputs":{"url":site.url("/form"),"fields":fields,"screenshot":true}}),
         )
         .await;
     assert_eq!(filled["status"], "completed", "{filled}");
@@ -7284,10 +7285,10 @@ pub async fn a_fill_form_workflow_fills_and_submits(rig: &Rig) {
     let sent = live
         .call(
             "workflow_run",
-            json!({"workflow":"fillForm","fields":fields,
+            json!({"workflow":"fillForm","inputs":{"fields":fields,
                    "submit":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"},
                              "expectedState":{"condition":{"kind":"url",
-                                 "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}}),
+                                 "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}}}),
         )
         .await;
     assert_eq!(sent["status"], "completed", "{sent}");
@@ -7305,10 +7306,10 @@ pub async fn a_fill_form_workflow_fills_and_submits(rig: &Rig) {
     let stopped = live
         .call(
             "workflow_run",
-            json!({"workflow":"fillForm","url":site.url("/form"),
+            json!({"workflow":"fillForm","inputs":{"url":site.url("/form"),
                    "fields":[{"name":"Phone","purpose":"phone","value":{"kind":"setText","value":"5"},
                               "hints":{"role":"textbox","accessibleName":"Phone"}}],
-                   "submit":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"}}}),
+                   "submit":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"}}}}),
         )
         .await;
     assert_eq!(stopped["status"], "failed", "{stopped}");
@@ -7339,14 +7340,14 @@ pub async fn an_extract_page_workflow_reads_the_fields(rig: &Rig) {
     let read = live
         .call(
             "workflow_run",
-            json!({"workflow":"extractPage","url":site.url("/posting"),
+            json!({"workflow":"extractPage","inputs":{"url":site.url("/posting"),
             "fields":[
                 {"name":"apply","purpose":"apply link",
                  "hints":{"role":"link","accessibleName":"Apply now"},"value":{"kind":"href"}},
                 {"name":"req","purpose":"requisition",
                  "hints":{"role":"link","accessibleName":"Apply now"},
                  "value":{"kind":"attribute","attribute":"data-req"}}
-            ]}),
+            ]}}),
         )
         .await;
     assert_eq!(read["status"], "completed", "{read}");
@@ -7406,9 +7407,9 @@ pub async fn a_collect_links_workflow_reads_every_page(rig: &Rig) {
     let collected = live
         .call(
             "workflow_run",
-            json!({"workflow":"collectLinks","maxPages":5,
+            json!({"workflow":"collectLinks","inputs":{"maxPages":5,
                    "list":{"role":"list","accessibleName":"Results"},
-                   "next":{"purpose":"next page","hints":{"role":"link","accessibleName":"Next"}}}),
+                   "next":{"purpose":"next page","hints":{"role":"link","accessibleName":"Next"}}}}),
         )
         .await;
     assert_eq!(collected["status"], "completed", "{collected}");
@@ -7438,5 +7439,277 @@ pub async fn a_collect_links_workflow_reads_every_page(rig: &Rig) {
         ],
         "{collected}"
     );
+    live.close().await;
+}
+
+fn write_workflow(dir: &std::path::Path, name: &str, definition: Value) {
+    let bytes = serde_json::to_vec_pretty(&definition).expect("serializable workflow");
+    std::fs::write(dir.join(format!("{name}.json")), bytes).expect("write workflow file");
+}
+
+/// The step ids a file workflow result lists, in order.
+fn step_ids(result: &Value) -> Vec<String> {
+    result["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn contact_form_page() -> String {
+    page(
+        "Form",
+        r#"<form action="/sent"><label>Name <input name="name"></label>
+        <label>Email <input name="email" type="email"></label>
+        <button type="submit">Send</button></form><a href="/help">Help</a>"#,
+    )
+}
+
+/// A workflow that fills the contact form and sends it when `send` is true;
+/// with `read_reply` it then follows the reply's link named `nextLink`.
+fn contact_workflow(read_reply: bool) -> Value {
+    let mut steps = vec![
+        json!({"id":"open","tool":"navigate","args":{"url":{"$input":"formUrl"}}}),
+        json!({"id":"help","tool":"intent_extract","args":{"purpose":"read the help link","fields":[
+            {"name":"help","purpose":"help link","hints":{"role":"link","accessibleName":"Help"},
+             "value":{"kind":"href"}}]}}),
+        json!({"id":"fill","tool":"intent_complete_form","args":{"purpose":"fill the contact form","fields":[
+            {"name":"Name","purpose":"name","hints":{"role":"textbox","accessibleName":"Name"},
+             "value":{"kind":"setText","value":{"$input":"name"}}},
+            {"name":"Email","purpose":"email","hints":{"role":"textbox","accessibleName":"Email"},
+             "value":{"kind":"setText","value":{"$input":"email"}}}]}}),
+        json!({"id":"send","tool":"intent_submit_and_verify","when":{"$input":"send"},
+               "args":{"purpose":"send the form","hints":{"role":"button","accessibleName":"Send"}}}),
+    ];
+    let mut inputs = json!({
+        "formUrl":{"type":"string"},
+        "name":{"type":"string"},
+        "email":{"type":"string"},
+        "send":{"type":"boolean","default":false}
+    });
+    let mut outputs = json!({
+        "help":{"$step":"help","field":"help"},
+        "filled":{"$step":"fill","pointer":"/status"}
+    });
+    if read_reply {
+        steps.push(json!({"id":"reply","tool":"intent_follow","args":{"purpose":"open the next page",
+            "hints":{"role":"link","accessibleName":{"$input":"nextLink"}},
+            "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/done"}},
+                             "timeoutMs":5000}}}));
+        inputs["nextLink"] = json!({"type":"string"});
+        outputs["next"] = json!({"$step":"reply","pointer":"/status"});
+    }
+    json!({"name":"contact","description":"Fill the contact form; send it when send is true.",
+           "inputs":inputs,"steps":steps,"outputs":outputs})
+}
+
+/// A workflow file runs by name with the caller's inputs: `$input` values
+/// fill the form, a `when` step is skipped while its input is false, and
+/// `outputs` read the results of earlier steps.
+pub async fn a_workflow_file_fills_a_form_from_its_inputs(rig: &Rig, dir: &std::path::Path) {
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(page("Start", "<main>Start</main>"))),
+        ("/form", Route::Html(contact_form_page())),
+        ("/sent", Route::Html(echo_page())),
+    ])
+    .await;
+    write_workflow(dir, "contact", contact_workflow(false));
+    let live = Live::open(rig, &site.url("/start")).await;
+    let inputs = json!({"formUrl":site.url("/form"),"name":"Ada","email":"ada@example.com"});
+
+    let filled = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"contact","inputs":inputs}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    assert_eq!(
+        step_ids(&filled),
+        ["open", "help", "fill", "send"],
+        "{filled}"
+    );
+    assert_eq!(
+        filled["steps"][3]["result"]["status"], "skipped",
+        "{filled}"
+    );
+    assert!(
+        filled["outputs"]["help"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/help")),
+        "{filled}"
+    );
+    assert_eq!(filled["outputs"]["filled"], "completed", "{filled}");
+    assert_eq!(site.hits("/sent"), 0, "a skipped step submitted the form");
+
+    let mut sending = inputs.clone();
+    sending["send"] = json!(true);
+    let sent = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"contact","inputs":sending}),
+        )
+        .await;
+    assert_eq!(sent["status"], "completed", "{sent}");
+    assert_eq!(sent["steps"][3]["result"]["status"], "completed", "{sent}");
+    let echoed = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&echoed, "echo name=Ada&email=ada@example.com"),
+        "{echoed}"
+    );
+    assert_eq!(site.hits("/sent"), 1);
+    live.close().await;
+}
+
+/// A rerun with `runId` and `from` starts at the named step: the steps
+/// before it keep their recorded results for refs and outputs and do not run
+/// again, so the form is neither reopened nor sent twice.
+pub async fn a_rerun_from_a_step_keeps_earlier_results(rig: &Rig, dir: &std::path::Path) {
+    let reply = page(
+        "Sent",
+        r#"<main><h1>Sent</h1><a href="/done/7">Done</a></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(page("Start", "<main>Start</main>"))),
+        ("/form", Route::Html(contact_form_page())),
+        ("/sent", Route::Html(reply)),
+        ("/done/7", Route::Html(page("Done", "<main>Done</main>"))),
+    ])
+    .await;
+    write_workflow(dir, "contact", contact_workflow(true));
+    let live = Live::open(rig, &site.url("/start")).await;
+    let mut inputs = json!({"formUrl":site.url("/form"),"name":"Ada","email":"ada@example.com",
+                            "send":true,"nextLink":"Finish"});
+
+    let failed = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"contact","inputs":inputs}),
+        )
+        .await;
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["stoppedAt"], "reply", "{failed}");
+    assert_eq!(
+        step_ids(&failed),
+        ["open", "help", "fill", "send", "reply"],
+        "{failed}"
+    );
+    assert_eq!(site.hits("/sent"), 1);
+
+    inputs["nextLink"] = json!("Done");
+    let resumed = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"contact","inputs":inputs,"runId":failed["runId"],"from":"reply"}),
+        )
+        .await;
+    assert_eq!(resumed["status"], "completed", "{resumed}");
+    assert_eq!(resumed["runId"], failed["runId"], "{resumed}");
+    assert_eq!(
+        step_ids(&resumed),
+        ["open", "help", "fill", "send", "reply"],
+        "{resumed}"
+    );
+    for step in 0..4 {
+        assert_eq!(resumed["steps"][step]["reused"], true, "{resumed}");
+    }
+    assert!(resumed["steps"][4].get("reused").is_none(), "{resumed}");
+    assert!(
+        resumed["outputs"]["help"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/help")),
+        "{resumed}"
+    );
+    assert_eq!(resumed["outputs"]["next"], "completed", "{resumed}");
+    assert_eq!(site.hits("/done/7"), 1, "{resumed}");
+    assert_eq!(site.hits("/form"), 1, "the rerun opened the form again");
+    assert_eq!(site.hits("/sent"), 1, "the rerun sent the form again");
+    live.close().await;
+}
+
+/// A `forEach` step runs a workflow once per item of an input array, in
+/// order; `continueOn` keeps going past an item that fails with a listed
+/// code, and that item's result keeps its failure.
+pub async fn a_for_each_step_runs_a_workflow_per_item(rig: &Rig, dir: &std::path::Path) {
+    let posting = |n: u8| {
+        page(
+            "Posting",
+            &format!(r#"<main><h1>Posting {n}</h1><a href="/apply/{n}">Apply</a></main>"#),
+        )
+    };
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(page("Start", "<main>Start</main>"))),
+        ("/p/1", Route::Html(posting(1))),
+        ("/p/2", Route::Html(posting(2))),
+        (
+            "/p/3",
+            Route::Html(page("Posting", "<main><h1>Closed</h1></main>")),
+        ),
+        (
+            "/apply/1",
+            Route::Html(page("Apply", "<main>Apply 1</main>")),
+        ),
+        (
+            "/apply/2",
+            Route::Html(page("Apply", "<main>Apply 2</main>")),
+        ),
+    ])
+    .await;
+    write_workflow(
+        dir,
+        "read-posting",
+        json!({"name":"read-posting","inputs":{"url":{"type":"string"}},
+               "steps":[
+                   {"id":"open","tool":"navigate","args":{"url":{"$input":"url"}}},
+                   {"id":"read","tool":"intent_extract","args":{"purpose":"read the apply link","fields":[
+                       {"name":"apply","purpose":"apply link","hints":{"role":"link","accessibleName":"Apply"},
+                        "value":{"kind":"href"}}]}},
+                   {"id":"apply","tool":"intent_follow","args":{"purpose":"open the application",
+                       "hints":{"role":"link","accessibleName":"Apply"},
+                       "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/apply/"}},
+                                        "timeoutMs":5000}}}],
+               "outputs":{"apply":{"$step":"read","field":"apply"}}}),
+    );
+    write_workflow(
+        dir,
+        "read-postings",
+        json!({"name":"read-postings","inputs":{"urls":{"type":"array"}},
+               "steps":[{"id":"each","workflow":"read-posting","forEach":{"$input":"urls"},
+                         "args":{"url":{"$item":""}},"continueOn":["targetNotFound"]}],
+               "outputs":{"postings":{"$step":"each","pointer":""}}}),
+    );
+    let live = Live::open(rig, &site.url("/start")).await;
+    let urls = json!([site.url("/p/1"), site.url("/p/2"), site.url("/p/3")]);
+
+    let read = live
+        .call(
+            "workflow_run",
+            json!({"workflow":"read-postings","inputs":{"urls":urls}}),
+        )
+        .await;
+    assert_eq!(read["status"], "completed", "{read}");
+    let each = read["steps"][0]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("forEach result is an array: {read}"));
+    assert_eq!(each.len(), 3, "{read}");
+    for (item, path) in [(0, "/apply/1"), (1, "/apply/2")] {
+        assert_eq!(each[item]["status"], "completed", "{read}");
+        assert!(
+            each[item]["outputs"]["apply"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(path)),
+            "{read}"
+        );
+    }
+    assert_eq!(each[2]["status"], "failed", "{read}");
+    assert_eq!(each[2]["error"]["code"], "targetNotFound", "{read}");
+    assert_eq!(
+        read["outputs"]["postings"], read["steps"][0]["result"],
+        "{read}"
+    );
+    for path in ["/p/1", "/p/2", "/p/3", "/apply/1", "/apply/2"] {
+        assert_eq!(site.hits(path), 1, "{path}");
+    }
     live.close().await;
 }

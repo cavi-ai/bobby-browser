@@ -79,9 +79,8 @@ pub(crate) struct WorkflowObserveArgs {
     pub(crate) target: Option<types::TargetSpec>,
 }
 
-/// The workflows `workflow_run` runs.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+/// The workflows the gateway runs natively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NamedWorkflow {
     FillForm,
     ExtractPage,
@@ -89,6 +88,15 @@ pub(crate) enum NamedWorkflow {
 }
 
 impl NamedWorkflow {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "fillForm" => Some(Self::FillForm),
+            "extractPage" => Some(Self::ExtractPage),
+            "collectLinks" => Some(Self::CollectLinks),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::FillForm => "fillForm",
@@ -98,8 +106,6 @@ impl NamedWorkflow {
     }
 }
 
-/// `fields`, `submit`, `list` and `next` are passed to the tools a workflow
-/// runs, which validate them.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkflowRunArgs {
@@ -107,19 +113,32 @@ pub(crate) struct WorkflowRunArgs {
     pub(crate) page_id: types::PageId,
     #[serde(default)]
     pub(crate) workflow_id: Option<types::WorkflowId>,
-    pub(crate) workflow: NamedWorkflow,
+    pub(crate) workflow: String,
+    #[serde(default)]
+    pub(crate) inputs: serde_json::Map<String, Value>,
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) from: Option<String>,
+}
+
+/// A built-in workflow's inputs. `fields`, `submit`, `list` and `next` are
+/// passed to the tools it runs, which validate them.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BuiltinInputs {
     #[serde(default)]
     pub(crate) url: Option<String>,
     #[serde(default)]
     pub(crate) fields: Option<Vec<Value>>,
     #[serde(default)]
-    pub(crate) submit: Option<Value>,
+    pub(crate) submit: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
     pub(crate) screenshot: Option<bool>,
     #[serde(default)]
-    pub(crate) list: Option<Value>,
+    pub(crate) list: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
-    pub(crate) next: Option<Value>,
+    pub(crate) next: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
     pub(crate) max_pages: Option<u32>,
 }

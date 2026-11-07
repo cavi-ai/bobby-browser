@@ -357,7 +357,7 @@ tools! {
     workflow_recover { order: 53, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
-    workflow_run { order: 55, title: "Run a named workflow", description: "fillForm: intent_complete_form, then intent_submit_and_verify if submit. extractPage: intent_extract. collectLinks: links in list, following next. Requires browser:mutate and intent:execute. On failure stoppedAt names the failed step.",
+    workflow_run { order: 55, title: "Run a named workflow", description: "Run fillForm, extractPage, collectLinks or a workflow file; bobby://workflows lists them and their inputs. Requires browser:mutate and intent:execute. On failure stoppedAt names the step; rerun with runId and from.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,

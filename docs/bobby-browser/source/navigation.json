@@ -15,6 +15,7 @@
       "title": "Guides",
       "pages": [
         { "title": "Intent commands", "path": "guides/intents.md" },
+        { "title": "Workflow files", "path": "guides/workflows.md" },
         { "title": "Accessibility snapshot", "path": "guides/accessibility-snapshot.md" },
         { "title": "JavaScript evaluation", "path": "guides/javascript-eval.md" },
         { "title": "Events and recovery", "path": "guides/events-recovery.md" },

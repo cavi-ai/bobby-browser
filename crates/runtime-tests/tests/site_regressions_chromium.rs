@@ -79,6 +79,24 @@ async fn uploads_by_label_refuse_a_slot_that_shows_a_file() {
     cases::uploads_by_label_refuse_a_slot_that_shows_a_file(&rig, dir.path()).await;
 }
 
+macro_rules! workflow_file_cases {
+    ($($name:ident),+ $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires installed Chrome or Chromium"]
+        async fn $name() {
+            let dir = tempfile::tempdir().expect("workflow dir");
+            let rig = Rig::chromium_with_workflow_dirs(vec![dir.path().to_path_buf()]).await;
+            cases::$name(&rig, dir.path()).await;
+        }
+    )+};
+}
+
+workflow_file_cases!(
+    a_workflow_file_fills_a_form_from_its_inputs,
+    a_rerun_from_a_step_keeps_earlier_results,
+    a_for_each_step_runs_a_workflow_per_item,
+);
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_humanized_click_reaches_an_option_scrolled_out_of_its_list() {

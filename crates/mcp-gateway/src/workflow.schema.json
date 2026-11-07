@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bobby-browser workflow",
+  "description": "A named list of steps that workflow_run runs by name. Each step calls one MCP tool or runs another workflow; values pass between steps only through ref objects.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "steps"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "description": "Equals the file name without .json."
+    },
+    "description": {"type": "string", "maxLength": 512},
+    "inputs": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {"pattern": "^[a-zA-Z][a-zA-Z0-9]{0,31}$"},
+      "additionalProperties": {"$ref": "#/$defs/input"}
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/step"}
+    },
+    "outputs": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": {"$ref": "#/$defs/stepRef"}
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["string", "number", "boolean", "array", "object"]},
+        "description": {"type": "string", "maxLength": 256},
+        "default": {"description": "Used when the call leaves the input out; an input without one is required."}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "oneOf": [{"required": ["tool"]}, {"required": ["workflow"]}],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-zA-Z0-9]{0,31}$"},
+        "tool": {"type": "string", "maxLength": 64, "description": "An MCP tool; the run's sessionId, pageId and workflowId are added to its args."},
+        "workflow": {"type": "string", "maxLength": 64, "description": "A built-in or file workflow; args are its inputs."},
+        "args": {"type": "object", "description": "The tool's arguments or the workflow's inputs; any value may be a ref."},
+        "when": {
+          "oneOf": [{"$ref": "#/$defs/inputRef"}, {"$ref": "#/$defs/stepRef"}],
+          "description": "Run the step only when the ref is neither null nor false."
+        },
+        "forEach": {
+          "$ref": "#/$defs/inputRef",
+          "description": "An array input: the step runs once per item, and $item refs read the item."
+        },
+        "continueOn": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"type": "string", "maxLength": 64},
+          "description": "Error codes that do not stop the run."
+        }
+      }
+    },
+    "inputRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$input"],
+      "properties": {"$input": {"type": "string"}}
+    },
+    "stepRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$step"],
+      "properties": {
+        "$step": {"type": "string"},
+        "pointer": {"type": "string", "description": "JSON Pointer into the step's result."},
+        "field": {"type": "string", "description": "The value the step's extraction evidence holds for this field."}
+      }
+    }
+  }
+}
