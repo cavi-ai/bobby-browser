@@ -1,0 +1,9 @@
+{
+  "categories": ["web-development"],
+  "summary": {
+    "en-US": "Connects Firefox to a local bobby-browser runtime, which observes and acts on pages in a dedicated profile."
+  },
+  "version": {
+    "license": "MIT"
+  }
+}

@@ -23,6 +23,7 @@
 - Intent hints with a `role` and an `ordinal` but no name pick the control by position among that role instead of using `purpose` as its name.
 - `type_text` replaces the field's text unless `clearFirst` is false; a value of only line breaks presses Enter without clearing.
 - On Chromium, `upload_files` and `setFiles` refuse a file control that already holds or shows another file until it is cleared.
+- Releases publish the Firefox companion as a listed add-on on addons.mozilla.org.
 
 ### Fixed
 

@@ -96,6 +96,7 @@ jobs:
           python3 -m unittest scripts/test_check_version_agreement.py
           python3 scripts/check-version-agreement.py
           python3 -m unittest scripts/test_homebrew_release.py
+          python3 -m unittest scripts/test_amo_signed_companion.py
 
       - name: Release installer regressions
         run: scripts/install-release.test.sh
