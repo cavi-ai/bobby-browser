@@ -5633,6 +5633,78 @@ pub async fn a_split_code_takes_one_character_per_box(rig: &Rig) {
     live.close().await;
 }
 
+/// `selectOne` on ARIA comboboxes picks the option whose text is the value:
+/// a text combobox whose filtered options mount on input (the first match is
+/// a different option) and a button-like combobox that opens on click.
+pub async fn select_one_picks_the_exact_option_of_an_aria_combobox(rig: &Rig) {
+    let body = r#"<label id="lang-label">Language</label>
+        <input id="lang" role="combobox" aria-labelledby="lang-label" aria-autocomplete="list" autocomplete="off">
+        <div id="source-label">Referral source</div>
+        <div id="source" role="combobox" tabindex="0" aria-labelledby="source-label">Choose one</div>
+        <p id="picked"></p>
+        <div id="portal"></div>
+        <script>
+          const input = document.getElementById("lang");
+          const source = document.getElementById("source");
+          const portal = document.getElementById("portal");
+          const languages = ["Mother tongue", "Other", "Another language"];
+          const show = () => {
+            document.getElementById("picked").textContent =
+              `Language: ${input.value}; Referral source: ${source.textContent}`;
+          };
+          const render = (items, event, pick) => {
+            portal.innerHTML = "";
+            const list = document.createElement("ul");
+            list.setAttribute("role", "listbox");
+            for (const item of items) {
+              const option = document.createElement("li");
+              option.setAttribute("role", "option");
+              option.textContent = item;
+              option.addEventListener(event, (press) => {
+                press.preventDefault();
+                pick(item);
+                portal.innerHTML = "";
+                show();
+              });
+              list.append(option);
+            }
+            portal.append(list);
+          };
+          input.addEventListener("input", () => {
+            const query = input.value.toLowerCase();
+            const matches = languages.filter((item) => item.toLowerCase().includes(query));
+            render(matches, "mousedown", (item) => { input.value = item; });
+          });
+          input.addEventListener("keydown", (event) => {
+            const first = portal.querySelector('[role="option"]');
+            if (event.key === "Enter" && first) { input.value = first.textContent; portal.innerHTML = ""; show(); }
+          });
+          input.addEventListener("blur", () => { if (!languages.includes(input.value)) input.value = ""; });
+          source.addEventListener("click", () =>
+            render(["Search engine", "Other", "Friend"], "click", (item) => { source.textContent = item; }));
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/combo", Route::Html(page("Combo", body)))]).await;
+    let live = Live::open(rig, &site.url("/combo")).await;
+    for name in ["Language", "Referral source"] {
+        let picked = live
+            .call(
+                "intent_fill",
+                json!({"purpose":format!("choose the {name}"),
+                       "hints":{"role":"combobox","accessibleName":name},
+                       "value":{"kind":"selectOne","value":"Other"}}),
+            )
+            .await;
+        assert_eq!(picked["status"], "completed", "{name}: {picked}");
+    }
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page.to_string()
+            .contains("Language: Other; Referral source: Other"),
+        "{page}"
+    );
+    live.close().await;
+}
+
 /// Eight boxes where only the first has a name: the code is typed from the
 /// first box while the page moves focus on input, and every box is read back.
 pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {

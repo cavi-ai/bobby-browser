@@ -653,6 +653,79 @@ impl ResolvedTarget {
         self.eval(page, &script).await
     }
 
+    /// Chooses the option of an ARIA combobox whose text is `value` (ignoring
+    /// case and spacing): opens the combobox, types `value` to filter it when
+    /// it takes text, waits for that exact option to show, clicks it, and
+    /// returns the option text once the combobox shows it.
+    pub async fn select_combobox_option(
+        &self,
+        page: &Page,
+        value: &str,
+    ) -> Result<String, CommandError> {
+        if self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await? {
+            self.type_text(page, value, true).await?;
+        } else {
+            self.click(page).await?;
+        }
+        let wanted = serde_json::to_string(value).map_err(|error| {
+            target_error(
+                ErrorCode::InvalidRequest,
+                format!("invalid option value: {error}"),
+            )
+        })?;
+        let find = format!("const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_OPTION_FOUND}");
+        let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
+        let option = loop {
+            let found: ComboboxOption = self.eval(page, &find).await?;
+            if found.text.is_some() || Instant::now() >= deadline {
+                break found;
+            }
+            tokio::time::sleep(COMBOBOX_POLL).await;
+        };
+        let Some(text) = option.text else {
+            return Err(target_error(
+                ErrorCode::TargetNotFound,
+                format!(
+                    "no option of the combobox reads {value:?}; options shown: {:?}",
+                    option.shown
+                ),
+            ));
+        };
+        // A trusted press where the point is in the top-level viewport; an
+        // option inside a frame takes the page's own event sequence.
+        match (option.x, option.y) {
+            (Some(x), Some(y)) if self.frame_path.is_empty() && self.frame_owners.is_empty() => {
+                page.click(Point { x, y }).await.map_err(cdp_error)?;
+            }
+            _ => {
+                let press =
+                    format!("const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_OPTION_PRESS}");
+                self.eval::<bool>(page, &press).await?;
+            }
+        }
+        let shows = format!(
+            "const chosen={}; {COMBOBOX_SHOWS_SCRIPT}",
+            serde_json::to_string(&text).unwrap_or_default()
+        );
+        let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
+        loop {
+            let shown: ComboboxShown = self.eval(page, &shows).await?;
+            if shown.chosen {
+                return Ok(text);
+            }
+            if Instant::now() >= deadline {
+                return Err(target_error(
+                    ErrorCode::VerificationFailed,
+                    format!(
+                        "the combobox shows {:?} after choosing the option {text:?}",
+                        shown.value
+                    ),
+                ));
+            }
+            tokio::time::sleep(COMBOBOX_POLL).await;
+        }
+    }
+
     pub async fn select_options(
         &self,
         page: &Page,
@@ -786,6 +859,46 @@ impl ResolvedTarget {
         eval_scoped(page, &self.locator.scope, expression).await
     }
 }
+
+/// How long an ARIA combobox may take to show the wanted option, and to show
+/// the choice once the option is pressed.
+const COMBOBOX_OPTION_WAIT: Duration = Duration::from_secs(3);
+const COMBOBOX_POLL: Duration = Duration::from_millis(100);
+
+#[derive(Deserialize)]
+struct ComboboxOption {
+    text: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    #[serde(default)]
+    shown: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ComboboxShown {
+    chosen: bool,
+    value: String,
+}
+
+/// Function body with `el` bound: whether the combobox is a text field.
+const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
+
+/// Shared by the option scripts, with `el` and `wanted` bound: the visible,
+/// enabled options of the combobox's own listbox (`aria-controls` or
+/// `aria-owns`), else of its document, and the one whose text is `wanted`.
+const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"]')]).filter(o=>visible(o)&&enabled(o)); let options=of(ids.map(id=>doc.getElementById(id)).filter(Boolean)); if(!options.length) options=of([doc]); const exact=options.filter(o=>norm(o.textContent)===norm(wanted)); const match=(exact.length?exact:options.filter(o=>norm(o.textContent).toLowerCase()===norm(wanted).toLowerCase()))[0];";
+
+/// After [`COMBOBOX_OPTIONS`]: the matching option's text and viewport
+/// center, or the texts of the options shown.
+const COMBOBOX_OPTION_FOUND: &str = "if(!match) return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80))}; match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
+
+/// After [`COMBOBOX_OPTIONS`]: presses the matching option with the pointer
+/// and mouse events a person's click fires.
+const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); for(const type of ['pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{bubbles:true,cancelable:true,composed:true,view:doc.defaultView}))} return true;";
+
+/// Function body with `el` and `chosen` bound: whether the combobox, or the
+/// nearest of its ancestors that holds no option, shows the chosen text.
+const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector('[role=\"option\"]')) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
 
 /// Function body with `el` bound: whether `el` takes typed text. Checked
 /// before any key is dispatched.

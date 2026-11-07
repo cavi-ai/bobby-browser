@@ -501,7 +501,11 @@ fn supported_operations(
                 || tag.eq_ignore_ascii_case("input")
                 || tag.eq_ignore_ascii_case("textarea") =>
         {
-            vec![FormControlOperation::SetText, FormControlOperation::Clear]
+            vec![
+                FormControlOperation::SetText,
+                FormControlOperation::SelectOne,
+                FormControlOperation::Clear,
+            ]
         }
         FormControlKind::SelectOne | FormControlKind::Combobox => {
             vec![FormControlOperation::SelectOne, FormControlOperation::Clear]
@@ -599,16 +603,29 @@ pub fn control_action_evidence(
         .map_err(|message| snapshot_error(ErrorCode::InvalidRequest, message))?;
     // A credential never leaves as text, even when the page turned its field
     // into a plain text input after the fill.
-    let redacted;
-    let control = match (action, &control.state) {
-        (ControlAction::Credential { .. }, FormControlState::Text { value }) => {
-            redacted = FormControl {
+    let projected;
+    let control = match (action, &control.state, committed) {
+        (ControlAction::Credential { .. }, FormControlState::Text { value }, _) => {
+            projected = FormControl {
                 state: FormControlState::Redacted {
                     present: !value.is_empty(),
                 },
                 ..control.clone()
             };
-            &redacted
+            &projected
+        }
+        // An ARIA combobox has no native selection: its choice is the option
+        // the worker clicked, already read back from what the combobox shows.
+        (ControlAction::SelectOne { .. }, _, Some(committed))
+            if control.control_kind == FormControlKind::Combobox =>
+        {
+            projected = FormControl {
+                state: FormControlState::Selection {
+                    values: committed.to_vec(),
+                },
+                ..control.clone()
+            };
+            &projected
         }
         _ => control,
     };

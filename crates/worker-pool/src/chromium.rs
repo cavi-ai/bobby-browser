@@ -2883,7 +2883,13 @@ impl crate::InputEngine for ChromiumWorker {
                 resolved.set_checked(&page, *checked).await?;
             }
             ControlAction::SelectOne { value } => {
-                committed = Some(vec![resolved.select_option(&page, value).await?]);
+                committed = Some(vec![if before_control.control_kind
+                    == types::FormControlKind::Combobox
+                {
+                    resolved.select_combobox_option(&page, value).await?
+                } else {
+                    resolved.select_option(&page, value).await?
+                }]);
             }
             ControlAction::SelectMany { values } => {
                 committed = Some(resolved.select_options(&page, values).await?);
