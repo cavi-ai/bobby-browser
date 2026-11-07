@@ -128,9 +128,12 @@ pub struct ScreenControl {
 }
 
 /// Requests a text tier answers: a candidate window for an intent that picks
-/// candidates. Everything else needs the screenshot.
+/// candidates. Everything else needs the screenshot, including an extract,
+/// whose value is read off the screen.
 pub fn text_tier_answers(intent_kind: &str, candidate_count: usize) -> bool {
-    candidate_count > 0 && types::candidate_action_kinds_for_intent(intent_kind).is_some()
+    candidate_count > 0
+        && intent_kind != "extract"
+        && types::candidate_action_kinds_for_intent(intent_kind).is_some()
 }
 
 pub fn collect_vision_training_data(
