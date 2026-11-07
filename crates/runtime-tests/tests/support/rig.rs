@@ -128,6 +128,13 @@ impl Rig {
     /// A Chromium rig whose only vision node is the loopback `endpoint`, with a
     /// principal that also holds `vision:assist`.
     pub async fn chromium_with_vision_node(endpoint: &str) -> Self {
+        Self::chromium_with_vision_node_at(endpoint, 1.0).await
+    }
+
+    /// [`Rig::chromium_with_vision_node`] on a display with `pixel_ratio`
+    /// device pixels per CSS pixel, so screenshots are that much larger than
+    /// the viewport.
+    pub async fn chromium_with_vision_node_at(endpoint: &str, pixel_ratio: f64) -> Self {
         let root = tempfile::tempdir().expect("create rig root");
         let mut config = config(root.path(), vec![]);
         if let Some(executable) = std::env::var_os("BOBBY_CHROME_EXECUTABLE") {
@@ -142,7 +149,20 @@ impl Rig {
                 timeout_ms: 15_000,
             },
         );
-        let service = RuntimeService::build(&config)
+        let factory = worker_pool::ChromiumWorkerFactory::new(config.browser.clone());
+        let factory = if pixel_ratio == 1.0 {
+            factory
+        } else {
+            factory.with_fingerprint(
+                fingerprinting::FingerprintConfig::default()
+                    .with_enabled(true)
+                    .with_screen(fingerprinting::ScreenConfig {
+                        pixel_ratio,
+                        ..fingerprinting::ScreenConfig::default()
+                    }),
+            )
+        };
+        let service = RuntimeService::build_with_worker_factory(&config, Arc::new(factory))
             .await
             .expect("build Chromium runtime");
         let capabilities = all_capabilities()

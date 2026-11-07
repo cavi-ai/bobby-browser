@@ -1603,6 +1603,69 @@ pub async fn clicking_vision_node(
     format!("http://{address}/propose")
 }
 
+/// Color of the control a [`pointing_vision_node`] points at. No page text
+/// or default style renders it.
+pub const VISION_MARK: [u8; 3] = [0xff, 0x00, 0xaa];
+
+/// A loopback vision node that, like a model, answers a click at the center of
+/// the [`VISION_MARK`] pixels in the screenshot it receives, in that
+/// screenshot's pixels. A screenshot without the mark gets a below-floor answer.
+pub async fn pointing_vision_node() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind vision node");
+    let address = listener.local_addr().expect("vision node address");
+    let app = Router::new()
+        .route(
+            "/propose",
+            axum::routing::post(|request: axum::Json<serde_json::Value>| async move {
+                let mark = request["screenshotPng"]
+                    .as_str()
+                    .and_then(|png| {
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, png).ok()
+                    })
+                    .and_then(|png| intent_engine::frame::decode_rgb(&png))
+                    .and_then(|(width, _, rgb)| mark_center(width, &rgb));
+                axum::Json(match mark {
+                    Some((x, y)) => serde_json::json!({
+                        "confidence": 0.9,
+                        "action": {"kind": "click", "x": x, "y": y},
+                    }),
+                    None => serde_json::json!({
+                        "confidence": 0.1,
+                        "action": {"kind": "click", "x": 0, "y": 0},
+                    }),
+                })
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::disable());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}/propose")
+}
+
+/// Center of the bounding box of the [`VISION_MARK`] pixels in `rgb`.
+fn mark_center(width: u32, rgb: &[u8]) -> Option<(f64, f64)> {
+    let width = width as usize;
+    let (mut left, mut top, mut right, mut bottom) = (usize::MAX, usize::MAX, 0, 0);
+    for (at, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
+        if *pixel == VISION_MARK {
+            let (x, y) = (at % width, at / width);
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+    }
+    (left <= right).then(|| {
+        (
+            (left + right + 1) as f64 / 2.0,
+            (top + bottom + 1) as f64 / 2.0,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

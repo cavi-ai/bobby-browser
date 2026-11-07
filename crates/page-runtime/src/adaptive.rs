@@ -512,6 +512,13 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .await
     }
 
+    async fn viewport_size(&self, page_id: &PageId) -> Option<(f64, f64)> {
+        worker_pool::observation_or_default(self.lease.worker().observation())
+            .viewport_size(page_id)
+            .await
+            .ok()
+    }
+
     async fn read_attribute(
         &self,
         page_id: &PageId,

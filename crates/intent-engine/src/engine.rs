@@ -120,6 +120,12 @@ pub trait IntentBrowser: Send + Sync {
         None
     }
 
+    /// The viewport's width and height in CSS pixels, the units clicks take.
+    /// Defaults to none, which leaves screenshot points unscaled.
+    async fn viewport_size(&self, _page_id: &PageId) -> Option<(f64, f64)> {
+        None
+    }
+
     async fn type_text(
         &self,
         page_id: &PageId,
@@ -1877,6 +1883,7 @@ async fn fill_with_password_manager(
         };
         evidence.append(&mut screenshot_evidence);
         let artifact_ids = artifact_ids_from(&evidence);
+        let frame_width = frame_width(Some(&png));
         let proposal = match assist
             .propose(VisionProposeRequest {
                 purpose: PASSWORD_MANAGER_PROMPT.into(),
@@ -1914,7 +1921,9 @@ async fn fill_with_password_manager(
                 record("visionConfidenceBelowFloor".into(), Some(details)),
             );
         }
-        let VisionAction::Click { x, y } = proposal.action else {
+        let VisionAction::Click { x, y } =
+            viewport_action(page_id, browser, frame_width, &proposal.action).await
+        else {
             return failed(
                 ErrorCode::VisionAssistFailed,
                 "vision did not point at the password manager's prompt".into(),
@@ -4234,6 +4243,7 @@ async fn execute_solve_challenge(
             }
         };
 
+        let frame_width = frame_width(Some(&png));
         let propose_started = std::time::Instant::now();
         let metric_context = assist.operational_metrics();
         let proposal = match assist
@@ -4320,7 +4330,8 @@ async fn execute_solve_challenge(
                     VisionProposalOutcome::Accepted,
                     Some(VerificationMetricResult::Accepted),
                 );
-                match execute_vision_action(page_id, browser, action, &[], &[], None).await {
+                let action = viewport_action(page_id, browser, frame_width, action).await;
+                match execute_vision_action(page_id, browser, &action, &[], &[], None).await {
                     Ok(mut step_evidence) => {
                         act_evidence.append(&mut step_evidence);
                     }
@@ -5154,6 +5165,7 @@ async fn escalate_with_vision(
                 .unwrap_or_default(),
         )
     });
+    let frame_width = frame_width(png.as_deref());
     let propose_started = std::time::Instant::now();
     let metric_context = assist.operational_metrics();
     let proposal = match assist
@@ -5261,10 +5273,11 @@ async fn escalate_with_vision(
 
     // The model indexes into the exact list the prompt carried; resolve
     // against that same view.
+    let action = viewport_action(page_id, browser, frame_width, &proposal.action).await;
     let mut act_evidence = match execute_vision_action(
         page_id,
         browser,
-        &proposal.action,
+        &action,
         &prompt_candidates,
         &screen,
         fill_payload.as_ref(),
@@ -5326,7 +5339,7 @@ async fn escalate_with_vision(
     let artifact_ids = artifact_ids_from(&evidence);
     // Ground the executed action back onto the candidate list before the
     // record is written; only clicks resolve (point-based).
-    let resolved = match &proposal.action {
+    let resolved = match &action {
         VisionAction::Click { x, y } => browser
             .element_at_point(page_id, *x, *y)
             .await
@@ -5552,6 +5565,34 @@ fn stuck_label(kind: StuckKind) -> &'static str {
         StuckKind::ObstructionSuspected => "obstructionSuspected",
         StuckKind::VerifyNoDomSignal => "verifyNoDomSignal",
         StuckKind::ChallengePresent => "challengePresent",
+    }
+}
+
+/// Width in pixels of a viewport screenshot.
+fn frame_width(png: Option<&[u8]>) -> Option<u32> {
+    png.and_then(crate::frame::png_size).map(|(width, _)| width)
+}
+
+/// `action` with a click read off a viewport screenshot `frame_width` pixels
+/// wide moved to CSS pixels: screenshots are device pixels, clicks CSS pixels.
+async fn viewport_action(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    frame_width: Option<u32>,
+    action: &VisionAction,
+) -> VisionAction {
+    let &VisionAction::Click { x, y } = action else {
+        return action.clone();
+    };
+    let ratio = match (frame_width, browser.viewport_size(page_id).await) {
+        (Some(frame_width), Some((css_width, _))) if css_width > 0.0 => {
+            f64::from(frame_width) / css_width
+        }
+        _ => 1.0,
+    };
+    VisionAction::Click {
+        x: x / ratio,
+        y: y / ratio,
     }
 }
 
