@@ -24,6 +24,7 @@
 - A typed phone number verifies when an input mask reformats it and keeps the same digits.
 - A failed `intent_complete_form` error message names the failing field and its position, so only the remaining fields need resending.
 - A tool call whose `timeoutMs` reaches one minute reports its own timeout instead of `deadlineExceeded`.
+- A wait for an element to detach is satisfied when the element's document was replaced.
 
 ## 0.23.0 - 2026-11-04
 
