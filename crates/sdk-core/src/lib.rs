@@ -516,6 +516,9 @@ impl RuntimeService {
             if workers.enforces_headless_chromium() {
                 capabilities.push("headless-chromium".to_string());
             }
+            if workers.enforces_background_firefox_attachment() {
+                capabilities.push("firefox-background-attachment".to_string());
+            }
             let features: std::collections::BTreeSet<_> = workers
                 .engine_feature_support()
                 .iter()

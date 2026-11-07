@@ -15,7 +15,7 @@ use sdk_core::RuntimeService;
 use types::{CommandError, CreateSessionRequest, SessionId, WorkerId};
 use worker_pool::{BrowserWorker, WorkerFactory};
 
-struct CountingFactory(Arc<AtomicUsize>);
+struct CountingFactory(Arc<AtomicUsize>, bool);
 struct Worker(WorkerId);
 struct InjectedVision;
 
@@ -29,7 +29,7 @@ async fn runtime_info_reports_only_declared_engine_features_without_launching() 
     let launches = Arc::new(AtomicUsize::new(0));
     let runtime = RuntimeService::build_with_worker_factory(
         &config,
-        Arc::new(CountingFactory(launches.clone())),
+        Arc::new(CountingFactory(launches.clone(), false)),
     )
     .await
     .unwrap();
@@ -44,6 +44,23 @@ async fn runtime_info_reports_only_declared_engine_features_without_launching() 
         .await
         .capabilities
         .contains(&"headless-chromium".into()));
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    assert!(!runtime
+        .runtime_info()
+        .await
+        .capabilities
+        .contains(&"firefox-background-attachment".into()));
+    drop(runtime);
+    let runtime = RuntimeService::build_with_worker_factory(
+        &config,
+        Arc::new(CountingFactory(launches.clone(), true)),
+    )
+    .await
+    .unwrap();
+    let capabilities = runtime.runtime_info().await.capabilities;
+    assert!(capabilities.contains(&"firefox-background-attachment".into()));
+    assert!(!capabilities.contains(&"headless-chromium".into()));
+    assert_eq!(runtime.runtime_info().await.active_sessions, 0);
     assert_eq!(launches.load(Ordering::SeqCst), 0);
     drop(runtime);
     let runtime = RuntimeService::build(&config).await.unwrap();
@@ -77,6 +94,10 @@ impl VisionAssist for InjectedVision {
 
 #[async_trait]
 impl WorkerFactory for CountingFactory {
+    fn enforces_background_firefox_attachment(&self) -> bool {
+        self.1
+    }
+
     async fn launch(
         &self,
         _session_id: &SessionId,
@@ -108,7 +129,7 @@ async fn durable_ledger_reopens_only_after_all_fixture_owners_are_released() {
     config.storage.journal_path = root.path().join("commands.jsonl");
     config.storage.checkpoints_dir = root.path().join("checkpoints");
     config.browser.artifacts_dir = root.path().join("artifacts");
-    let factory = Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0))));
+    let factory = Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)), false));
 
     let service = RuntimeService::build_with_worker_factory(&config, factory.clone())
         .await
@@ -140,7 +161,7 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
 
     let runtime = RuntimeService::build_with_worker_factory(
         &config,
-        Arc::new(CountingFactory(launches.clone())),
+        Arc::new(CountingFactory(launches.clone(), false)),
     )
     .await
     .unwrap();
@@ -168,7 +189,7 @@ async fn injected_vision_assist_counts_as_a_configured_provider() {
 
     let runtime = RuntimeService::build_with_worker_factory_and_vision_assist(
         &config,
-        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)))),
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)), false)),
         Arc::new(InjectedVision),
     )
     .await
@@ -245,7 +266,7 @@ async fn context_ttl_is_applied_during_runtime_build() {
     config.context.ttl_days = 90;
     let runtime = RuntimeService::build_with_context_promotion(
         &config,
-        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)))),
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)), false)),
         "profile-a",
     )
     .await
@@ -273,7 +294,7 @@ async fn damaged_journal_is_archived_without_blocking_new_session_setup() {
     let launches = Arc::new(AtomicUsize::new(0));
     let runtime = RuntimeService::build_with_worker_factory(
         &config,
-        Arc::new(CountingFactory(launches.clone())),
+        Arc::new(CountingFactory(launches.clone(), false)),
     )
     .await
     .unwrap();

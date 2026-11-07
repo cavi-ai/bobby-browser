@@ -3353,7 +3353,10 @@ impl PageOpenOperation {
         let response = match self
             .resources
             .transport
-            .send("browsingContext.create", json!({"type": "tab"}))
+            .send(
+                "browsingContext.create",
+                json!({"type": "tab", "background": true}),
+            )
             .await
         {
             Ok(response) => response,

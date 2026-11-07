@@ -280,6 +280,12 @@ pub trait WorkerFactory: Send + Sync {
         false
     }
 
+    /// Firefox attachment never reloads or restarts the browser, and new
+    /// pages open in background tabs. This does not cover activation or input.
+    fn enforces_background_firefox_attachment(&self) -> bool {
+        false
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
 
     async fn release_session(&self, _session_id: &SessionId) {}
@@ -621,6 +627,10 @@ impl WorkerPool {
 
     pub fn enforces_headless_chromium(&self) -> bool {
         self.inner.factory.enforces_headless_chromium()
+    }
+
+    pub fn enforces_background_firefox_attachment(&self) -> bool {
+        self.inner.factory.enforces_background_firefox_attachment()
     }
 
     pub async fn replace_session(

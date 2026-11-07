@@ -278,9 +278,18 @@ broken piece. Scheduler jobs (`job_submit`/`job_status`/`job_cancel`) are
 scheduler probes, not browser intents — see `bobby://job-handlers`.
 
 For work that must not affect desktop focus, check `runtime_info` before
-`workflow_start`. Require `headless-chromium` in `capabilities`; otherwise
-stop before opening a page. A successful workflow then confirms that any
-shared Chromium attachment passed the headless check. Page visibility and
-`document.hasFocus()` are emulated and do not establish desktop isolation.
-An existing headed browser must be released by its operator before its
-profile can run headless; restarting the runtime alone does not change it.
+`workflow_start`. Use the selected engine's running contract:
+
+- `headless-chromium`: shared Chromium attachment must verify headless mode.
+  Page visibility and `document.hasFocus()` are emulated and do not prove it.
+  The operator must release an existing headed browser before its profile
+  can run headless; a runtime restart alone does not change that browser.
+- `firefox-background-attachment`: the existing Firefox registration has
+  `attachmentOnly: true`; attachment refuses repair and new tabs stay in
+  the background. Reuse its enrolled profile and original runtime scope.
+  For background research, keep to navigation, context-bound inspection and
+  owned-page close. This contract does not cover activation or pointer/keyboard input.
+
+Without the selected engine's capability, stop before opening a page.
+A successful workflow confirms its attachment checks passed. Changing a
+selection file alone does not update a running owner.

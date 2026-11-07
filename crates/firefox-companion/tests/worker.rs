@@ -2269,7 +2269,8 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
 
     let calls = bidi.calls().await;
     assert!(calls.iter().any(|call| {
-        call.method == "browsingContext.create" && call.params == json!({"type": "tab"})
+        call.method == "browsingContext.create"
+            && call.params == json!({"type": "tab", "background": true})
     }));
     assert!(calls.iter().any(|call| {
         call.method == "browsingContext.navigate"
@@ -5472,14 +5473,27 @@ async fn worker_renews_attachment_lease_before_expiry() {
 }
 
 #[tokio::test]
-async fn activate_page_sends_bidi_activation_for_the_pages_context() {
-    let bidi = FakeBidi::new(vec![]);
+async fn pages_open_in_background_until_explicit_activation() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "background-tab"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page_id = PageId::new();
     worker_pool::tabs_or_default(worker.tabs())
         .open_page(page_id.clone())
         .await
         .unwrap();
+
+    let before_activation = bidi.calls().await;
+    let created = before_activation
+        .iter()
+        .find(|call| call.method == "browsingContext.create")
+        .unwrap();
+    assert_eq!(created.params, json!({"type": "tab", "background": true}));
+    assert!(before_activation
+        .iter()
+        .any(|call| call.method == "script.evaluate"));
+    assert!(!before_activation
+        .iter()
+        .any(|call| call.method == "browsingContext.activate"));
 
     worker_pool::tabs_or_default(worker.tabs())
         .activate_page(&types::ActivatePageCommand {
@@ -5489,12 +5503,12 @@ async fn activate_page_sends_bidi_activation_for_the_pages_context() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert!(
-        calls.iter().any(|call| {
-            call.method == "browsingContext.activate" && call.params.get("context").is_some()
-        }),
-        "{calls:?}"
-    );
+    let activations: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method == "browsingContext.activate")
+        .collect();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(activations[0].params, json!({"context": "background-tab"}));
 
     let missing = worker_pool::tabs_or_default(worker.tabs())
         .activate_page(&types::ActivatePageCommand {
