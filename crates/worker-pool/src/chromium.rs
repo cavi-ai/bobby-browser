@@ -41,6 +41,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, Viewport,
 };
+use chromiumoxide::cdp::browser_protocol::system_info::GetInfoParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     CreateTargetParams, EventTargetCreated, TargetId,
 };
@@ -64,6 +65,7 @@ use types::{
     SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
     UploadFilesCommand, WaitCondition, WorkerId,
 };
+use zeroize::Zeroizing;
 
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
@@ -217,7 +219,7 @@ async fn connect_profile_browser(
 fn spawn_detached_chrome(config: &ChromiumConfig) -> Result<(), CommandError> {
     let mut command = std::process::Command::new(config.executable());
     command
-        .args(config.launch_args())
+        .args(shared_chrome_launch_args(config))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -251,6 +253,68 @@ fn spawn_detached_chrome(config: &ChromiumConfig) -> Result<(), CommandError> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn shared_chrome_launch_args(config: &ChromiumConfig) -> Vec<String> {
+    let mut args = config.launch_args();
+    if let Some(index) = args
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "--headless" | "--headless=new"))
+    {
+        let headless = args.remove(index);
+        args.insert(0, headless);
+    }
+    args
+}
+
+/// SystemInfo serializes POSIX argument values without quoting. Only the
+/// leading switch is unambiguous; a later match may belong to an opaque value.
+fn verified_headless_command_line(command_line: &str) -> bool {
+    if command_line.contains(['\0', '\n', '\r']) {
+        return false;
+    }
+    let command_line = command_line.trim();
+    let (program, args) = if let Some(quoted) = command_line.strip_prefix('"') {
+        let Some(end) = quoted.find('"') else {
+            return false;
+        };
+        let suffix = &quoted[end + 1..];
+        if !suffix.starts_with(char::is_whitespace) {
+            return false;
+        }
+        (&quoted[..end], suffix.trim_start())
+    } else {
+        let mut programs = command_line
+            .char_indices()
+            .filter_map(|(index, ch)| ch.is_ascii_whitespace().then_some(index))
+            .chain(std::iter::once(command_line.len()))
+            .filter(|end| {
+                let program = Path::new(&command_line[..*end]);
+                program.is_absolute() && program.is_file()
+            });
+        let Some(end) = programs.next() else {
+            return false;
+        };
+        if programs.next().is_some() {
+            return false;
+        }
+        (&command_line[..end], command_line[end..].trim_start())
+    };
+    let program = Path::new(program);
+    program.is_absolute()
+        && program.is_file()
+        && matches!(
+            args.split_ascii_whitespace().next(),
+            Some("--headless" | "--headless=new")
+        )
+}
+
+fn unverified_headless_browser() -> CommandError {
+    driver_error(
+        ErrorCode::BrowserLaunchFailed,
+        "headless profile reuse requires a verified leading --headless switch; \
+         release the existing profile browser before starting it through Bobby",
+    )
 }
 
 /// Finish graceful shutdown or kill/reap the child this handle exclusively owns.
@@ -424,6 +488,10 @@ impl ChromiumWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for ChromiumWorkerFactory {
+    fn enforces_headless_chromium(&self) -> bool {
+        self.config.headless
+    }
+
     fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
         vec![crate::EngineFeatureSupport::for_engine(
             companion_protocol::BrowserEngine::Chromium,
@@ -488,6 +556,23 @@ impl WorkerFactory for ChromiumWorkerFactory {
                 "browser CDP event stream ended"
             );
         });
+
+        if shared_browser && self.config.headless {
+            let verified = bounded_cdp(browser.execute(GetInfoParams::default()), |_| {
+                unverified_headless_browser()
+            })
+            .await
+            .map(|response| {
+                let command_line = Zeroizing::new(response.result.command_line);
+                verified_headless_command_line(&command_line)
+            });
+            if !matches!(verified, Ok(true)) {
+                // This is a connection-only handle. Leave the profile's Chrome
+                // and every other session alone; never close or replace it.
+                handler_task.abort();
+                return Err(unverified_headless_browser());
+            }
+        }
 
         let behavioral_config = BehavioralConfig::default().sanitize();
         Ok(Arc::new(ChromiumWorker {
@@ -4802,6 +4887,273 @@ fn chromium_modifier_bits(modifiers: &[types::ClickModifier]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[derive(Clone, Default)]
+    struct TraceCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TraceCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn assert_headless_profile_reuse_refused(arguments: Option<&str>, malformed: bool) {
+        use crate::WorkerFactory;
+        use futures::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use std::sync::{Arc, Mutex};
+        use tokio_tungstenite::tungstenite::Message;
+        use tracing::instrument::WithSubscriber;
+
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("Chrome With Spaces");
+        std::fs::write(&program, "test executable identity; never launched").unwrap();
+        let command_line = arguments
+            .map(|arguments| format!("{} {arguments}", program.display()))
+            .unwrap_or_default();
+        let logs = TraceCapture::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _trace = tracing::subscriber::set_default(subscriber);
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            format!("{port}\n/devtools/browser/test-headed\n"),
+        )
+        .unwrap();
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let observed = methods.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                observed.lock().unwrap().push(method.clone());
+                if method == "SystemInfo.getInfo" && malformed {
+                    socket
+                        .send(Message::Text(
+                            format!(
+                                "{{\"id\":{},\"result\":{{\"commandLine\":\"private-canary\"",
+                                request["id"]
+                            )
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let result = match method.as_str() {
+                    "SystemInfo.getInfo" => json!({
+                        "gpu": {"devices": [], "driverBugWorkarounds": [], "videoDecoding": [], "videoEncoding": []},
+                        "modelName": "", "modelVersion": "",
+                        "commandLine": command_line
+                    }),
+                    "Target.getBrowserContexts" => json!({"browserContextIds": []}),
+                    "Target.getTargets" => json!({"targetInfos": []}),
+                    _ => json!({}),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": request["id"], "result": result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }.with_subscriber(tracing::subscriber::NoSubscriber::default()));
+        let config = config::BrowserConfig {
+            executable: Some(program),
+            profiles_dir: root.path().join("profiles"),
+            artifacts_dir: root.path().join("artifacts"),
+            downloads_dir: root.path().join("downloads"),
+            headless: true,
+            ..Default::default()
+        };
+        let factory =
+            super::ChromiumWorkerFactory::with_pid_registry_dir(config, root.path().join("pids"))
+                .with_durable_profile_dir(profile.clone());
+        let result = factory.launch(&types::SessionId::new()).await;
+        server.abort();
+        let error = match result {
+            Ok(_) => panic!("headless profile reuse accepted a headed browser"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, types::ErrorCode::BrowserLaunchFailed);
+        assert!(error.message.contains("headless"));
+        assert!(!error.message.contains("private-canary"));
+        let methods = methods.lock().unwrap();
+        assert!(methods.iter().any(|method| method == "SystemInfo.getInfo"));
+        assert!(!methods
+            .iter()
+            .any(|method| method == "Target.createTarget" || method == "Browser.close"));
+        assert!(profile.join("DevToolsActivePort").exists());
+        let captured = logs.0.lock().unwrap();
+        let trace = String::from_utf8_lossy(&captured);
+        let expected_marker = if malformed {
+            "Failed to parse browser process metadata response"
+        } else {
+            "Received browser process metadata response"
+        };
+        assert!(
+            trace.contains(expected_marker),
+            "metadata trace was not captured"
+        );
+        assert!(!trace.contains("private-canary"));
+        if std::env::var_os("BOBBY_TEST_METADATA_LOG_BRIDGE").is_some() {
+            assert!(
+                trace.contains("tungstenite::"),
+                "transport log bridge was not captured"
+            );
+        }
+    }
+
+    #[test]
+    fn headless_profile_metadata_privacy_covers_the_log_bridge() {
+        if std::env::var_os("BOBBY_TEST_METADATA_LOG_BRIDGE").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "chromium::tests::headless_profile_metadata_privacy_covers_the_log_bridge",
+                    "--nocapture",
+                ])
+                .env("BOBBY_TEST_METADATA_LOG_BRIDGE", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .try_init()
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert_headless_profile_reuse_refused(
+                    Some("--profile-label=private-canary"),
+                    false,
+                )
+                .await;
+                assert_headless_profile_reuse_refused(None, true).await;
+            });
+    }
+
+    #[tokio::test]
+    async fn headless_profile_reuse_rejects_a_headed_browser_before_opening_a_page() {
+        assert_headless_profile_reuse_refused(
+            Some("--user-agent=\"HeadlessChrome --headless\" --profile-label=private-canary"),
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn headless_profile_reuse_rejects_unsupported_browser_metadata() {
+        assert_headless_profile_reuse_refused(None, false).await;
+    }
+
+    #[tokio::test]
+    async fn headless_profile_reuse_redacts_malformed_browser_metadata() {
+        assert_headless_profile_reuse_refused(None, true).await;
+    }
+
+    #[test]
+    fn headless_verification_requires_an_unambiguous_leading_switch() {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("Chrome With Spaces");
+        std::fs::write(&program, "fixture").unwrap();
+        for suffix in [
+            "--headless",
+            "--headless=new --user-data-dir=profile with spaces",
+        ] {
+            assert!(super::verified_headless_command_line(&format!(
+                "{} {suffix}",
+                program.display()
+            )));
+            assert!(super::verified_headless_command_line(&format!(
+                "\"{}\" {suffix}",
+                program.display()
+            )));
+        }
+        for suffix in [
+            "--user-agent=\"fake --headless\"",
+            "--other=value --headless",
+            "--headless=false",
+            "--headless-extra",
+            "--headless=old",
+            "--headless\n--other",
+        ] {
+            assert!(!super::verified_headless_command_line(&format!(
+                "{} {suffix}",
+                program.display()
+            )));
+        }
+        assert!(!super::verified_headless_command_line(""));
+        assert!(!super::verified_headless_command_line(
+            "\"unterminated --headless"
+        ));
+        let ambiguous = root.path().join("Chrome --headless executable");
+        std::fs::write(root.path().join("Chrome"), "shorter executable prefix").unwrap();
+        std::fs::write(&ambiguous, "fixture").unwrap();
+        assert!(!super::verified_headless_command_line(&format!(
+            "{} --other",
+            ambiguous.display()
+        )));
+        assert!(!super::verified_headless_command_line(
+            &ambiguous.display().to_string()
+        ));
+        assert!(!super::verified_headless_command_line(&format!(
+            "{} about:blank",
+            ambiguous.display()
+        )));
+    }
+
+    #[test]
+    fn managed_headless_launch_puts_its_existing_switch_first() {
+        let config = super::ChromiumConfig::builder()
+            .chrome_executable("chrome")
+            .build()
+            .unwrap();
+        let mut expected = config.launch_args();
+        let args = super::shared_chrome_launch_args(&config);
+        assert_eq!(args.first().map(String::as_str), Some("--headless"));
+        let mut actual = args;
+        expected.sort();
+        actual.sort();
+        assert_eq!(actual, expected);
+        let headed = super::ChromiumConfig::builder()
+            .chrome_executable("chrome")
+            .with_head()
+            .build()
+            .unwrap();
+        let mut actual = super::shared_chrome_launch_args(&headed);
+        let mut expected = headed.launch_args();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
 
     #[cfg(unix)]
     #[test]

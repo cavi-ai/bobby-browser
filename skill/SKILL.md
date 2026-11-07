@@ -227,3 +227,11 @@ Setup, pairing, and credential minting are operator tasks (`bobby install`,
 `bobby doctor`); if the runtime is unreachable, say `bobby doctor` names the
 broken piece. Scheduler jobs (`job_submit`/`job_status`/`job_cancel`) are
 scheduler probes, not browser intents — see `bobby://job-handlers`.
+
+For work that must not affect desktop focus, check `runtime_info` before
+`workflow_start`. Require `headless-chromium` in `capabilities`; otherwise
+stop before opening a page. A successful workflow then confirms that any
+shared Chromium attachment passed the headless check. Page visibility and
+`document.hasFocus()` are emulated and do not establish desktop isolation.
+An existing headed browser must be released by its operator before its
+profile can run headless; restarting the runtime alone does not change it.

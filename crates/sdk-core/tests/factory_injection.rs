@@ -39,14 +39,29 @@ async fn runtime_info_reports_only_declared_engine_features_without_launching() 
         .capabilities
         .iter()
         .any(|name| name.starts_with("engine:")));
+    assert!(!runtime
+        .runtime_info()
+        .await
+        .capabilities
+        .contains(&"headless-chromium".into()));
     assert_eq!(launches.load(Ordering::SeqCst), 0);
     drop(runtime);
     let runtime = RuntimeService::build(&config).await.unwrap();
     let capabilities = runtime.runtime_info().await.capabilities;
     assert!(capabilities.contains(&"engine:chromium:captureScreenshot.fullPage".into()));
+    assert!(capabilities.contains(&"headless-chromium".into()));
     assert!(!capabilities
         .iter()
         .any(|name| name.starts_with("engine:firefox:")));
+    assert_eq!(runtime.runtime_info().await.active_sessions, 0);
+    drop(runtime);
+    config.browser.headless = false;
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    assert!(!runtime
+        .runtime_info()
+        .await
+        .capabilities
+        .contains(&"headless-chromium".into()));
     assert_eq!(runtime.runtime_info().await.active_sessions, 0);
 }
 
