@@ -123,7 +123,7 @@ pub fn reap_orphaned_processes(
 /// without unregistering (its entry is reaped). Signal `0` delivers nothing; it only
 /// reports, via its return value and `errno`, whether `pid` exists and is visible to us.
 #[cfg(unix)]
-fn owner_is_alive(pid: u32) -> bool {
+pub(crate) fn owner_is_alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
@@ -139,7 +139,7 @@ fn owner_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn owner_is_alive(_pid: u32) -> bool {
+pub(crate) fn owner_is_alive(_pid: u32) -> bool {
     // No portable liveness probe exists here; treating every owner as alive means this
     // platform never kills on an unverifiable guess (the identity check on the tracked PID
     // would also block it, since `process_command_name` is `None`-only here too).

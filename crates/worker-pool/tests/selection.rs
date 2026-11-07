@@ -118,6 +118,49 @@ fn session() -> SessionId {
     SessionId::new()
 }
 
+#[test]
+fn headless_preflight_excludes_headed_or_unknown_fallbacks() {
+    let root = tempfile::tempdir().unwrap();
+    let chromium = Arc::new(worker_pool::ChromiumWorkerFactory::with_pid_registry_dir(
+        config::BrowserConfig {
+            headless: true,
+            ..Default::default()
+        },
+        root.path().join("pids"),
+    ));
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![
+            FactoryRegistration::negotiated(BrowserEngine::Chromium, None, chromium),
+            registration("firefox", BrowserEngine::Firefox, None, true),
+        ],
+        RequiredCapabilities::default(),
+    ));
+    let selected = |preference| SelectedWorkerFactory::new(selector.clone(), preference);
+    assert!(selected(EnginePreference::ManagedChromium).enforces_headless_chromium());
+    assert!(selected(EnginePreference::Exact {
+        engine: BrowserEngine::Chromium,
+        profile_id: None
+    })
+    .enforces_headless_chromium());
+    assert!(!selected(EnginePreference::Exact {
+        engine: BrowserEngine::Firefox,
+        profile_id: None
+    })
+    .enforces_headless_chromium());
+    assert!(!selected(EnginePreference::Prefer {
+        engines: vec![BrowserEngine::Chromium, BrowserEngine::Firefox]
+    })
+    .enforces_headless_chromium());
+    let empty = Arc::new(BrowserWorkerSelector::new(
+        vec![],
+        RequiredCapabilities::default(),
+    ));
+    assert!(
+        !SelectedWorkerFactory::new(empty, EnginePreference::ManagedChromium)
+            .enforces_headless_chromium()
+    );
+}
+
 #[tokio::test]
 async fn exact_firefox_never_silently_falls_back_to_chromium() {
     let selector = BrowserWorkerSelector::new(

@@ -315,6 +315,14 @@ struct PreferenceWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for PreferenceWorkerFactory {
+    fn enforces_headless_chromium(&self) -> bool {
+        !self.factories.is_empty()
+            && self
+                .factories
+                .iter()
+                .all(|factory| factory.enforces_headless_chromium())
+    }
+
     fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
         self.factories
             .iter()
@@ -391,6 +399,15 @@ impl SelectedWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for SelectedWorkerFactory {
+    fn enforces_headless_chromium(&self) -> bool {
+        let candidates = self.selector.find(&self.preference);
+        !candidates.is_empty()
+            && candidates.iter().all(|registration| {
+                registration.engine == BrowserEngine::Chromium
+                    && registration.factory.enforces_headless_chromium()
+            })
+    }
+
     fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
         self.selector
             .find(&self.preference)

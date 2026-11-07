@@ -633,10 +633,10 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
     // A Chrome the user started on its own profile, with remote debugging.
     let mut command = std::process::Command::new(chrome_executable());
     command
+        .arg("--headless")
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .args([
             "--remote-debugging-port=0",
-            "--headless",
             "--no-first-run",
             "--use-mock-keychain",
             "--password-store=basic",
@@ -686,6 +686,42 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
     );
     let _ = user_chrome.kill();
     let _ = user_chrome.wait();
+}
+
+/// Shell launchers may exec a different binary than the configured path.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium"]
+async fn a_headless_shared_profile_launches_through_a_shell_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let site = shared_site().await;
+    let root = tempfile::tempdir().unwrap();
+    let wrapper = root.path().join("chrome-launcher");
+    let executable = chrome_executable().to_string_lossy().replace('\'', "'\\''");
+    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{executable}' \"$@\"\n")).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile_dir = root.path().join("profile");
+    let chrome = ProfileChrome(profile_dir.clone());
+    let mut config = config(root.path(), None);
+    config.browser.executable = Some(wrapper);
+    let factory = Arc::new(
+        ChromiumWorkerFactory::with_pid_registry_dir(
+            config.browser.clone(),
+            root.path().join("pids"),
+        )
+        .with_durable_profile_dir(profile_dir),
+    );
+    let runtime = RuntimeService::build_with_worker_factory(&config, factory)
+        .await
+        .unwrap();
+    let first = Session::open(&runtime, &site.url("/s/0")).await;
+    let running = chrome.pids();
+    assert_eq!(running.len(), 1);
+    let second = Session::open(&runtime, &site.url("/s/1")).await;
+    assert_eq!(chrome.pids(), running);
+    first.close().await;
+    second.close().await;
+    assert_eq!(chrome.pids(), running);
 }
 
 /// A download a control inside a frame from another site starts reaches the

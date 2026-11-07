@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::ready;
@@ -29,6 +29,7 @@ pub struct Connection<T: EventMessage> {
     needs_flush: bool,
     /// The message that is currently being proceessed
     pending_flush: Option<MethodCall>,
+    process_metadata_calls: HashSet<CallId>,
     _marker: PhantomData<T>,
 }
 
@@ -50,6 +51,7 @@ impl<T: EventMessage + Unpin> Connection<T> {
             next_id: 0,
             needs_flush: false,
             pending_flush: None,
+            process_metadata_calls: HashSet::new(),
             _marker: Default::default(),
         })
     }
@@ -77,6 +79,9 @@ impl<T: EventMessage> Connection<T> {
             session_id: session_id.map(Into::into),
             params,
         };
+        if call.method.as_ref() == "SystemInfo.getInfo" {
+            self.process_metadata_calls.insert(id);
+        }
         self.pending_commands.push_back(call);
         Ok(id)
     }
@@ -128,14 +133,40 @@ impl<T: EventMessage + Unpin> Stream for Connection<T> {
         }
 
         // read from the ws
-        match ready!(pin.ws.poll_next_unpin(cx)) {
+        let incoming = if pin.process_metadata_calls.is_empty() {
+            pin.ws.poll_next_unpin(cx)
+        } else {
+            // The transport's log-to-tracing bridge can print raw frames.
+            // Suppress only this receive poll until process metadata is
+            // consumed; the parsed response gets a safe marker below.
+            tracing::dispatcher::with_default(&tracing::Dispatch::none(), || {
+                pin.ws.poll_next_unpin(cx)
+            })
+        };
+        match ready!(incoming) {
             Some(Ok(WsMessage::Text(text))) => {
                 let ready = match serde_json::from_str::<Message<T>>(&text) {
                     Ok(msg) => {
-                        tracing::trace!("Received {:?}", msg);
+                        let process_metadata = match &msg {
+                            Message::Response(response) => {
+                                pin.process_metadata_calls.remove(&response.id)
+                            }
+                            Message::Event(_) => false,
+                        };
+                        if process_metadata {
+                            tracing::trace!("Received browser process metadata response");
+                        } else {
+                            tracing::trace!("Received {:?}", msg);
+                        }
                         Ok(msg)
                     }
                     Err(err) => {
+                        if !pin.process_metadata_calls.is_empty() {
+                            tracing::debug!("Failed to parse browser process metadata response");
+                            return Poll::Ready(Some(Err(CdpError::msg(
+                                "Malformed browser process metadata response",
+                            ))));
+                        }
                         let msg = text.as_str().to_string();
                         tracing::debug!(target: "chromiumoxide::conn::raw_ws::parse_errors", msg, "Failed to parse raw WS message {}", err);
                         Err(CdpError::InvalidMessage(text.as_str().to_string(), err))

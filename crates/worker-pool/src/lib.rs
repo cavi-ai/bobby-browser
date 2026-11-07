@@ -273,6 +273,13 @@ pub trait WorkerFactory: Send + Sync {
         Vec::new()
     }
 
+    /// Every default launch is windowless and shared Chromium attachments
+    /// must prove headless mode before a page can open. Unknown factories
+    /// cannot advertise this guarantee.
+    fn enforces_headless_chromium(&self) -> bool {
+        false
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
 
     async fn release_session(&self, _session_id: &SessionId) {}
@@ -610,6 +617,10 @@ impl WorkerPool {
 
     pub fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
         self.inner.factory.engine_feature_support()
+    }
+
+    pub fn enforces_headless_chromium(&self) -> bool {
+        self.inner.factory.enforces_headless_chromium()
     }
 
     pub async fn replace_session(

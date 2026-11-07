@@ -55,6 +55,10 @@ Every session on a durable profile shares one Chrome. A Chrome already running o
 
 Start that Chrome with `--remote-debugging-port=0` to share it while it runs.
 
+With `headless = true`, shared-profile attachment requires the browser process's first switch to be `--headless` or `--headless=new`, following an unambiguous executable path. Bobby places that switch first when launching a headless profile, including through a shell launcher. A headed browser, unavailable mode information or an ambiguous legacy/manual command line is refused before a page opens. The existing browser is left running. If no DevTools endpoint answers, Bobby launches Chrome only without ownership markers or after proving the local singleton owner is dead. Live, foreign-host and unverified owners are left untouched. Release the existing browser before starting the same profile headlessly; restarting Bobby alone does not change a shared browser's mode. A headed and headless browser cannot concurrently own the same profile directory.
+
+Before `workflow_start`, check `runtime_info.capabilities` for `headless-chromium`. It is present only when the running default worker selection enforces headless Chromium for every candidate; headed, unknown or mixed-engine fallbacks do not advertise it. This reflects the running factory, not a later edit to `config.toml`. Completed workflow startup then proves the attachment check passed. The normal browser-selection precedence still applies, including `AUTOMATION_RUNTIME_BROWSER_SELECTION` overrides.
+
 ## `[storage]`
 
 | Key | Default | Meaning |

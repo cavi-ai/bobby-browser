@@ -513,6 +513,9 @@ impl RuntimeService {
             capabilities.push("vision-provider".to_string());
         }
         if let Some(workers) = &self.workers {
+            if workers.enforces_headless_chromium() {
+                capabilities.push("headless-chromium".to_string());
+            }
             let features: std::collections::BTreeSet<_> = workers
                 .engine_feature_support()
                 .iter()
