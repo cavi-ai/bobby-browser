@@ -96,11 +96,25 @@ pub enum FormControlKind {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum FormControlState {
     Empty,
-    Text { value: String },
-    Redacted { present: bool },
-    Checked { checked: bool },
-    Selection { values: Vec<String> },
-    Files { count: usize },
+    Text {
+        value: String,
+    },
+    Redacted {
+        present: bool,
+    },
+    Checked {
+        checked: bool,
+    },
+    Selection {
+        values: Vec<String>,
+    },
+    Files {
+        count: usize,
+        /// Names of the files the control holds or, holding none, its widget
+        /// shows.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -588,8 +602,13 @@ fn validate_state(kind: FormControlKind, state: &FormControlState) -> Result<(),
                 validate_text(value, MAX_FORM_VALUE_BYTES, "selection value", true)?;
             }
         }
-        FormControlState::Files { count } if *count > MAX_FORM_OPTIONS => {
-            return Err("file state exceeds its count bound".into());
+        FormControlState::Files { count, names } => {
+            if *count > MAX_FORM_OPTIONS || names.len() > MAX_FORM_OPTIONS {
+                return Err("file state exceeds its count bound".into());
+            }
+            for name in names {
+                validate_text(name, MAX_FORM_VALUE_BYTES, "file name", true)?;
+            }
         }
         _ => {}
     }

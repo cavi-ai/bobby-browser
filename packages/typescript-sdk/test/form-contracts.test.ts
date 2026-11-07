@@ -109,3 +109,15 @@ test("unnamed file targets preserve structural identity and reject unbounded att
   file.target = { role: "button", accessibleName: "", attributes: { type: "file", extra: "x".repeat(2049) } };
   assert.equal(isFormSnapshot(value), false);
 });
+
+test("file state carries the file names a widget shows", () => {
+  const file = control("file", { kind: "files", count: 0, names: ["resume.pdf"] });
+  file.formId = null;
+  file.groupId = null;
+  file.target = { role: "button", accessibleName: "Resume", ordinal: 0, framePath: [], shadowPath: [] };
+  file.supportedOperations = ["setFiles", "clear"];
+  const value = { schemaVersion: 1, pageId: ID, truncated: false, forms: [], unownedControls: [file] };
+  assert.equal(isFormSnapshot(value), true);
+  file.state = { kind: "files", count: 0, names: [7] };
+  assert.equal(isFormSnapshot(value), false);
+});
