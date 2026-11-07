@@ -18,6 +18,7 @@
 - A target's `accessibleName` resolves when it differs from the control's name only by a trailing required marker or whitespace.
 - `hints.accessibleName` accepts names up to 2048 characters, the same limit as a target.
 - A typed phone number verifies when an input mask reformats it and keeps the same digits.
+- A failed `intent_complete_form` error message names the failing field and its position, so only the remaining fields need resending.
 
 ## 0.23.0 - 2026-11-04
 

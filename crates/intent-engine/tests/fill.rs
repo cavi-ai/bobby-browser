@@ -123,6 +123,58 @@ async fn a_reformatted_value_with_other_digits_or_letters_still_fails() {
 }
 
 #[tokio::test]
+async fn a_complete_form_failure_names_the_field_and_how_far_the_form_got() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Full name")]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada".into()),
+        }],
+        upload_evidence: vec![],
+    };
+    let field = |name: &str, label: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {label}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            accessible_name: Some(label.into()),
+            ..Default::default()
+        },
+        value: ControlAction::SetText {
+            value: "Ada".into(),
+            clear_first: true,
+        },
+        revealed_by: None,
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete application".into(),
+            fields: vec![
+                field("name", "Full name"),
+                field("phone", "Phone"),
+                field("email", "Email"),
+            ],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    assert!(
+        error
+            .message
+            .ends_with(r#"(completeForm field "phone", 2 of 3; the fields before it are filled)"#),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
 async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {
