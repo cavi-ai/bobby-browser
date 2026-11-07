@@ -26,6 +26,7 @@
 - A tool call whose `timeoutMs` reaches one minute reports its own timeout instead of `deadlineExceeded`.
 - A wait for an element to detach is satisfied when the element's document was replaced.
 - `boundaryAlreadyExecuted` guards a submit control on its own page only, so one workflow can submit the same control on another page.
+- A screenshot too large to inline returns a downscaled inline preview that names its scale; the artifact keeps the full image.
 
 ## 0.23.0 - 2026-11-04
 

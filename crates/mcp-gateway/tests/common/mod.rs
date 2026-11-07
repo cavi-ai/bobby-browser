@@ -239,7 +239,7 @@ impl worker_pool::TabsEngine for LiveWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .unwrap_or_else(PageId::new);
+            .unwrap_or_default();
         let url = self
             .probe
             .current_url

@@ -22,6 +22,7 @@ mod repair;
 mod resources;
 mod response_projection;
 mod schema;
+mod screenshot_preview;
 mod server;
 mod tool_args;
 pub mod toolset;

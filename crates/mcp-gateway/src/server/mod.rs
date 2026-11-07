@@ -1169,13 +1169,39 @@ impl Server {
                     if screenshot_artifacts.contains(artifact_id.as_str())
                         && artifact.media_type.starts_with("image/")
                     {
-                        let data = BASE64.encode(&artifact.bytes);
-                        if data.len() <= MAX_RESOURCE_ENCODED_BYTES {
+                        if artifact.bytes.len().div_ceil(3) * 4 <= MAX_RESOURCE_ENCODED_BYTES {
                             content.push(json!({
                                 "type":"image",
-                                "data":data,
+                                "data":BASE64.encode(&artifact.bytes),
                                 "mimeType":artifact.media_type
                             }));
+                        } else if artifact.media_type == "image/png" {
+                            // Too large to inline: a downscaled preview, with
+                            // its scale, and the full image stays the artifact.
+                            let bytes = artifact.bytes;
+                            let preview = tokio::task::spawn_blocking(move || {
+                                crate::screenshot_preview::downscaled(
+                                    &bytes,
+                                    MAX_RESOURCE_ENCODED_BYTES,
+                                )
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            if let Some(preview) = preview {
+                                content.push(json!({
+                                    "type":"image",
+                                    "data":BASE64.encode(&preview.png),
+                                    "mimeType":"image/png"
+                                }));
+                                content.push(json!({
+                                    "type":"text",
+                                    "text":format!(
+                                        "Preview at 1/{} scale ({}x{}); full size: artifact://{artifact_id}",
+                                        preview.factor, preview.width, preview.height
+                                    )
+                                }));
+                            }
                         }
                     }
                 }
