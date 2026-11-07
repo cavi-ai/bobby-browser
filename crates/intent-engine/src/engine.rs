@@ -2257,6 +2257,18 @@ async fn with_control_stamp(
 }
 
 fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, TargetSpec) {
+    // An ordinal picked a candidate whose CSS names no single element (a bare
+    // tag or a shared label): resolve it again the way it was picked.
+    if intent_target.ordinal.is_some()
+        && candidate.test_id.is_none()
+        && candidate.css.as_deref().is_some_and(css_names_many)
+    {
+        let mut target = intent_target.clone();
+        if target.frame_path.is_empty() {
+            target.frame_path = candidate.frame_path.clone();
+        }
+        return (String::new(), target);
+    }
     let selector = candidate.css.clone().unwrap_or_default();
     // Keep frame/shadow hops from the intent so iframe/shadow fills still land.
     // Do not copy ordinal: the candidate is already chosen; re-resolving with
@@ -2287,6 +2299,16 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
         ..TargetSpec::default()
     };
     (selector, target)
+}
+
+/// Whether a gathered candidate's CSS is a bare tag or an `aria-label`
+/// selector, which several elements can share; an id or a path names one.
+fn css_names_many(css: &str) -> bool {
+    css.starts_with("[aria-label=")
+        || (!css.is_empty()
+            && css
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
 }
 
 /// Attributes that change as the user or page acts on a control. They are

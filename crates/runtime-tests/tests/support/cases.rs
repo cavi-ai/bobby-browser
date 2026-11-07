@@ -6120,3 +6120,291 @@ pub async fn a_wrong_code_fails_without_echoing_it(rig: &Rig) {
     );
     live.close().await;
 }
+
+fn page_text_contains(page: &Value, text: &str) -> bool {
+    page.to_string().contains(text)
+}
+
+/// Checkboxes and radios built from ARIA roles take setChecked: a click turns
+/// them on, and a control already on stays on.
+pub async fn aria_checkboxes_and_radios_take_set_checked(rig: &Rig) {
+    let body = r#"<div id="news-label">Send me news</div>
+        <div id="news" role="checkbox" aria-checked="false" tabindex="0" aria-labelledby="news-label"
+             style="width:16px;height:16px;border:1px solid"></div>
+        <div role="radiogroup" aria-label="Work type">
+          <div role="radio" aria-checked="false" tabindex="0">Remote</div>
+          <div role="radio" aria-checked="false" tabindex="0">Onsite</div>
+        </div>
+        <p id="picked"></p>
+        <script>
+          const news = document.getElementById("news");
+          const radios = [...document.querySelectorAll('[role="radio"]')];
+          const show = () => {
+            document.getElementById("picked").textContent = `News: ${news.getAttribute("aria-checked")}; Work: ` +
+              radios.filter((r) => r.getAttribute("aria-checked") === "true").map((r) => r.textContent).join(",");
+          };
+          news.addEventListener("click", () => {
+            news.setAttribute("aria-checked", news.getAttribute("aria-checked") === "true" ? "false" : "true");
+            show();
+          });
+          for (const radio of radios) radio.addEventListener("click", () => {
+            for (const other of radios) other.setAttribute("aria-checked", String(other === radio));
+            show();
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/checks", Route::Html(page("Checks", body)))]).await;
+    let live = Live::open(rig, &site.url("/checks")).await;
+    for attempt in ["first", "again"] {
+        let checked = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"opt in to news","hints":{"role":"checkbox","accessibleName":"Send me news"},
+                       "value":{"kind":"setChecked","checked":true}}),
+            )
+            .await;
+        assert_eq!(checked["status"], "completed", "{attempt}: {checked}");
+    }
+    let picked = live
+        .call(
+            "intent_complete_form",
+            json!({"purpose":"Pick the work type",
+                   "fields":[{"name":"Work type","purpose":"remote work",
+                              "value":{"kind":"setChecked","checked":true},
+                              "hints":{"role":"radio","accessibleName":"Remote"}}]}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "News: true; Work: Remote"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// An editable region of any contenteditable kind is a form control, and the
+/// text typed into it reads back.
+pub async fn editable_regions_read_back_their_typed_text(rig: &Rig) {
+    let body = r#"<div id="links-label">Links</div>
+        <div id="links" role="textbox" contenteditable="plaintext-only" aria-labelledby="links-label"
+             style="min-height:2em;border:1px solid"></div>"#;
+    let site = FixtureSite::spawn(vec![("/edit", Route::Html(page("Edit", body)))]).await;
+    let live = Live::open(rig, &site.url("/edit")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut editable = Vec::new();
+    controls_of_kind(&snapshot, "contentEditable", &mut editable);
+    assert_eq!(
+        editable.len(),
+        1,
+        "the region is a form control: {snapshot}"
+    );
+    let typed = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"links","hints":{"role":"textbox","accessibleName":"Links"},
+                   "value":{"kind":"setText","value":"https://example.org/me"}}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "{typed}");
+    live.close().await;
+}
+
+/// type_text replaces a prefilled value unless told to append, and a value of
+/// only a line break presses Enter on the text already there.
+pub async fn type_text_replaces_a_prefilled_value(rig: &Rig) {
+    let body = r#"<label>Location <input id="loc" value="Springfield, IL, USA"></label>
+        <label>Search <input id="q" value="rust"></label>
+        <p id="echo"></p>
+        <script>
+          const echo = document.getElementById("echo");
+          const loc = document.getElementById("loc");
+          const q = document.getElementById("q");
+          loc.addEventListener("input", () => { echo.textContent = "Location: " + loc.value; });
+          q.addEventListener("keydown", (event) => { if (event.key === "Enter") echo.textContent = "Searched: " + q.value; });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/prefilled", Route::Html(page("Prefilled", body)))]).await;
+    let live = Live::open(rig, &site.url("/prefilled")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Location"},"value":"Springfield, Illinois"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "{typed}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Location: Springfield, Illinois\""),
+        "{page}"
+    );
+    let entered = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},"value":"\n"}),
+        )
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Searched: rust"), "{page}");
+    live.close().await;
+}
+
+/// A name given exactly picks its control over one whose name differs only by
+/// a trailing required marker, in either direction.
+pub async fn an_exact_name_outranks_one_with_a_required_marker(rig: &Rig) {
+    let body = r#"<div role="combobox" tabindex="0" aria-label="Start date">Choose</div>
+        <div role="combobox" tabindex="0" aria-label="Start date *">Choose</div>
+        <p id="picked"></p>
+        <script>
+          for (const box of document.querySelectorAll('[role="combobox"]')) box.addEventListener("click", () => {
+            document.getElementById("picked").textContent = "Clicked: " + box.getAttribute("aria-label");
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/names", Route::Html(page("Names", body)))]).await;
+    let live = Live::open(rig, &site.url("/names")).await;
+    for name in ["Start date *", "Start date"] {
+        let clicked = live
+            .call(
+                "click",
+                json!({"target":{"role":"combobox","accessibleName":name}}),
+            )
+            .await;
+        assert_eq!(clicked["status"], "completed", "{name}: {clicked}");
+        let page = live.snapshot(json!({})).await;
+        assert!(
+            page_text_contains(&page, &format!("Clicked: {name}\"")),
+            "{name}: {page}"
+        );
+    }
+    live.close().await;
+}
+
+/// A form snapshot target for a control inside a custom element's shadow root
+/// drives that control, though the element and its control share an id.
+pub async fn snapshot_targets_reach_controls_inside_custom_elements(rig: &Rig) {
+    let body = r#"<form><x-field id="repeat-email"></x-field></form>
+        <p id="echo"></p>
+        <script>
+          customElements.define("x-field", class extends HTMLElement {
+            connectedCallback() {
+              if (this.shadowRoot) return;
+              const root = this.attachShadow({ mode: "open" });
+              root.innerHTML = '<label for="repeat-email">Repeat email</label>' +
+                '<input id="repeat-email" type="email">';
+              root.querySelector("input").addEventListener("input", (event) => {
+                document.getElementById("echo").textContent = "Repeated: " + event.target.value;
+              });
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/shadow", Route::Html(page("Shadow", body)))]).await;
+    let live = Live::open(rig, &site.url("/shadow")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut emails = Vec::new();
+    controls_of_kind(&snapshot, "email", &mut emails);
+    let [email] = emails.as_slice() else {
+        panic!("one email control in the form snapshot: {snapshot}");
+    };
+    let target = email["target"].clone();
+    assert!(
+        target["shadowPath"]
+            .as_array()
+            .is_some_and(|path| path.len() == 1),
+        "the target names its shadow host: {email}"
+    );
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":target,"value":"ada@example.org"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let set = live
+        .call(
+            "control_action",
+            json!({"target":target,"action":{"kind":"setText","value":"grace@example.org"}}),
+        )
+        .await;
+    assert_eq!(set["status"], "completed", "control_action: {set}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Repeated: grace@example.org"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// A humanized click on an option scrolled out of its list's view scrolls it
+/// in and lands on that option.
+pub async fn a_humanized_click_reaches_an_option_scrolled_out_of_its_list(rig: &Rig) {
+    let options = (1..=10)
+        .map(|index| format!(r#"<div role="option" style="height:30px">Option {index}</div>"#))
+        .collect::<String>();
+    let body = format!(
+        r#"<div role="listbox" aria-label="Source" style="height:90px;overflow:auto;border:1px solid">{options}</div>
+        <p id="picked"></p>
+        <script>
+          for (const option of document.querySelectorAll('[role="option"]')) option.addEventListener("click", () => {{
+            document.getElementById("picked").textContent = "Picked: " + option.textContent;
+          }});
+        </script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/list", Route::Html(page("List", &body)))]).await;
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":site.url("/list"),
+                   "executionPolicy":{"humanize":true}}),
+        )
+        .await;
+    assert_eq!(started["status"], "completed", "workflow_start: {started}");
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"option","accessibleName":"Option 8"}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Picked: Option 8\""), "{page}");
+    live.close().await;
+}
+
+/// intent_complete_form fills the control a field's role, name and ordinal
+/// pick among several with the same name.
+pub async fn complete_form_honors_a_field_ordinal(rig: &Rig) {
+    let rows = (1..=4)
+        .map(|index| {
+            format!(r#"<section><h3>Role {index}</h3><label>Title <input></label></section>"#)
+        })
+        .collect::<String>();
+    let body = format!(
+        r#"<form>{rows}</form><p id="echo"></p>
+        <script>
+          document.addEventListener("input", () => {{
+            document.getElementById("echo").textContent = "Titles: " +
+              [...document.querySelectorAll("input")].map((input) => input.value).join("|");
+          }});
+        </script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/rows", Route::Html(page("Rows", &body)))]).await;
+    let live = Live::open(rig, &site.url("/rows")).await;
+    let filled = live
+        .call(
+            "intent_complete_form",
+            json!({"purpose":"Fill the second role",
+                   "fields":[{"name":"Title","purpose":"title of the second role",
+                              "value":{"kind":"setText","value":"Engineer"},
+                              "hints":{"role":"textbox","accessibleName":"Title","ordinal":1}}]}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Titles: |Engineer||"), "{page}");
+    live.close().await;
+}

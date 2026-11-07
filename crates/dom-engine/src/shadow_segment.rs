@@ -102,9 +102,53 @@ pub fn resolve_shadow_segment(
             evidence,
             best_match_authorized,
         } => Ok((*candidate, evidence, best_match_authorized)),
-        ResolutionDecision::NotFound => Err(shadow_probe_error("host-missing").unwrap()),
+        ResolutionDecision::NotFound => host_by_snapshot_name(target, candidates),
         ResolutionDecision::Ambiguous { .. } => Err(shadow_probe_error("host-ambiguous").unwrap()),
     }
+}
+
+/// A form snapshot names a host without a role and label by `group` and its
+/// `aria-label`, else its id, else `shadow root`; that name resolves it too.
+fn host_by_snapshot_name(
+    target: &TargetSpec,
+    candidates: &[Candidate],
+) -> Result<(Candidate, CandidateEvidence, bool), CommandError> {
+    let missing = || shadow_probe_error("host-missing").unwrap();
+    let (Some(role), Some(name)) = (target.role.as_deref(), target.accessible_name.as_deref())
+    else {
+        return Err(missing());
+    };
+    let snapshot_name = |candidate: &Candidate| {
+        ["aria-label", "id"]
+            .into_iter()
+            .find_map(|key| {
+                candidate
+                    .attributes
+                    .get(key)
+                    .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "shadow root".to_owned())
+    };
+    let matches = candidates
+        .iter()
+        .filter(|candidate| candidate.state.attached && candidate.state.visible)
+        .filter(|candidate| candidate.role.as_deref().unwrap_or("group") == role)
+        .filter(|candidate| snapshot_name(candidate) == name.trim())
+        .collect::<Vec<_>>();
+    let candidate = match (target.ordinal, matches.as_slice()) {
+        (Some(ordinal), _) => matches.get(ordinal).copied().ok_or_else(missing)?,
+        (None, [only]) => *only,
+        (None, []) => return Err(missing()),
+        (None, _) => return Err(shadow_probe_error("host-ambiguous").unwrap()),
+    };
+    let evidence = CandidateEvidence {
+        role: candidate.role.clone(),
+        name: candidate.name.clone(),
+        score: 0,
+        reasons: vec!["shadowHostSnapshotName".into()],
+    };
+    Ok((candidate.clone(), evidence, false))
 }
 
 pub fn shadow_segment_function() -> &'static str {
