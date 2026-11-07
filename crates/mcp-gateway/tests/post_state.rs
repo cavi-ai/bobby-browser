@@ -170,6 +170,78 @@ async fn landed_submit_verification_failure_returns_state_without_replaying_the_
     }
 }
 
+/// The same submit control on another page of one workflow is a new
+/// Boundary; back on the first page (fragment ignored) it is refused.
+#[tokio::test]
+async fn a_landed_submit_guards_its_page_only() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        1,
+        "workflow_start",
+        json!({"profile":"recovery"}),
+    )
+    .await;
+    let handle = started["result"]["structuredContent"]["workflowHandle"].clone();
+    live.probe
+        .candidates
+        .lock()
+        .expect("candidates")
+        .push(clickable_candidate());
+    let submit = json!({
+        "workflowHandle":handle,
+        "purpose":"Submit application",
+        "hints":{"role":"button","accessibleName":"Continue"},
+        "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/done"}},"timeoutMs":100}
+    });
+    let mut id = 10;
+    let mut submit_on = |url: &'static str| {
+        id += 2;
+        let live = &live;
+        let handle = handle.clone();
+        let submit = submit.clone();
+        let navigate_id = id;
+        async move {
+            let navigated = call_tool(
+                &live.server,
+                navigate_id,
+                "navigate",
+                json!({"workflowHandle":handle,"url":url}),
+            )
+            .await;
+            assert_eq!(
+                navigated["result"]["structuredContent"]["status"], "completed",
+                "{navigated}"
+            );
+            call_tool(
+                &live.server,
+                navigate_id + 1,
+                "intent_submit_and_verify",
+                submit,
+            )
+            .await
+        }
+    };
+
+    let first = submit_on("https://live-harness.test/jobs/a#apply").await;
+    assert_eq!(
+        first["result"]["structuredContent"]["error"]["code"], "verificationFailed",
+        "{first}"
+    );
+    let other_page = submit_on("https://live-harness.test/jobs/b").await;
+    assert_ne!(
+        other_page["result"]["structuredContent"]["error"]["code"], "boundaryAlreadyExecuted",
+        "{other_page}"
+    );
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 2);
+    let same_page = submit_on("https://live-harness.test/jobs/a").await;
+    assert_eq!(
+        same_page["result"]["structuredContent"]["error"]["code"], "boundaryAlreadyExecuted",
+        "{same_page}"
+    );
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn popup_returns_state_from_the_rebound_handle_and_keeps_id_conflicts_rejected() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;

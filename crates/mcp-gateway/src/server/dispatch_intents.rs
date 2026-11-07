@@ -192,11 +192,21 @@ impl Server {
                 // started the fix-and-resubmit flow does NOT record, so the
                 // legitimate rejected-then-corrected flow stays open.
                 // `reSubmit` is the explicit escape hatch.
-                let boundary_key = input
+                // The page url joins the key: the same control on another
+                // page (the next form in a run) is a distinct Boundary.
+                let boundary_key = match input
                     .workflow_id
                     .clone()
                     .zip(control_identity(&input.hints.clone().unwrap_or_default()))
-                    .map(|(workflow_id, control)| (workflow_id, Some(control)));
+                {
+                    Some((workflow_id, control)) => {
+                        let page_url = self
+                            .boundary_page_url(&context, &input.session_id, &input.page_id)
+                            .await;
+                        Some((workflow_id, Some(control), page_url))
+                    }
+                    None => None,
+                };
                 if let Some(key) = &boundary_key {
                     if !input.re_submit.unwrap_or(false) {
                         if let Some(prior) = self.prior_boundary_execution(key).await {

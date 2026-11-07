@@ -240,9 +240,10 @@ fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpe
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
 /// Construct with [`Self::new`] and drive I/O through [`Self::serve`] or
 /// [`Self::handle_message`].
-/// Ledger key: (workflow, control identity). The control identity is
-/// `None` for hints-less submits, which the ledger does not guard.
-pub(crate) type BoundaryLedgerKey = (types::WorkflowId, Option<ControlIdentity>);
+/// Ledger key: (workflow, control identity, page url without fragment). The
+/// control identity is `None` for hints-less submits, which the ledger does
+/// not guard; the url is `None` when the page list could not be read.
+pub(crate) type BoundaryLedgerKey = (types::WorkflowId, Option<ControlIdentity>, Option<String>);
 
 pub struct Server {
     runtime: Arc<dyn RuntimeInterface>,
@@ -1284,10 +1285,43 @@ impl Server {
     ) {
         let hints: types::IntentHints = serde_json::from_value(hints).unwrap();
         self.record_boundary_execution(
-            &(workflow_id.clone(), control_identity(&hints)),
+            &(workflow_id.clone(), control_identity(&hints), None),
             command_id,
         )
         .await;
+    }
+
+    /// The page's current url without its fragment, read before a guarded
+    /// submit so the same control on another page is a distinct Boundary.
+    /// `None` when the page list cannot be read or does not hold the page.
+    async fn boundary_page_url(
+        &self,
+        context: &types::RequestContext,
+        session_id: &types::SessionId,
+        page_id: &types::PageId,
+    ) -> Option<String> {
+        let context = types::RequestContext {
+            idempotency_key: None,
+            ..context.clone()
+        };
+        let (context, envelope) = primitive_envelope(
+            context,
+            session_id.clone(),
+            None,
+            None,
+            types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+        );
+        let listed = self.submit_envelope_once(context, envelope).await.ok()?;
+        let page_id = serde_json::to_value(page_id).ok()?;
+        listed["evidence"]
+            .as_array()?
+            .iter()
+            .filter(|item| item["kind"] == "pages")
+            .filter_map(|item| item["pages"].as_array())
+            .flatten()
+            .find(|page| page["pageId"] == page_id)
+            .and_then(|page| page["url"].as_str())
+            .map(|url| url.split('#').next().unwrap_or(url).to_owned())
     }
 
     /// One call for a Boundary command: mint the checkpoint, then run it.
