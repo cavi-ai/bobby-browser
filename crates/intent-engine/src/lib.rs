@@ -2,6 +2,7 @@ mod code_entry;
 mod compiler;
 mod corpus;
 mod engine;
+pub mod frame;
 mod http_vision;
 mod stuck;
 mod verify;
