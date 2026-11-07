@@ -1809,12 +1809,14 @@ async fn execute_intent(
         .to_std()
         .unwrap_or_default();
     let prefill_deadline = now.checked_add(remaining / 2).unwrap_or(now);
-    let outcome = IntentEngine::execute_with_prefill_deadline(
+    let command_deadline = now.checked_add(remaining).unwrap_or(now);
+    let outcome = IntentEngine::execute_with_deadlines(
         intent,
         page_id,
         &browser,
         &vision,
         prefill_deadline,
+        command_deadline,
     )
     .await;
     record_intent_metrics(operational_metrics.as_ref(), intent, &outcome);

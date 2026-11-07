@@ -1522,12 +1522,26 @@ fn page_provenance_projection_marks_only_derived_evidence() {
     let mut outcome = json!({"evidence": [
         {"kind": "inspection", "text": "untrusted page text"},
         {"kind": "structuredExtraction", "value": {"x": 1}},
-        {"kind": "browserExecution", "engine": "firefox"}
+        {"kind": "browserExecution", "engine": "firefox"},
+        {"kind": "outcomeReading", "outcome": "rejected", "message": "untrusted page text", "confidence": 0.9}
     ]});
     types::annotate_page_derived_evidence(&mut outcome);
     assert_eq!(outcome["evidence"][0]["pageDerived"], true);
     assert_eq!(outcome["evidence"][1]["pageDerived"], true);
     assert!(outcome["evidence"][2].get("pageDerived").is_none());
+    assert_eq!(outcome["evidence"][3]["pageDerived"], true);
+}
+
+#[test]
+fn an_outcome_reading_is_page_derived() {
+    let reading: Evidence = serde_json::from_value(json!({
+        "kind": "outcomeReading",
+        "outcome": "rejected",
+        "message": "untrusted page text",
+        "confidence": 0.9
+    }))
+    .unwrap();
+    assert!(reading.page_derived());
 }
 
 #[test]

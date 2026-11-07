@@ -129,6 +129,27 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                 self.assertEqual(response.confidence, 0.9)
                 self.assertEqual(response.action, {"kind": "challengeSolved"})
 
+    def test_an_outcome_reading_keeps_its_outcome_and_message(self):
+        for kind in ("outcomeRead", "outcome_read"):
+            with self.subTest(kind=kind):
+                response = VisionProvider.normalize_response(
+                    {
+                        "confidence": 0.9,
+                        "action": {"kind": kind, "outcome": "rejected", "message": "Email is taken"},
+                    }
+                )
+                response.validate()
+                self.assertEqual(
+                    response.action,
+                    {"kind": "outcomeRead", "outcome": "rejected", "message": "Email is taken"},
+                )
+
+    def test_an_outcome_reading_refuses_an_unknown_outcome(self):
+        with self.assertRaises(ValueError):
+            VisionProvider.normalize_response(
+                {"confidence": 0.9, "action": {"kind": "outcomeRead", "outcome": "maybe"}}
+            )
+
     def test_list_typed_coordinates_unwrap(self):
         for given, expected in (
             ({"kind": "click", "x": [566], "y": [671]}, {"kind": "click", "x": 566.0, "y": 671.0}),

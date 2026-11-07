@@ -13,6 +13,8 @@ Action kinds match `crates/vision-proxy/src/wire.rs`:
     - {"kind": "typeIntoCandidate", "index": int}
     - {"kind": "extractFromCandidate", "index": int}
     - {"kind": "challengeSolved"}                   terminal solveChallenge signal
+    - {"kind": "outcomeRead", "outcome": "confirmed|rejected|noMessage", "message": str}
+                                                    readOutcome answer
 
 Providers are swappable via `create_provider()`: mlx-vlm (direct local
 inference), ollama, lmstudio, or openai — same interface, different backend.
@@ -36,6 +38,9 @@ from candidate_action_contract import (
 )
 
 log = logging.getLogger(__name__)
+
+# What a readOutcome answer may report the page shows.
+OUTCOMES = ("confirmed", "rejected", "noMessage")
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +124,15 @@ class ProposeResponse:
         kind = self.action.get("kind")
         candidate_kinds = CANDIDATE_ACTION_KINDS
         detect_kinds = ("challengeDetected", "noChallengeDetected")
-        if kind not in ("click", "typeText", "extractValue", "challengeSolved", *candidate_kinds, *detect_kinds):
+        if kind not in ("click", "typeText", "extractValue", "challengeSolved", "outcomeRead", *candidate_kinds, *detect_kinds):
             raise ValueError(f"invalid action kind: {kind}")
+        if kind == "outcomeRead":
+            if not set(self.action) <= {"kind", "outcome", "message"}:
+                raise ValueError("outcomeRead carries unknown fields")
+            if self.action.get("outcome") not in OUTCOMES:
+                raise ValueError("outcomeRead outcome must be confirmed, rejected or noMessage")
+            if not isinstance(self.action.get("message", ""), str):
+                raise ValueError("outcomeRead message must be a string")
         if kind == "challengeSolved":
             if set(self.action) != {"kind"}:
                 raise ValueError("challengeSolved must contain only kind")
@@ -184,6 +196,7 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "challengeSolved"}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "challengeDetected", "challengeType": string, "blocking": boolean, "region": {"x": number, "y": number, "width": number, "height": number} (optional)}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "noChallengeDetected"}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "outcomeRead", "outcome": "confirmed|rejected|noMessage", "message": string}}\n'
         "When candidates are listed, select only by zero-based index: "
         f"{CANDIDATE_PROMPT_RULES}. "
         "Candidate actions contain only kind and index; never emit typed or "
@@ -199,7 +212,13 @@ class VisionProvider(ABC):
         "challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, "
         "imageGridCaptcha, mfaCodeEntry (blocking=true when the widget "
         "prevents the task, region optional), or noChallengeDetected when the "
-        "page carries no captcha or verification widget. Click coordinates "
+        "page carries no captcha or verification widget. For readOutcome "
+        "requests, never act: read the page after the action the purpose "
+        "names and return outcomeRead with outcome confirmed when it shows a "
+        "success or confirmation message, rejected when it shows an error, "
+        "rejection or validation message, or noMessage when it shows "
+        "neither; message quotes the visible message, at most 300 "
+        "characters. Click coordinates "
         "are CSS pixels relative to the "
         "screenshot image. Do not include markdown fences, comments, or any "
         "text outside the JSON object."
@@ -323,6 +342,10 @@ class VisionProvider(ABC):
             if action.get("region") is not None:
                 normalized["region"] = action.get("region")
             normalized["blocking"] = bool(action.get("blocking", False))
+        elif kind == "outcomeRead":
+            normalized["outcome"] = action.get("outcome")
+            if action.get("message") is not None:
+                normalized["message"] = str(action.get("message"))
         elif kind == "click":
             # Models emit coordinates variously: {x, y}, {coordinate: [x, y]},
             # {position: {x, y}}, {clickX, clickY}, or list-typed values like
@@ -378,6 +401,7 @@ class VisionProvider(ABC):
             "challenge_solved": "challengeSolved",
             "challenge_detected": "challengeDetected",
             "no_challenge_detected": "noChallengeDetected",
+            "outcome_read": "outcomeRead",
         }
         return {**aliases, **SNAKE_CASE_CANDIDATE_KINDS}.get(kind, kind)
 
@@ -391,6 +415,7 @@ class VisionProvider(ABC):
             "challengeDetected": {"kind", "challengeType", "challenge_type", "region", "blocking"},
             "noChallengeDetected": {"kind"},
             "challengeSolved": {"kind"},
+            "outcomeRead": {"kind", "outcome", "message"},
         }.get(kind)
 
     @classmethod

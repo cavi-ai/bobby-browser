@@ -348,6 +348,7 @@ pub fn validate_backend_result(
         VisionAction::ChallengeSolved => "challenge_solved",
         VisionAction::ChallengeDetected { .. } => "challenge_detected",
         VisionAction::NoChallengeDetected => "no_challenge_detected",
+        VisionAction::OutcomeRead { .. } => "outcome_read",
     };
     if !packet
         .allowed_actions
@@ -522,6 +523,12 @@ pub enum VisionAction {
     /// `detectChallenge` intent; a clean page is a first-class answer, not
     /// an absence of one.
     NoChallengeDetected,
+    /// What the page shows after a landed action, with the message the model
+    /// read. Only valid for the `readOutcome` intent; it never acts.
+    OutcomeRead {
+        outcome: types::PageOutcome,
+        message: Option<String>,
+    },
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -573,6 +580,11 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         }
         VisionAction::NoChallengeDetected => {
             hasher.update(b"noChallengeDetected");
+        }
+        VisionAction::OutcomeRead { outcome, message } => {
+            hasher.update(b"outcomeRead");
+            hasher.update(serde_json::to_vec(outcome).unwrap_or_default());
+            hasher.update(message.as_deref().unwrap_or_default().as_bytes());
         }
     }
     hex::encode(hasher.finalize())

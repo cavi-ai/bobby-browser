@@ -2536,7 +2536,7 @@ async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback()
         },
         screenshot_calls: screenshot_calls.clone(),
     };
-    let outcome = IntentEngine::execute_with_prefill_deadline(
+    let outcome = IntentEngine::execute_with_deadlines(
         &IntentCommand::CompleteForm(types::CompleteFormIntent {
             purpose: "configure notifications".into(),
             fields: vec![
@@ -2558,6 +2558,7 @@ async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback()
             ..VisionContext::default()
         },
         tokio::time::Instant::now(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
     )
     .await;
     let IntentOutcome::Completed { evidence } = outcome else {

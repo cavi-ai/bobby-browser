@@ -493,6 +493,11 @@ export function isEvidence(value: unknown): value is Evidence {
       const hintsValid = value.detection.hints === undefined || (hasExactKeys(value.detection.hints, [], ["target_field_purpose", "instruction_text"]) && optional(value.detection.hints, "target_field_purpose", isString) && optional(value.detection.hints, "instruction_text", isString));
       return regionValid && hintsValid;
     }
+    case "outcomeReading": return hasExactKeys(value, ["kind", "outcome", "confidence"], ["message", "pageDerived"])
+      && (value.pageDerived === undefined || value.pageDerived === true)
+      && oneOf(value.outcome, ["confirmed", "rejected", "noMessage"] as const)
+      && optional(value, "message", isString)
+      && typeof value.confidence === "number" && Number.isFinite(value.confidence);
     case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
     case "pdfArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "dialog": return hasExactKeys(value, ["kind", "dialogType", "message", "action"]) && isString(value.dialogType) && isString(value.message) && (value.action === "accept" || value.action === "dismiss");

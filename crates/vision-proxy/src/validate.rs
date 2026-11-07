@@ -24,6 +24,10 @@ pub enum ValidateError {
     DetectIntentMismatch,
     #[error("challenge region coordinates are not finite")]
     NonFiniteRegion,
+    #[error("outcome readings are only valid for a readOutcome request")]
+    OutcomeIntentMismatch,
+    #[error("vision outcome message exceeded its bound")]
+    OutcomeMessageTooLong,
     #[error("candidate action index is outside the request candidate list")]
     CandidateIndexOutOfRange,
 }
@@ -57,6 +61,14 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
             _ => Ok(()),
         },
         VisionAction::NoChallengeDetected => Ok(()),
+        VisionAction::OutcomeRead { message, .. }
+            if message
+                .as_ref()
+                .is_some_and(|text| text.len() > MAX_TEXT_BYTES) =>
+        {
+            Err(ValidateError::OutcomeMessageTooLong)
+        }
+        VisionAction::OutcomeRead { .. } => Ok(()),
     }
 }
 
@@ -80,6 +92,12 @@ pub fn validate_proposal_for_request(
     );
     if is_detect_action != (intent_kind == "detectChallenge") {
         return Err(ValidateError::DetectIntentMismatch);
+    }
+    // A reading only reports what the page shows; it is the whole answer to
+    // a readOutcome request and never an answer to anything else.
+    if matches!(proposal.action, VisionAction::OutcomeRead { .. }) != (intent_kind == "readOutcome")
+    {
+        return Err(ValidateError::OutcomeIntentMismatch);
     }
     let (index, action_kind) = match proposal.action {
         VisionAction::ClickCandidate { index } => (Some(index), Some("clickCandidate")),
@@ -153,6 +171,37 @@ mod tests {
             assert_eq!(serde_json::to_string(&proposal).unwrap(), json);
             assert!(validate_proposal(&proposal).is_ok());
         }
+    }
+
+    #[test]
+    fn an_outcome_reading_is_valid_only_for_a_read_outcome_request() {
+        let json = r#"{"confidence":0.9,"action":{"kind":"outcomeRead","outcome":"rejected","message":"Email is already registered"}}"#;
+        let proposal: ProposeResponse = serde_json::from_str(json).expect("outcomeRead parses");
+        assert_eq!(serde_json::to_string(&proposal).unwrap(), json);
+        assert_eq!(
+            validate_proposal_for_request(&proposal, "readOutcome", 0),
+            Ok(())
+        );
+        assert_eq!(
+            validate_proposal_for_request(&proposal, "locate", 0),
+            Err(ValidateError::OutcomeIntentMismatch)
+        );
+        let click: ProposeResponse =
+            serde_json::from_str(r#"{"confidence":0.9,"action":{"kind":"click","x":1,"y":2}}"#)
+                .unwrap();
+        assert_eq!(
+            validate_proposal_for_request(&click, "readOutcome", 0),
+            Err(ValidateError::OutcomeIntentMismatch)
+        );
+        let long = format!(
+            r#"{{"confidence":0.9,"action":{{"kind":"outcomeRead","outcome":"rejected","message":"{}"}}}}"#,
+            "x".repeat(MAX_TEXT_BYTES + 1)
+        );
+        let long: ProposeResponse = serde_json::from_str(&long).unwrap();
+        assert_eq!(
+            validate_proposal(&long),
+            Err(ValidateError::OutcomeMessageTooLong)
+        );
     }
 
     #[test]

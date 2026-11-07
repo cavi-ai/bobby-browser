@@ -185,4 +185,6 @@ When deterministic matching is stuck, an intent can ask a vision provider to pic
 
 The provider chooses among up to five near-miss candidates, and bobby accepts a proposal only above a 0.75 confidence floor and after verifying it. With `[vision].prefill = true` (the default), `intent_complete_form` resolves unresolved fields from one screenshot before it starts. Evidence marks the path as `deterministic`, `visionPrefill`, `visionFallback` or `context`, a label remembered from an earlier visit (see [Context graph](../concepts/context-graph.md#vision-labels)).
 
+With vision assist on, `intent_submit_and_verify` reads the page once after the submit. Its `outcomeReading` evidence holds `outcome` (`confirmed`, `rejected` or `noMessage`), `confidence` and, when the page shows one, `message`. A failed submit also names the message in its error and carries a `screenshot` of the page. A reading below the confidence floor is left out, and a reading never changes whether the submit passed. The message is page text and is marked `pageDerived`.
+
 `intent_detect_challenge` classifies a captcha and never acts: its `challengeDetection` evidence holds the type, confidence and whether it blocks, or `null` for a clean page. `intent_solve_challenge` runs the solve loop until the challenge clears or `timeoutMs` passes. bobby does not scan pages for challenges on its own.

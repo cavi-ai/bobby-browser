@@ -3071,6 +3071,15 @@ fn evidence_variants() -> Vec<Value> {
             &["confidence", "detection"],
         ),
         tagged_fields(
+            "outcomeReading",
+            json!({
+                "outcome":{"type":"string","enum":["confirmed","rejected","noMessage"]},
+                "message":string(1, MAX_STRING_BYTES),
+                "confidence":{"type":"number"}
+            }),
+            &["outcome", "confidence"],
+        ),
+        tagged_fields(
             "intentExecution",
             json!({"record":{"$ref":"#/$defs/ExecutionRecord"}}),
             &["record"],

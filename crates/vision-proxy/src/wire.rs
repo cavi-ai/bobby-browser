@@ -99,6 +99,14 @@ pub enum VisionAction {
     /// clean. A first-class answer, not an absence of one.
     #[serde(alias = "no_challenge_detected")]
     NoChallengeDetected,
+    /// Answer to a `readOutcome` request: what the page shows after a landed
+    /// action, and the message the model read.
+    #[serde(alias = "outcome_read")]
+    OutcomeRead {
+        outcome: types::PageOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -525,6 +525,7 @@ fn project_verified_action_outcome(mut outcome: Value, detail: EvidenceDetail) -
                         | "download"
                         | "submitSettlement"
                         | "formValidation"
+                        | "outcomeReading"
                 )
             )
         })
@@ -693,6 +694,7 @@ mod tests {
                 {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
                 {"kind":"screenshot","artifactId":"shot-1","mediaType":"image/png","width":1,"height":1,"bytes":1,"sha256":"abc"},
                 {"kind":"submitSettlement","outcome":"settled"},
+                {"kind":"outcomeReading","outcome":"confirmed","message":"Saved","confidence":0.9},
                 {"kind":"intentExecution","record":{}}
             ]
         });
@@ -707,7 +709,8 @@ mod tests {
                 {"kind":"pageGeneration","pageId":"018f0000-0000-7000-8000-000000000010","generation":4},
                 {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
                 {"kind":"screenshot","artifactId":"shot-1","mediaType":"image/png","width":1,"height":1,"bytes":1,"sha256":"abc"},
-                {"kind":"submitSettlement","outcome":"settled"}
+                {"kind":"submitSettlement","outcome":"settled"},
+                {"kind":"outcomeReading","outcome":"confirmed","message":"Saved","confidence":0.9}
             ])
         );
     }
