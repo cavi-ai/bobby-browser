@@ -2015,6 +2015,49 @@ fn resolve_declared_selection(
     Ok((BrowserSelectionConfig::default(), SelectionSource::Default))
 }
 
+/// The engine a preference starts sessions on, first choice for a `prefer` list.
+pub fn preferred_engine(preference: &EnginePreferenceConfig) -> Option<BrowserEngineConfig> {
+    match preference {
+        EnginePreferenceConfig::ManagedChromium => Some(BrowserEngineConfig::Chromium),
+        EnginePreferenceConfig::Exact { engine, .. } => Some(*engine),
+        EnginePreferenceConfig::Prefer { engines } => engines.first().copied(),
+    }
+}
+
+/// Points the persisted selection's default at `engine`, keeping every
+/// enrolled profile. Takes effect the next time a runtime starts. `env` is
+/// the value of [`SELECTION_ENV`], which would override the file.
+pub fn set_default_engine(
+    env: Option<&str>,
+    path: &Path,
+    engine: BrowserEngineConfig,
+) -> Result<()> {
+    if env.is_some() {
+        anyhow::bail!(
+            "{SELECTION_ENV} is set and overrides {}; change or unset it instead",
+            path.display()
+        );
+    }
+    let (mut selection, _) = resolve_declared_selection(None, Some(path))?;
+    let first_firefox = selection.firefox.first().map(|p| p.profile_id.clone());
+    if engine == BrowserEngineConfig::Firefox && first_firefox.is_none() {
+        anyhow::bail!("no Firefox profile is enrolled; run `bobby install --companion` first");
+    }
+    if preferred_engine(&selection.preference) != Some(engine)
+        || matches!(selection.preference, EnginePreferenceConfig::Prefer { .. })
+    {
+        selection.preference = match engine {
+            BrowserEngineConfig::Firefox => EnginePreferenceConfig::Exact {
+                engine,
+                profile_id: first_firefox,
+            },
+            BrowserEngineConfig::Chromium => EnginePreferenceConfig::ManagedChromium,
+            BrowserEngineConfig::WebKit => anyhow::bail!("WebKit has no browser worker"),
+        };
+    }
+    persist_browser_selection(path, &selection)
+}
+
 /// Build the browser-selection document produced after a successful Firefox
 /// profile enrollment. Shared by the CLI enroll command and (Task 5) the
 /// native-host `enrollProfile` handler so both paths emit identical wire JSON.

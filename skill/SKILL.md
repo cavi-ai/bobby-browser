@@ -38,6 +38,10 @@ calls. Rules that govern every call:
 
 ## Core loop
 
+- To run on a specific browser, pass `executionPolicy: {"engine": "chromium"}`
+  or `"firefox"` to `workflow_start` or `session_create`. Without it the session
+  uses the runtime's default engine. Sessions on both engines can run at once;
+  `session_capabilities` reports each session's `engine`.
 - `workflow_start` (optionally with `url`) creates session + page + workflow
   and returns a `workflowHandle`. Use it over manual `session_create` +
   `page_open`. When you need the initial page, pass `includePostState: true`

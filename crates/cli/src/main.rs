@@ -32,9 +32,9 @@ use firefox_companion::selection::write_enroll_defaults;
 pub use firefox_companion::selection::{
     build_enrolled_browser_selection, compose_worker_factory,
     compose_worker_factory_with_enrolled_firefox, compose_worker_factory_with_pairing_observer,
-    default_selection_path, parse_selection, persist_browser_selection, resolve_browser_selection,
-    start_firefox_profile_enrollment, EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig,
-    SelectionSource, SELECTION_ENV,
+    default_selection_path, parse_selection, persist_browser_selection, preferred_engine,
+    resolve_browser_selection, set_default_engine, start_firefox_profile_enrollment,
+    EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig, SelectionSource, SELECTION_ENV,
 };
 use firefox_companion::selection::{
     enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
@@ -82,6 +82,22 @@ impl Cli {
     }
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum EngineChoice {
+    #[value(alias = "chrome")]
+    Chromium,
+    Firefox,
+}
+
+impl From<EngineChoice> for config::BrowserEngineConfig {
+    fn from(choice: EngineChoice) -> Self {
+        match choice {
+            EngineChoice::Chromium => Self::Chromium,
+            EngineChoice::Firefox => Self::Firefox,
+        }
+    }
+}
+
 #[derive(clap::Subcommand)]
 enum CliCommand {
     /// Open this scope's installed Firefox profile for pairing or browsing.
@@ -103,6 +119,12 @@ enum CliCommand {
         vision: bool,
         #[arg(long, conflicts_with = "vision")]
         no_vision: bool,
+    },
+    /// Show or set the browser engine sessions use by default
+    Engine {
+        /// Engine to make the default; omit to show the current one
+        #[arg(value_enum)]
+        engine: Option<EngineChoice>,
     },
     /// Generate a loopback bootstrap credential
     Init {
@@ -830,6 +852,7 @@ pub async fn run() -> Result<()> {
     cli.scope.apply()?;
     match command {
         CliCommand::FirefoxStart => runtime_scopes::firefox_start().await?,
+        CliCommand::Engine { engine } => run_engine(engine)?,
         CliCommand::Runtime { command } => runtime_scopes::run(command).await?,
         CliCommand::RuntimeOwner {
             state_dir,
@@ -2091,6 +2114,36 @@ pub(crate) fn resolve_bootstrap_path(cli: Option<PathBuf>) -> Result<PathBuf> {
 /// `bobby init` prints the plaintext once, at creation. Every client snippet
 /// then asks for `AUTOMATION_RUNTIME_TOKEN` with no supported way to read it
 /// back, so the answer was "open the dotenv and copy the field yourself".
+fn run_engine(engine: Option<EngineChoice>) -> Result<()> {
+    if let Some(engine) = engine {
+        let env = std::env::var(SELECTION_ENV).ok();
+        set_default_engine(env.as_deref(), &default_selection_path()?, engine.into())?;
+        println!("A running runtime keeps its default until `bobby runtime restart`.");
+    }
+    let (selection, source) = resolve_browser_selection()?;
+    let default = match preferred_engine(&selection.preference) {
+        Some(config::BrowserEngineConfig::Firefox) => "firefox",
+        Some(config::BrowserEngineConfig::Chromium) => "chromium",
+        Some(config::BrowserEngineConfig::WebKit) => "webkit",
+        None => "none",
+    };
+    let source = match source {
+        SelectionSource::Environment => SELECTION_ENV.to_owned(),
+        SelectionSource::Persisted(path) => path.display().to_string(),
+        SelectionSource::Default => "built-in default".to_owned(),
+    };
+    println!("default engine: {default} ({source})");
+    println!(
+        "per session (executionPolicy.engine): chromium{}",
+        if selection.firefox.is_empty() {
+            ""
+        } else {
+            ", firefox"
+        }
+    );
+    Ok(())
+}
+
 fn run_token(bootstrap_env: Option<PathBuf>, stdout: bool) -> Result<()> {
     let path = resolve_bootstrap_path(bootstrap_env)?;
     let bearer = bootstrap_local::load_bootstrap_bearer(&path).with_context(|| {

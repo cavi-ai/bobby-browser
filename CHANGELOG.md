@@ -5,6 +5,7 @@
 ### Added
 
 - With vision assist on, `intent_submit_and_verify` and `intent_follow` return `outcomeReading` evidence: the confirmation or error message the page shows after the activation.
+- `executionPolicy.engine` runs a session on Chromium or Firefox, side by side in one runtime, and `bobby engine` shows or sets the default engine.
 - `[vision].assist_profiles` names browser profiles whose sessions always run with vision assist, so their escalations reach the vision corpus.
 - `[vision.acp_profiles.<name>]` takes `env` for the harness process and `session_meta` for every `session/new`, so a vision profile can leave out the harness user's instructions, plugins, skills and MCP servers.
 - `[vision].model_server` sends the managed MLX vision server's requests to an OpenAI-compatible server that holds the model, such as one `mlx-agent serve` started; `bobby install` sets it with `--vision-model-server` or from its vision menu.

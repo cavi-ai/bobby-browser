@@ -20,7 +20,7 @@ export interface SessionState { id: Id; profile: string; proxy: string | null; p
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Session execution policy. Omitted fields default to denied. */
-export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; passwordManager?: boolean; visionNode?: string; }
+export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; passwordManager?: boolean; visionNode?: string; /** Browser engine for this session; omitted uses the runtime's default. */ engine?: "chromium" | "firefox"; }
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; /** Godmode session: every capability on + the ZigZagZig recovery ladder on every page-bound command. */ zigzagzig?: boolean; }
 export interface OpenPageRequest { session_id: Id; }
 

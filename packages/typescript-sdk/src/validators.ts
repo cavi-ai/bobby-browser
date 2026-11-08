@@ -299,13 +299,14 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
 }
 
 function isSessionExecutionPolicy(value: unknown): value is SessionState["execution_policy"] {
-  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist", "fingerprint", "humanize", "passwordManager"], ["visionNode"])
+  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist", "fingerprint", "humanize", "passwordManager"], ["visionNode", "engine"])
     && typeof value.javascriptEvaluation === "boolean"
     && typeof value.visionAssist === "boolean"
     && typeof value.fingerprint === "boolean"
     && typeof value.humanize === "boolean"
     && typeof value.passwordManager === "boolean"
-    && optional(value, "visionNode", (node): node is string => boundedText(node, 128));
+    && optional(value, "visionNode", (node): node is string => boundedText(node, 128))
+    && optional(value, "engine", (engine): engine is "chromium" | "firefox" => engine === "chromium" || engine === "firefox");
 }
 
 export function isSessionState(value: unknown): value is SessionState {

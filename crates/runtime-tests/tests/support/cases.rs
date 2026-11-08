@@ -264,6 +264,29 @@ fn page(title: &str, body: &str) -> String {
     format!("<!doctype html><html><head><meta charset=utf-8><title>{title}</title></head><body>{body}</body></html>")
 }
 
+/// Needs a runtime holding both engines: each session runs on the engine it
+/// chose, and both keep answering while the other is open.
+pub async fn sessions_run_on_the_engine_they_choose(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/side",
+        Route::Html(page("Side by side", "<h1>Side by side</h1>")),
+    )])
+    .await;
+    let chromium = Live::open_on_engine(rig, &site.url("/side"), "chromium").await;
+    let firefox = Live::open_on_engine(rig, &site.url("/side"), "firefox").await;
+    for (live, engine) in [(&chromium, "chromium"), (&firefox, "firefox")] {
+        let report = rig
+            .tool("session_capabilities", json!({"sessionId":live.session_id}))
+            .await;
+        assert_eq!(report["engine"], engine, "{report}");
+        assert_eq!(report["connection"], "connected", "{report}");
+        let snapshot = live.snapshot(json!({})).await;
+        assert_node(&snapshot, "heading", Some("Side by side"));
+    }
+    chromium.close().await;
+    firefox.close().await;
+}
+
 fn hidden_menu() -> String {
     let mut menu = String::from(r#"<div style="display:none">"#);
     for index in 0..HIDDEN_NODES {

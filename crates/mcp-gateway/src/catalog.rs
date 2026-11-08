@@ -363,7 +363,7 @@ tools! {
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: workflow_run_schema, args: WorkflowRunArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: AgentWorkflow, hints: (false, true, false, true) }
-    workflow_start { order: 51, title: "Start retained workflow", description: "Create a session/page/workflow; optionally navigate. includePostState adds initial state. On failure inspect session_list. Requires session:read/write, page:write.",
+    workflow_start { order: 51, title: "Start retained workflow", description: "Create a session/page/workflow; optionally navigate. On failure inspect session_list. Requires session:read/write, page:write.",
         capabilities: WORKFLOW_START_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_START_OPERATION), schema: workflow_start_schema, args: WorkflowStartArgs,
         phases: ALWAYS, group: AgentWorkflow, page_derived: true, hints: (false, false, false, true) }
 }

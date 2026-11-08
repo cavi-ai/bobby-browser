@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
 use tokio::sync::Mutex;
-use types::{CommandError, ProfileId, SessionId};
+use types::{CommandError, ProfileId, SessionId, SkillBrowserEngine};
 
 use crate::{policy_error, BrowserWorker, WorkerFactory};
 
@@ -33,6 +33,20 @@ impl Default for EnginePreference {
         Self::Exact {
             engine: BrowserEngine::Firefox,
             profile_id: None,
+        }
+    }
+}
+
+impl EnginePreference {
+    /// Any worker registered for `engine`.
+    pub fn for_engine(engine: SkillBrowserEngine) -> Self {
+        let engine = match engine {
+            SkillBrowserEngine::Firefox => BrowserEngine::Firefox,
+            SkillBrowserEngine::Chromium => BrowserEngine::Chromium,
+            SkillBrowserEngine::WebKit => BrowserEngine::WebKit,
+        };
+        Self::Prefer {
+            engines: vec![engine],
         }
     }
 }

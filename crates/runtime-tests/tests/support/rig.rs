@@ -381,6 +381,17 @@ impl<'a> Live<'a> {
         Self::open_with_options(rig, url, true).await
     }
 
+    /// A session and page on `engine`, whatever the runtime's default engine is.
+    pub async fn open_on_engine(rig: &'a Rig, url: &str, engine: &str) -> Live<'a> {
+        let started = rig
+            .tool(
+                "workflow_start",
+                json!({"profile":"site-regressions","url":url,"executionPolicy":{"engine":engine}}),
+            )
+            .await;
+        Self::started(rig, started)
+    }
+
     async fn open_with_options(rig: &'a Rig, url: &str, include_post_state: bool) -> Live<'a> {
         let started = rig
             .tool(
@@ -388,6 +399,10 @@ impl<'a> Live<'a> {
                 json!({"profile":"site-regressions","url":url,"includePostState":include_post_state}),
             )
             .await;
+        Self::started(rig, started)
+    }
+
+    fn started(rig: &'a Rig, started: Value) -> Live<'a> {
         assert_eq!(started["status"], "completed", "workflow_start: {started}");
         let live = Live {
             rig,

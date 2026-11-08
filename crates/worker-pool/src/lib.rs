@@ -323,6 +323,9 @@ struct PoolInner {
     // Lifecycle lock order is session gate -> lease permit -> entries/factory.
     // The registry mutex is released before waiting on a session gate.
     session_gates: Mutex<HashMap<SessionId, Weak<RwLock<()>>>>,
+    /// Engines chosen per session. They outlive any one worker, so a relaunch
+    /// after a crash stays on the session's engine.
+    session_engines: Mutex<HashMap<SessionId, EnginePreference>>,
     replacement_cleanup_timeout: std::time::Duration,
     /// Hard outer bound around `factory.launch` during first lease. Without this,
     /// a hung companion/BiDi launch can sit until the host MCP client empties the
@@ -416,6 +419,7 @@ impl WorkerPool {
                 permits: Arc::new(Semaphore::new(max_active)),
                 entries: Mutex::new(HashMap::new()),
                 session_gates: Mutex::new(HashMap::new()),
+                session_engines: Mutex::new(HashMap::new()),
                 replacement_cleanup_timeout,
                 lease_launch_timeout,
             }),
@@ -456,9 +460,20 @@ impl WorkerPool {
         let mut launch_task = tokio::spawn(async move {
             let factory = Arc::clone(&inner.factory);
             let launch_session = task_session.clone();
+            let pinned_engine = inner
+                .session_engines
+                .lock()
+                .await
+                .get(&task_session)
+                .cloned();
             let result = task_entry
                 .worker
                 .get_or_try_init(|| async move {
+                    if let Some(preference) = pinned_engine {
+                        factory
+                            .replace_session(&launch_session, &preference)
+                            .await?;
+                    }
                     let worker = factory.launch(&launch_session).await?;
                     if cancelled.load(Ordering::Acquire) {
                         let _ = worker.terminate().await;
@@ -604,6 +619,32 @@ impl WorkerPool {
         self.inner.factory.can_select(preference)
     }
 
+    /// Binds `session_id` to `preference` until [`Self::forget_session_engine`].
+    /// Every worker the session launches, including after a crash, uses it.
+    pub async fn pin_session_engine(
+        &self,
+        session_id: &SessionId,
+        preference: EnginePreference,
+    ) -> Result<(), CommandError> {
+        if !self.can_select(&preference) {
+            return Err(policy_error(
+                "no browser worker satisfies the requested session engine",
+            ));
+        }
+        self.inner
+            .session_engines
+            .lock()
+            .await
+            .insert(session_id.clone(), preference);
+        Ok(())
+    }
+
+    /// Ends a session's engine binding. Separate from releasing its worker,
+    /// which also happens to a session that keeps running.
+    pub async fn forget_session_engine(&self, session_id: &SessionId) {
+        self.inner.session_engines.lock().await.remove(session_id);
+    }
+
     /// Inspect an existing worker without taking an execution permit or creating an entry.
     pub async fn feature_observation(
         &self,
@@ -656,7 +697,12 @@ impl WorkerPool {
             inner
                 .factory
                 .replace_session(&session_id, &preference)
-                .await
+                .await?;
+            // A deliberate engine switch must not be undone by the next relaunch.
+            if let Some(pinned) = inner.session_engines.lock().await.get_mut(&session_id) {
+                *pinned = preference;
+            }
+            Ok(())
         });
         match tokio::time::timeout(self.inner.replacement_cleanup_timeout, &mut cleanup).await {
             Ok(result) => result.map_err(|error| {

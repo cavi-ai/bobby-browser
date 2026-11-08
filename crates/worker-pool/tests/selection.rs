@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
-use types::{CommandError, ProfileId, SessionId, WorkerId};
+use types::{CommandError, ProfileId, SessionId, SkillBrowserEngine, WorkerId};
 use worker_pool::{
     BrowserWorker, BrowserWorkerSelector, EnginePreference, FactoryRegistration,
     RequiredCapabilities, SelectedWorkerFactory, WorkerFactory, WorkerPool,
@@ -514,4 +514,119 @@ async fn concurrent_leases_on_one_session_launch_a_single_worker() {
     // Without single-flighting, both leases miss the launched cache and each
     // spawns a browser against the same profile directory.
     assert_eq!(launches.load(Ordering::SeqCst), 1);
+}
+
+fn two_engine_pool() -> WorkerPool {
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![
+            registration("chromium", BrowserEngine::Chromium, None, true),
+            registration(
+                "firefox",
+                BrowserEngine::Firefox,
+                Some(ProfileId::new()),
+                true,
+            ),
+        ],
+        RequiredCapabilities::default(),
+    ));
+    WorkerPool::new(
+        4,
+        Arc::new(SelectedWorkerFactory::new(
+            selector,
+            EnginePreference::ManagedChromium,
+        )),
+    )
+}
+
+fn firefox() -> EnginePreference {
+    EnginePreference::for_engine(SkillBrowserEngine::Firefox)
+}
+
+async fn leased_engine(pool: &WorkerPool, session: &SessionId) -> std::path::PathBuf {
+    pool.lease(session.clone())
+        .await
+        .unwrap()
+        .profile_dir()
+        .to_path_buf()
+}
+
+#[tokio::test]
+async fn sessions_launch_on_their_own_engine_side_by_side() {
+    let pool = two_engine_pool();
+    let chosen = session();
+    let default = session();
+    pool.pin_session_engine(&chosen, firefox()).await.unwrap();
+
+    assert_eq!(leased_engine(&pool, &chosen).await, Path::new("firefox"));
+    assert_eq!(leased_engine(&pool, &default).await, Path::new("chromium"));
+    assert_eq!(pool.active_workers().await, 2);
+}
+
+#[tokio::test]
+async fn a_session_keeps_its_engine_across_worker_relaunches() {
+    let pool = two_engine_pool();
+    let session = session();
+    pool.pin_session_engine(&session, firefox()).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+
+    pool.invalidate_session(&session).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+
+    pool.release_session(&session).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+}
+
+#[tokio::test]
+async fn an_engine_switch_outlives_the_next_relaunch() {
+    let pool = two_engine_pool();
+    let session = session();
+    pool.pin_session_engine(
+        &session,
+        EnginePreference::for_engine(SkillBrowserEngine::Chromium),
+    )
+    .await
+    .unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("chromium"));
+
+    pool.replace_session(&session, &firefox()).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+
+    pool.invalidate_session(&session).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+}
+
+#[tokio::test]
+async fn a_forgotten_engine_returns_the_session_to_the_default() {
+    let pool = two_engine_pool();
+    let session = session();
+    pool.pin_session_engine(&session, firefox()).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("firefox"));
+
+    pool.forget_session_engine(&session).await;
+    pool.invalidate_session(&session).await.unwrap();
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("chromium"));
+}
+
+#[tokio::test]
+async fn an_engine_without_a_worker_is_refused() {
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![registration(
+            "chromium",
+            BrowserEngine::Chromium,
+            None,
+            true,
+        )],
+        RequiredCapabilities::default(),
+    ));
+    let pool = WorkerPool::new(
+        2,
+        Arc::new(SelectedWorkerFactory::new(
+            selector,
+            EnginePreference::ManagedChromium,
+        )),
+    );
+    let session = session();
+
+    assert!(pool.pin_session_engine(&session, firefox()).await.is_err());
+    assert_eq!(leased_engine(&pool, &session).await, Path::new("chromium"));
 }
