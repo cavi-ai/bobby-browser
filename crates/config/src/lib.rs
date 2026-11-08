@@ -118,12 +118,19 @@ pub struct FirefoxCompanionConfig {
     pub profile_dir: PathBuf,
     pub companion_bind: String,
     pub descriptor_path: PathBuf,
+    /// Attach to the existing browser without extension reload or browser restart.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub attachment_only: bool,
     #[serde(default = "default_companion_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_pairing_code_ttl_ms")]
     pub pairing_code_ttl_ms: u64,
     #[serde(default = "default_attachment_ttl_ms")]
     pub attachment_ttl_ms: u64,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn default_companion_timeout_ms() -> u64 {

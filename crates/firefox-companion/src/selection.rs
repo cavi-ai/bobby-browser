@@ -161,6 +161,7 @@ struct FirefoxRuntimeConfig {
     profile_dir: PathBuf,
     companion_bind: SocketAddr,
     descriptor_path: PathBuf,
+    attachment_only: bool,
     timeout: Duration,
     pairing_code_ttl: Duration,
     attachment_ttl: Duration,
@@ -302,6 +303,7 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
             profile_dir: config.profile_dir,
             companion_bind,
             descriptor_path: config.descriptor_path,
+            attachment_only: config.attachment_only,
             timeout: Duration::from_millis(config.timeout_ms),
             pairing_code_ttl: Duration::from_millis(config.pairing_code_ttl_ms),
             attachment_ttl: Duration::from_millis(config.attachment_ttl_ms),
@@ -311,6 +313,10 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
 
 #[async_trait]
 impl WorkerFactory for ConfiguredFirefoxFactory {
+    fn enforces_background_firefox_attachment(&self) -> bool {
+        self.config.attachment_only
+    }
+
     fn engine_feature_support(&self) -> Vec<worker_pool::EngineFeatureSupport> {
         vec![worker_pool::EngineFeatureSupport::for_engine(
             BrowserEngine::Firefox,
@@ -435,6 +441,9 @@ impl ConfiguredFirefoxFactory {
             }
             ExtensionHeal::Reload | ExtensionHeal::Recycle => {}
         }
+        if self.config.attachment_only {
+            return Err(attachment_only_error("a companion build mismatch"));
+        }
         self.healed_builds().insert(installed.clone());
         tracing::warn!(
             installed = %installed,
@@ -546,6 +555,9 @@ impl ConfiguredFirefoxFactory {
                 Ok(client) => return Ok(client),
                 Err(error) => error,
             };
+        if self.config.attachment_only {
+            return Err(attachment_only_error("an unavailable BiDi session"));
+        }
         if crate::bidi::session_slot_taken(&error) {
             tracing::warn!(
                 url = %configured,
@@ -623,6 +635,9 @@ impl ConfiguredFirefoxFactory {
             .unwrap_or_else(|| self.config.bidi_url.clone());
         match crate::bidi::session_slot_occupied(endpoint, self.config.timeout).await {
             Ok(false) => Ok(()),
+            Ok(true) if self.config.attachment_only => {
+                Err(attachment_only_error("an occupied external BiDi session"))
+            }
             Ok(true) => {
                 tracing::warn!(
                     url = %self.config.bidi_url,
@@ -632,6 +647,9 @@ impl ConfiguredFirefoxFactory {
             }
             // A refused probe with no live endpoint elsewhere means Firefox's
             // BiDi listener is down: recycle once instead of failing late.
+            Err(_) if self.config.attachment_only => {
+                Err(attachment_only_error("an unavailable BiDi endpoint"))
+            }
             Err(error)
                 if unreachable_probe_needs_recycle(
                     &self.config.profile_dir,
@@ -1180,6 +1198,9 @@ async fn recycle_enrolled_firefox(
     config: &FirefoxRuntimeConfig,
     session: Option<crate::BidiClient>,
 ) -> Result<(), CommandError> {
+    if config.attachment_only {
+        return Err(attachment_only_error("a browser restart"));
+    }
     validate_enrolled_profile(&config.profile_dir)?;
     let endpoint = live_endpoint_override(&config.profile_dir, &config.bidi_url)
         .unwrap_or_else(|| config.bidi_url.clone());
@@ -1226,6 +1247,17 @@ fn companion_error(error: impl std::fmt::Display) -> CommandError {
         message: error.to_string(),
         layer: ErrorLayer::Driver,
         retryable: true,
+    }
+}
+
+fn attachment_only_error(reason: &str) -> CommandError {
+    CommandError {
+        code: ErrorCode::PolicyDenied,
+        message: format!(
+            "Firefox attachment-only mode refuses {reason}; no browser repair was attempted"
+        ),
+        layer: ErrorLayer::Driver,
+        retryable: false,
     }
 }
 
@@ -2005,6 +2037,7 @@ pub fn build_enrolled_browser_selection(
             profile_dir: profile_dir.to_path_buf(),
             companion_bind: SocketAddr::new(companion_bind.ip(), 0).to_string(),
             descriptor_path: descriptor_path.to_path_buf(),
+            attachment_only: false,
             timeout_ms: 30_000,
             pairing_code_ttl_ms: 300_000,
             attachment_ttl_ms: 300_000,
@@ -2063,6 +2096,259 @@ mod tests {
 
     const BUILD_A: &str = "0123456789abcdef0123456789abcdef";
     const BUILD_B: &str = "fedcba9876543210fedcba9876543210";
+
+    fn attachment_factory(root: &Path, bidi_url: Url) -> ConfiguredFirefoxFactory {
+        let mut selection = build_enrolled_browser_selection(
+            &ProfileId::new(),
+            bidi_url.as_str(),
+            &root.join("profile"),
+            "127.0.0.1:0".parse().unwrap(),
+            &root.join("descriptor.json"),
+        );
+        let mut config = selection.firefox.remove(0);
+        config.attachment_only = true;
+        config.timeout_ms = 200;
+        ConfiguredFirefoxFactory {
+            config: FirefoxRuntimeConfig::try_from(config).unwrap(),
+            required: RequiredCapabilities::default(),
+            pairing_code_observer: Arc::new(|_| {}),
+            server: Mutex::new(None),
+            artifacts: ArtifactStore::new(root.join("artifacts"), 1024 * 1024, 1024),
+            upload_roots: Vec::new(),
+            credentials: Vec::new(),
+            downloads_dir: root.join("downloads"),
+            bidi: Mutex::new(None),
+            lifecycle: Mutex::new(()),
+            profile_owner: std::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            healed_builds: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn assert_attachment_refusal(error: CommandError) {
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert!(!error.retryable);
+        assert!(error.message.contains("attachment-only"));
+    }
+
+    #[tokio::test]
+    async fn attachment_only_refuses_external_or_unavailable_bidi_without_repair() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let root = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint =
+            Url::parse(&format!("ws://{}/session", listener.local_addr().unwrap())).unwrap();
+        let factory = attachment_factory(root.path(), endpoint);
+        // This fixture profile deliberately does not exist. Even a regressed
+        // repair path fails validation before it can launch a real browser.
+        assert!(!factory.config.profile_dir.exists());
+        let server = tokio::spawn(async move {
+            let mut methods = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                let method = request["method"].as_str().unwrap().to_owned();
+                let response = if method == "session.status" {
+                    json!({"type":"success","id":request["id"],"result":{"ready":false,"message":"occupied"}})
+                } else {
+                    json!({"type":"error","id":request["id"],"error":"session not created","message":"Maximum number of active sessions"})
+                };
+                methods.push(method);
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            methods
+        });
+        assert_attachment_refusal(factory.ensure_bidi_slot().await.unwrap_err());
+        let connect_error = match factory.connect_bidi().await {
+            Ok(_) => panic!("occupied external session was accepted"),
+            Err(error) => error,
+        };
+        assert_attachment_refusal(connect_error);
+        assert_eq!(server.await.unwrap(), ["session.status", "session.new"]);
+        // The listener is now gone: neither unavailable path may recycle.
+        assert_attachment_refusal(factory.ensure_bidi_slot().await.unwrap_err());
+        let connect_error = match factory.connect_bidi().await {
+            Ok(_) => panic!("unavailable endpoint was accepted"),
+            Err(error) => error,
+        };
+        assert_attachment_refusal(connect_error);
+        assert_attachment_refusal(
+            recycle_enrolled_firefox(&factory.config, None)
+                .await
+                .unwrap_err(),
+        );
+        assert!(!factory.config.profile_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn attachment_only_reuses_its_owned_bidi_session_and_ends_only_that_session() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let root = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint =
+            Url::parse(&format!("ws://{}/session", listener.local_addr().unwrap())).unwrap();
+        let factory = attachment_factory(root.path(), endpoint);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut methods = Vec::new();
+            for expected in ["session.new", "session.end"] {
+                let message = socket.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], expected);
+                methods.push(expected);
+                let result = if expected == "session.new" {
+                    json!({"sessionId":"owned-session","capabilities":{}})
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"type":"success","id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            methods
+        });
+        assert!(factory.enforces_background_firefox_attachment());
+        factory.shared_bidi().await.unwrap();
+        // A second probe would see our own occupied slot and must not run.
+        factory.ensure_bidi_slot().await.unwrap();
+        factory.shared_bidi().await.unwrap();
+        factory.shutdown().await;
+        assert_eq!(server.await.unwrap(), ["session.new", "session.end"]);
+        assert!(!factory.config.profile_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn attachment_only_refuses_companion_mismatch_before_sending_reload() {
+        use companion_core::PairingInput;
+        use companion_protocol::{CompanionRequest, PairRequest, PROTOCOL_VERSION};
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+        for running_build in [Some(BUILD_A), Some(BUILD_B), None] {
+            let root = tempfile::tempdir().unwrap();
+            // No explicit port: a regressed recycle fails before binary
+            // discovery or native launch. Only the fake companion is contacted.
+            let mut factory =
+                attachment_factory(root.path(), Url::parse("ws://127.0.0.1/session").unwrap());
+            let extension = factory
+                .config
+                .profile_dir
+                .join("extensions")
+                .join(COMPANION_GECKO_ID);
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("build-id.json"),
+                json!({"buildId":BUILD_B}).to_string(),
+            )
+            .unwrap();
+            let server = Arc::new(
+                CompanionServer::bind_loopback(CompanionServerConfig {
+                    bind_addr: "127.0.0.1:0".parse().unwrap(),
+                    pairing_code_ttl: Duration::from_secs(60),
+                    attachment_ttl: Duration::from_secs(60),
+                })
+                .await
+                .unwrap(),
+            );
+            let code = server.registry().issue_pairing_code().await;
+            let input = PairingInput::firefox(code.clone());
+            factory.config.profile_id = input.profile_id.clone();
+            let mut request = format!("ws://{}/v1/companion", server.local_addr())
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", format!("Bearer {code}").parse().unwrap());
+            if let Some(build) = running_build {
+                request.headers_mut().insert(
+                    companion_protocol::EXTENSION_BUILD_HEADER,
+                    build.parse().unwrap(),
+                );
+            }
+            let mut socket = tokio_tungstenite::connect_async(request).await.unwrap().0;
+            let pair = CompanionRequest::Pair(PairRequest {
+                protocol_version: PROTOCOL_VERSION,
+                pairing_code: code,
+                companion_id: input.companion_id,
+                profile_id: input.profile_id,
+                identity: input.identity,
+                capabilities: input.capabilities,
+            });
+            socket
+                .send(Message::Text(serde_json::to_string(&pair).unwrap().into()))
+                .await
+                .unwrap();
+            let paired = socket.next().await.unwrap().unwrap();
+            let paired: Value = serde_json::from_str(paired.to_text().unwrap()).unwrap();
+            assert_eq!(paired["kind"], "paired");
+            let result = factory.ensure_installed_extension(&server).await;
+            if running_build == Some(BUILD_B) {
+                result.unwrap();
+            } else {
+                assert_attachment_refusal(result.unwrap_err());
+            }
+            assert!(factory.healed_builds().is_empty());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), socket.next())
+                    .await
+                    .is_err(),
+                "companion received an unsolicited request"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_only_capability_requires_every_selected_firefox_factory() {
+        for attachment_only in [false, true] {
+            for mixed in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut selection = build_enrolled_browser_selection(
+                    &ProfileId::new(),
+                    "ws://127.0.0.1:9222/session",
+                    root.path(),
+                    "127.0.0.1:0".parse().unwrap(),
+                    &root.path().join("descriptor.json"),
+                );
+                assert!(!selection.firefox[0].attachment_only);
+                assert!(serde_json::to_value(&selection).unwrap()["firefox"][0]
+                    .get("attachmentOnly")
+                    .is_none());
+                selection.firefox[0].attachment_only = attachment_only;
+                let encoded = serde_json::to_string(&selection).unwrap();
+                let parsed = parse_selection(Some(&encoded)).unwrap();
+                assert_eq!(parsed.firefox[0].attachment_only, attachment_only);
+                if mixed {
+                    selection.preference = EnginePreferenceConfig::Prefer {
+                        engines: vec![BrowserEngineConfig::Firefox, BrowserEngineConfig::Chromium],
+                    };
+                }
+                let factory = compose_worker_factory(&AppConfig::default(), selection).unwrap();
+                assert_eq!(
+                    factory.enforces_background_firefox_attachment(),
+                    attachment_only && !mixed
+                );
+                assert!(!factory.enforces_headless_chromium());
+            }
+        }
+    }
 
     #[test]
     fn a_stale_companion_gets_one_reload_or_recycle_per_installed_build() {
@@ -2809,6 +3095,7 @@ mod tests {
                     profile_dir: test_dir.path().join("missing-profile"),
                     companion_bind: "127.0.0.1:0".into(),
                     descriptor_path: descriptor.clone(),
+                    attachment_only: false,
                     timeout_ms: 1,
                     pairing_code_ttl_ms: 1_000,
                     attachment_ttl_ms: 1_000,
@@ -2846,6 +3133,7 @@ mod tests {
                         profile_dir: root.path().to_path_buf(),
                         companion_bind: "127.0.0.1:0".into(),
                         descriptor_path: descriptor.clone(),
+                        attachment_only: false,
                         timeout_ms: 1000,
                         pairing_code_ttl_ms: 80,
                         attachment_ttl_ms: 1000,
@@ -3036,6 +3324,7 @@ mod tests {
                     profile_dir: PathBuf::from("/profiles/default-release"),
                     companion_bind: "127.0.0.1:0".into(),
                     descriptor_path: PathBuf::from("target/firefox-companion.json"),
+                    attachment_only: false,
                     timeout_ms: 1,
                     pairing_code_ttl_ms: 1_000,
                     attachment_ttl_ms: 1_000,

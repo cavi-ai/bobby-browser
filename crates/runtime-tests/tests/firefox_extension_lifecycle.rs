@@ -417,6 +417,7 @@ fn selection(
             profile_dir: profile.to_path_buf(),
             companion_bind: "127.0.0.1:0".into(),
             descriptor_path: env.descriptor(),
+            attachment_only: false,
             timeout_ms: TIMEOUT.as_millis() as u64,
             pairing_code_ttl_ms: TIMEOUT.as_millis() as u64,
             attachment_ttl_ms: 300_000,
