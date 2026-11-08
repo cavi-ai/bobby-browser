@@ -354,6 +354,14 @@ test("session state accepts the selected vision node returned by the runtime", (
     ...session,
     execution_policy: { ...session.execution_policy, visionNode: "x".repeat(129) },
   }), false);
+  assert.equal(isSessionState({
+    ...session,
+    execution_policy: { ...session.execution_policy, engine: "firefox" },
+  }), true);
+  assert.equal(isSessionState({
+    ...session,
+    execution_policy: { ...session.execution_policy, engine: "safari" },
+  }), false);
 });
 
 test("malformed nested fixtures are rejected for every public response family", () => {

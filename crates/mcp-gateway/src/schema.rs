@@ -571,7 +571,8 @@ pub(crate) fn session_create_schema() -> (Value, Vec<&'static str>) {
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
                     "passwordManager":{"type":"boolean"},
-                    "visionNode":string(1, 128)
+                    "visionNode":string(1, 128),
+                    "engine":session_engine()
                 }),
                 &[]
             ),
@@ -579,6 +580,10 @@ pub(crate) fn session_create_schema() -> (Value, Vec<&'static str>) {
         }),
         vec!["profile"],
     )
+}
+
+fn session_engine() -> Value {
+    json!({"enum":["chromium","firefox"]})
 }
 
 pub(crate) fn toolset_select_schema() -> (Value, Vec<&'static str>) {
@@ -670,7 +675,7 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
     (
         json!({
             "profile": string(1, 128),
-            "includePostState":{"type":"boolean","description":"Return bounded initial page state in this response"},
+            "includePostState":{"type":"boolean","description":"Include page state"},
             "proxy": nullable(string(0, 2048)),
             "executionPolicy": object(
                 json!({
@@ -679,7 +684,8 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
                     "passwordManager":{"type":"boolean"},
-                    "visionNode":string(1, 128)
+                    "visionNode":string(1, 128),
+                    "engine":session_engine()
                 }),
                 &[]
             ),
@@ -3337,7 +3343,8 @@ fn session_state() -> Value {
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
                     "passwordManager":{"type":"boolean"},
-                    "visionNode":string(1, 128)
+                    "visionNode":string(1, 128),
+                    "engine":session_engine()
                 }),
                 &[]
             ),

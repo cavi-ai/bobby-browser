@@ -53,6 +53,13 @@ async fn site_regressions_hold_on_firefox() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium, Firefox and paired test profile"]
+async fn sessions_run_on_the_engine_they_choose() {
+    let rig = Rig::firefox().await;
+    cases::sessions_run_on_the_engine_they_choose(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed headed Firefox and paired test profile"]
 async fn frame_discovery_regressions() {
     let rig = Rig::firefox().await;

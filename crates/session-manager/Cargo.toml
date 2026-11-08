@@ -16,3 +16,4 @@ worker-pool.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+companion-protocol.workspace = true

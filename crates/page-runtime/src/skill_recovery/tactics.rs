@@ -82,15 +82,7 @@ pub(super) fn recovery_progress(
 }
 
 pub(super) fn engine_preference(engine: SkillBrowserEngine) -> EnginePreference {
-    use companion_protocol::BrowserEngine;
-    let engine = match engine {
-        SkillBrowserEngine::Firefox => BrowserEngine::Firefox,
-        SkillBrowserEngine::Chromium => BrowserEngine::Chromium,
-        SkillBrowserEngine::WebKit => BrowserEngine::WebKit,
-    };
-    EnginePreference::Prefer {
-        engines: vec![engine],
-    }
+    EnginePreference::for_engine(engine)
 }
 
 pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {

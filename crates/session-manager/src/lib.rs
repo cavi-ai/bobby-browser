@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::RwLock;
 use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
-use worker_pool::WorkerPool;
+use worker_pool::{EnginePreference, WorkerPool};
 
 /// Longest a session close waits on browser-side teardown before it unregisters
 /// the session anyway.
@@ -68,22 +68,36 @@ impl SessionManager {
             zigzagzig: req.zigzagzig,
         };
         if let Some(workers) = &self.workers {
-            workers.lease(session.id.clone()).await.map_err(|error| {
-                if error.code == types::ErrorCode::BrowserLaunchFailed
-                    || error.code == types::ErrorCode::DeadlineExceeded
-                {
-                    // Keep the diagnostic prefix leading the message: the MCP
-                    // gateway allowlists it by prefix before letting any runtime
-                    // detail cross to an external agent. Preserve the concrete
-                    // factory/companion/lease error body after the prefix.
-                    RuntimeError::EngineUnreachable(format!(
-                        "browser launch failed: {}; run `bobby doctor` -- check Firefox BiDi endpoint readiness and companion bind (configured may be ephemeral 127.0.0.1:0; install default is 127.0.0.1:9876)",
-                        error.message
-                    ))
-                } else {
-                    RuntimeError::Internal(error.message)
-                }
-            })?;
+            if let Some(engine) = session.execution_policy.engine {
+                workers
+                    .pin_session_engine(&session.id, EnginePreference::for_engine(engine))
+                    .await
+                    .map_err(|_| {
+                        RuntimeError::InvalidRequest(format!(
+                            "executionPolicy.engine {engine:?} is not available in this runtime; \
+                             run `bobby engine` to see the engines it can use"
+                        ))
+                    })?;
+            }
+            if let Err(error) = workers.lease(session.id.clone()).await {
+                workers.forget_session_engine(&session.id).await;
+                return Err(
+                    if error.code == types::ErrorCode::BrowserLaunchFailed
+                        || error.code == types::ErrorCode::DeadlineExceeded
+                    {
+                        // Keep the diagnostic prefix leading the message: the MCP
+                        // gateway allowlists it by prefix before letting any runtime
+                        // detail cross to an external agent. Preserve the concrete
+                        // factory/companion/lease error body after the prefix.
+                        RuntimeError::EngineUnreachable(format!(
+                            "browser launch failed: {}; run `bobby doctor` -- check Firefox BiDi endpoint readiness and companion bind (configured may be ephemeral 127.0.0.1:0; install default is 127.0.0.1:9876)",
+                            error.message
+                        ))
+                    } else {
+                        RuntimeError::Internal(error.message)
+                    },
+                );
+            }
         }
         self.inner
             .write()
@@ -109,6 +123,7 @@ impl SessionManager {
                 ),
                 Err(_) => tracing::warn!(session_id = %id.0, "session.release_timed_out"),
             }
+            workers.forget_session_engine(id).await;
         }
         self.inner.write().await.remove(id);
         tracing::info!(session_id = %id.0, "session.deleted");

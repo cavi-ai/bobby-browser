@@ -27,6 +27,7 @@ Put them before the subcommand. Without them, bobby uses the personal scope.
 | `cdp` | Run the runtime with authenticated CDP |
 | `mcp-stdio`, `acp-stdio` | Gateways that agent hosts launch |
 | `runtime` | Manage the shared local runtime |
+| `engine` | Show or set the default browser engine |
 | `firefox-start` | Open the Bobby Firefox profile |
 | `enroll-firefox-profile`, `install-firefox-native-host`, `firefox-native-host` | Firefox companion plumbing |
 | `profiles` | List deployment profiles |
@@ -98,6 +99,12 @@ Manage the shared runtime of the current scope.
 | `list` | List local scopes and their status |
 
 `stop` and `restart` ask before disconnecting attached agents. Without a terminal, pass `--disconnect-agents`.
+
+### `bobby engine`
+
+`bobby engine` prints the default engine, where it comes from and the engines a session can choose. `bobby engine chromium` (alias `chrome`) or `bobby engine firefox` sets the default in `browser-selection.json` and keeps enrolled profiles. A running runtime keeps its default until it restarts. Firefox needs an enrolled profile, and `AUTOMATION_RUNTIME_BROWSER_SELECTION` must be unset because it overrides the file.
+
+To choose per session without a restart, pass `executionPolicy.engine` to `session_create` or `workflow_start`. Sessions on both engines can run at the same time in one runtime.
 
 ### `bobby firefox-start`
 

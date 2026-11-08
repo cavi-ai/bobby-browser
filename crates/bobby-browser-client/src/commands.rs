@@ -1180,6 +1180,12 @@ pub struct ExecutionPolicy {
     /// a session is never redirected to a provider it did not choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_node: Option<String>,
+    /// Browser engine this session runs on; `None` uses the runtime's default.
+    ///
+    /// Sessions on different engines run side by side in one runtime. An
+    /// engine the runtime has no worker for declines at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<crate::SkillBrowserEngine>,
 }
 
 /// `POST /v1/sessions` body.

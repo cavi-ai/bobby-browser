@@ -3,9 +3,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use companion_protocol::BrowserEngine;
 use session_manager::SessionManager;
-use types::{CommandError, CreateSessionRequest, SessionId, WorkerId};
-use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
+use types::{
+    CommandError, CreateSessionRequest, ExecutionPolicy, RuntimeError, SessionId,
+    SkillBrowserEngine, WorkerId,
+};
+use worker_pool::{
+    BrowserWorker, BrowserWorkerSelector, EnginePreference, FactoryRegistration,
+    RequiredCapabilities, SelectedWorkerFactory, WorkerFactory, WorkerPool,
+};
 
 struct LifecycleWorker {
     id: WorkerId,
@@ -68,6 +75,96 @@ async fn session_owns_worker_from_creation_through_delete() {
     manager.delete(&session.id).await.unwrap();
     assert_eq!(pool.active_workers().await, 0);
     assert!(closed.load(Ordering::SeqCst));
+}
+
+fn engine_request(engine: SkillBrowserEngine) -> CreateSessionRequest {
+    CreateSessionRequest {
+        profile: "default".into(),
+        proxy: None,
+        execution_policy: ExecutionPolicy {
+            engine: Some(engine),
+            ..Default::default()
+        },
+        zigzagzig: false,
+    }
+}
+
+struct NamedProfileFactory(&'static str);
+
+#[async_trait]
+impl WorkerFactory for NamedProfileFactory {
+    async fn launch(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(Arc::new(LifecycleWorker {
+            id: WorkerId::new(),
+            profile: PathBuf::from(self.0),
+            closed: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+}
+
+fn engine_registration(name: &'static str, engine: BrowserEngine) -> FactoryRegistration {
+    FactoryRegistration::negotiated(engine, None, Arc::new(NamedProfileFactory(name)))
+}
+
+#[tokio::test]
+async fn an_unavailable_engine_declines_session_creation() {
+    let pool = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(LifecycleFactory {
+            closed: Arc::new(AtomicBool::new(false)),
+        }),
+    ));
+    let manager = SessionManager::new(pool.clone());
+
+    let error = manager
+        .create(engine_request(SkillBrowserEngine::Firefox))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, RuntimeError::InvalidRequest(detail)
+            if detail.contains("executionPolicy.engine") && detail.contains("bobby engine")),
+        "{error:?}"
+    );
+    assert!(manager.list().await.is_empty());
+    assert_eq!(pool.active_workers().await, 0);
+}
+
+#[tokio::test]
+async fn closing_a_session_drops_its_engine_choice() {
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![
+            engine_registration("chromium", BrowserEngine::Chromium),
+            engine_registration("firefox", BrowserEngine::Firefox),
+        ],
+        RequiredCapabilities::default(),
+    ));
+    let pool = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(SelectedWorkerFactory::new(
+            selector,
+            EnginePreference::ManagedChromium,
+        )),
+    ));
+    let manager = SessionManager::new(pool.clone());
+    let session = manager
+        .create(engine_request(SkillBrowserEngine::Firefox))
+        .await
+        .unwrap();
+    assert_eq!(
+        pool.lease(session.id.clone()).await.unwrap().profile_dir(),
+        Path::new("firefox")
+    );
+
+    manager.delete(&session.id).await.unwrap();
+
+    assert_eq!(
+        pool.lease(session.id.clone()).await.unwrap().profile_dir(),
+        Path::new("chromium")
+    );
 }
 
 #[tokio::test]
