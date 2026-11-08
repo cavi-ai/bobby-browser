@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.0
+
+- `ExecutionPolicy.engine` runs a session on `chromium` or `firefox`.
+- Evidence types carry the `screenshot` session, workflow, page, URL and capture time, the `upload` `sha256` list, `outcomeReading` and the file control's `names`.
+- `SubmitAndVerifyIntent.expectedState` is optional, `CaptureScreenshotCommand` takes `maxEdge`, and intent hints take `attributes`.
+- Align the client package with the Bobby Browser 0.24.0 runtime release.
+
 ## 0.23.0
 
 - `ControlAction` includes `{ kind: "credential"; name }` for configured credentials.
