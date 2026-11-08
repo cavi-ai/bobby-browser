@@ -1252,7 +1252,7 @@ fn companion_error(error: impl std::fmt::Display) -> CommandError {
 
 fn attachment_only_error(reason: &str) -> CommandError {
     CommandError {
-        code: ErrorCode::PolicyDenied,
+        code: ErrorCode::BrowserLaunchFailed,
         message: format!(
             "Firefox attachment-only mode refuses {reason}; no browser repair was attempted"
         ),
@@ -2126,7 +2126,7 @@ mod tests {
     }
 
     fn assert_attachment_refusal(error: CommandError) {
-        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
         assert!(!error.retryable);
         assert!(error.message.contains("attachment-only"));
     }
