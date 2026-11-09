@@ -347,6 +347,11 @@ impl ResolvedTarget {
         self.eval(page, "return el.innerText || ''").await.map(Some)
     }
 
+    /// The element's text, a listbox or menu reading one option per line.
+    pub async fn listed_text(&self, page: &Page) -> Result<String, CommandError> {
+        self.eval(page, LISTED_TEXT_SCRIPT).await
+    }
+
     /// The control's value, or an editable region's text; empty for an element
     /// with neither.
     pub async fn value(&self, page: &Page) -> Result<Option<String>, CommandError> {
@@ -681,10 +686,15 @@ impl ResolvedTarget {
         let find = format!(
             "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
         );
-        let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
+        let started = Instant::now();
         let option = loop {
             let found: ComboboxOption = self.eval(page, &find).await?;
-            if found.text.is_some() || Instant::now() >= deadline {
+            let wait = if found.loading {
+                COMBOBOX_LOADING_WAIT
+            } else {
+                COMBOBOX_OPTION_WAIT
+            };
+            if found.text.is_some() || started.elapsed() >= wait {
                 break found;
             }
             tokio::time::sleep(COMBOBOX_POLL).await;
@@ -810,8 +820,8 @@ impl ResolvedTarget {
         }
     }
 
-    /// A trusted press where the point is in the top-level viewport; an
-    /// option inside a frame takes the page's own event sequence.
+    /// A trusted press where the option holds still in the top-level viewport;
+    /// otherwise the page's own event sequence.
     async fn press_option(
         &self,
         page: &Page,
@@ -819,11 +829,17 @@ impl ResolvedTarget {
         wanted: &str,
         roleless: &str,
     ) -> Result<(), CommandError> {
-        match point {
-            Some((x, y)) if self.frame_path.is_empty() && self.frame_owners.is_empty() => {
+        let settled =
+            if point.is_some() && self.frame_path.is_empty() && self.frame_owners.is_empty() {
+                self.settled_option_point(page, wanted, roleless).await?
+            } else {
+                None
+            };
+        match settled {
+            Some((x, y)) => {
                 page.click(Point { x, y }).await.map_err(cdp_error)?;
             }
-            _ => {
+            None => {
                 let press = format!(
                     "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_PRESS}"
                 );
@@ -831,6 +847,29 @@ impl ResolvedTarget {
             }
         }
         Ok(())
+    }
+
+    /// The option's center once two reads agree and the point hits the option.
+    async fn settled_option_point(
+        &self,
+        page: &Page,
+        wanted: &str,
+        roleless: &str,
+    ) -> Result<Option<(f64, f64)>, CommandError> {
+        let read = format!(
+            "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_POINT}"
+        );
+        let mut last = None;
+        for _ in 0..COMBOBOX_SETTLE_READS {
+            let point: ComboboxPoint = self.eval(page, &read).await?;
+            let current = point.hit.then_some((point.x, point.y));
+            if current.is_some() && current == last {
+                return Ok(current);
+            }
+            last = current;
+            tokio::time::sleep(COMBOBOX_SETTLE_POLL).await;
+        }
+        Ok(None)
     }
 
     /// Empties the text that filtered the options and reads every option the
@@ -881,6 +920,15 @@ impl ResolvedTarget {
             "if(el instanceof HTMLInputElement&&el.type==='file'){throw new Error('file controls require native clear')}if(el instanceof HTMLSelectElement){for(const option of el.options)option.selected=false}else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')){el.checked=false}else if('value'in el){el.value=''}else if(el.isContentEditable){el.textContent=''}else{throw new Error('resolved control cannot be cleared')}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true",
         )
         .await?;
+        Ok(())
+    }
+
+    /// Empties the file input the target stands for, as a person's removal does.
+    pub async fn clear_files(&self, page: &Page) -> Result<(), CommandError> {
+        let clear = format!(
+            "const input=(()=>{{{FILE_INPUT_OF_SCRIPT}}})(); input.value=''; input.dispatchEvent(new Event('input',{{bubbles:true}})); input.dispatchEvent(new Event('change',{{bubbles:true}})); return true;"
+        );
+        self.eval::<bool>(page, &clear).await?;
         Ok(())
     }
 
@@ -998,7 +1046,11 @@ impl ResolvedTarget {
 /// How long an ARIA combobox may take to show the wanted option, and to show
 /// the choice once the option is pressed.
 const COMBOBOX_OPTION_WAIT: Duration = Duration::from_secs(3);
+/// How long a combobox that shows only a loading state may take to list options.
+const COMBOBOX_LOADING_WAIT: Duration = Duration::from_secs(15);
 const COMBOBOX_POLL: Duration = Duration::from_millis(100);
+const COMBOBOX_SETTLE_READS: usize = 10;
+const COMBOBOX_SETTLE_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
 struct ComboboxOption {
@@ -1007,6 +1059,15 @@ struct ComboboxOption {
     y: Option<f64>,
     #[serde(default)]
     shown: Vec<String>,
+    #[serde(default)]
+    loading: bool,
+}
+
+#[derive(Deserialize)]
+struct ComboboxPoint {
+    x: f64,
+    y: f64,
+    hit: bool,
 }
 
 #[derive(Deserialize)]
@@ -1057,7 +1118,15 @@ const COMBOBOX_PICK: &str = "const exact=options.filter(o=>norm(o.textContent)==
 
 /// After [`COMBOBOX_PICK`]: the matching option's text and viewport center,
 /// or the texts of the options shown.
-const COMBOBOX_OPTION_FOUND: &str = "if(!match) return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80))}; match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
+const COMBOBOX_OPTION_FOUND: &str = "if(!match){ const busy=n=>n?.getAttribute('aria-busy')==='true'; const loading=busy(el)||ids.some(id=>busy(owner.getElementById(id)))||(options.length>0&&options.every(o=>/^(loading|searching|please wait)\\b/i.test(norm(o.textContent)))); return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80)), loading}; } match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
+
+/// After [`COMBOBOX_PICK`]: the matching option's viewport center and whether
+/// that point hits the option.
+const COMBOBOX_OPTION_POINT: &str = "if(!match) return {x:0,y:0,hit:false}; const r=match.getBoundingClientRect(); const x=r.left+r.width/2; const y=r.top+r.height/2; const at=doc.elementFromPoint(x,y); return {x,y,hit:Boolean(at&&(at===match||match.contains(at)))};";
+
+/// Function body with `el` bound: its text, a listbox or menu reading one
+/// option per line so adjacent options never run together.
+const LISTED_TEXT_SCRIPT: &str = "const items=el.matches('[role=\"listbox\"],[role=\"menu\"]')?[...el.querySelectorAll('[role=\"option\"],[role=\"menuitem\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"]')]:[]; return items.length?items.map(o=>String(o.innerText||o.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).join('\\n'):(el.innerText||'');";
 
 /// After [`COMBOBOX_PICK`]: presses the matching option with the pointer
 /// and mouse events a person's click fires.
@@ -1078,7 +1147,7 @@ const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='
 /// Function body with `el` and `chosen` bound: whether the control, a menu
 /// item checked for the chosen text, or the nearest ancestor of the control
 /// that holds no option shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); if(!norm(own)&&shown&&words(shown).every(w=>words(norm(chosen)).includes(w))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); const compact=s=>s.replace(/\\s/g,''); if(!norm(own)&&shown&&(words(shown).every(w=>words(norm(chosen)).includes(w))||compact(norm(chosen)).includes(compact(shown)))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
 
 /// Function body with `el` bound: the page rectangle to capture for `el`,
 /// scrolled into view. An element under 4 px a side (a hidden file input)
@@ -1809,7 +1878,7 @@ async fn align_with_accessibility(
         return Ok(candidates);
     };
     if dom_engine::is_unnamed_file_target(target)
-        || dom_engine::is_stamped_control_target(target)
+        || dom_engine::control_stamp_decides(target, &candidates)
         || accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal)
     {
         return Ok(candidates);

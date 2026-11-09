@@ -43,3 +43,19 @@ fn unnamed_file_shadow_targets_keep_type_name_and_ordinal() {
     assert_eq!(descriptor["inputType"], "file");
     assert_eq!(descriptor["ordinal"], 1);
 }
+
+#[test]
+fn a_stamped_target_selects_its_stamp_without_an_ordinal() {
+    let target = TargetSpec {
+        role: Some("combobox".into()),
+        accessible_name: Some("Location".into()),
+        attributes: [("data-bobby-control".into(), "7".into())]
+            .into_iter()
+            .collect(),
+        ordinal: Some(1),
+        ..TargetSpec::default()
+    };
+    let descriptor = shadow_segment_descriptor(&target).unwrap();
+    assert_eq!(descriptor["selector"], "[data-bobby-control=\"7\"]");
+    assert!(descriptor.get("ordinal").is_none(), "{descriptor}");
+}

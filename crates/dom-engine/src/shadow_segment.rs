@@ -27,7 +27,11 @@ pub fn exact_target_selector(target: &TargetSpec) -> Option<String> {
 
 /// Exact DOM identity for an adapter that evaluates the shared segment matcher.
 pub fn shadow_segment_descriptor(target: &TargetSpec) -> Result<Value, CommandError> {
-    let mut descriptor = if let Some(selector) = exact_target_selector(target) {
+    let stamp_selector = crate::control_stamp_selector(target);
+    let mut descriptor = if let Some(selector) = stamp_selector
+        .clone()
+        .or_else(|| exact_target_selector(target))
+    {
         json!({"selector":selector})
     } else if target.role.as_deref() == Some("button")
         && target.accessible_name.is_some()
@@ -61,7 +65,7 @@ pub fn shadow_segment_descriptor(target: &TargetSpec) -> Result<Value, CommandEr
             "shadow segment requires exact CSS, test ID, or role and accessible name",
         ));
     };
-    if let Some(ordinal) = target.ordinal {
+    if let Some(ordinal) = target.ordinal.filter(|_| stamp_selector.is_none()) {
         descriptor["ordinal"] = json!(ordinal);
     }
     Ok(descriptor)

@@ -41,21 +41,58 @@ pub use shadow_segment::{
 /// element keeps its number across snapshots.
 pub const CONTROL_STAMP_ATTRIBUTE: &str = "data-bobby-control";
 
-/// The target a snapshot returns for an unnamed control: its role, an empty
-/// name and the stamp, which alone identifies the element.
+/// The target a snapshot returns for a stamped control: role, name and stamp.
+/// The stamp decides over the name and ordinal while an element carries it.
 pub fn is_stamped_control_target(target: &types::TargetSpec) -> bool {
     target
         .role
         .as_deref()
         .is_some_and(|role| !role.trim().is_empty())
-        && target.accessible_name.as_deref() == Some("")
-        && target.attributes.len() == 1
+        && target.accessible_name.is_some()
         && target.attributes.contains_key(CONTROL_STAMP_ATTRIBUTE)
+        && target.attributes.iter().all(|(name, value)| {
+            name == CONTROL_STAMP_ATTRIBUTE || (name == "type" && value == "file")
+        })
         && target.css.is_none()
         && target.test_id.is_none()
         && target.label.is_none()
         && target.text.is_none()
         && !target.allow_best_match
+}
+
+/// Whether the stamp alone picks a stamped target's element among `candidates`.
+pub fn control_stamp_decides(target: &types::TargetSpec, candidates: &[Candidate]) -> bool {
+    is_stamped_control_target(target)
+        && (target.accessible_name.as_deref() == Some("")
+            || candidates.iter().any(|candidate| {
+                candidate.attributes.get(CONTROL_STAMP_ATTRIBUTE)
+                    == target.attributes.get(CONTROL_STAMP_ATTRIBUTE)
+            }))
+}
+
+/// The name and ordinal a named stamped target resolves by once no element
+/// carries its stamp.
+pub fn without_control_stamp(target: &types::TargetSpec) -> Option<types::TargetSpec> {
+    (is_stamped_control_target(target) && target.accessible_name.as_deref() != Some("")).then(
+        || {
+            let mut semantic = target.clone();
+            semantic.attributes.remove(CONTROL_STAMP_ATTRIBUTE);
+            semantic
+        },
+    )
+}
+
+/// The selector of the element a stamped target names.
+pub fn control_stamp_selector(target: &types::TargetSpec) -> Option<String> {
+    is_stamped_control_target(target)
+        .then(|| target.attributes.get(CONTROL_STAMP_ATTRIBUTE))
+        .flatten()
+        .map(|stamp| {
+            format!(
+                "[{CONTROL_STAMP_ATTRIBUTE}=\"{}\"]",
+                stamp.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        })
 }
 
 /// The exact structural target a snapshot returns for an unnamed native file input.
