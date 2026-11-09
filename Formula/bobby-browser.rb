@@ -20,28 +20,28 @@
 class BobbyBrowser < Formula
   desc "Bobby Browser automation runtime (bobby + MCP/ACP gateways)"
   homepage "https://github.com/cavi-ai/bobby-browser"
-  version "0.23.0"
+  version "0.24.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-macos-arm64.tar.gz"
-      sha256 "e92877bdc58312fdbb5c331134fbae062a84040883890eb6ee5a7fb33c1da581"
+      sha256 "52fde28e970fe3cba9e015f07cccfa1f4910bce2c8cc356671f7a7e9873efd6b"
     end
     on_intel do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-macos-x64.tar.gz"
-      sha256 "42dd0275e0571ce2bf576ec2660a171cd8e23c9d9c30f96e1190e32bb8e49ca0"
+      sha256 "201a5c5428fa71d55a9bb931e61cba9509d86b8c237887b8ca28c461465785ef"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-linux-arm64.tar.gz"
-      sha256 "22b19a59c1a5be6beca2ff5df2f642d437149623cf3302b56c23a2714f67463a"
+      sha256 "eb17b1176d41d5e4cb5aabe5f29a4e29685f95d5b2b5e4735ebcaba63fe1aef8"
     end
     on_intel do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-linux-x64.tar.gz"
-      sha256 "4212eadc285c46c65384c656a8deb7140863432c83990e6b6ec68b51f0d0fddb"
+      sha256 "e7f6c7041332546522c353bd1821f51f1d3db7397113d757edf12e84caa3accf"
     end
   end
 
