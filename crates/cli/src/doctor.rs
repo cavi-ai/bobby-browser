@@ -170,6 +170,56 @@ pub(crate) fn run_idempotency_downgrade(options: DoctorFixOptions) -> Result<Doc
     Ok(DoctorFixReport { actions, post_fix })
 }
 
+/// Restart each attachment-only Firefox that is down or runs a companion older
+/// than the installed one: the runtime refuses its sessions and never restarts it.
+fn restart_enrolled_firefox(selection: &config::BrowserSelectionConfig) -> Vec<DoctorFixAction> {
+    selection
+        .firefox
+        .iter()
+        .filter(|profile| profile.attachment_only)
+        .filter(|profile| {
+            inspect_enrolled_firefox(profile).is_some_and(|firefox| firefox.needs_restart())
+        })
+        .map(|profile| {
+            let enrolled = profile.clone();
+            let restarted = block_on_inspect(async move {
+                firefox_companion::selection::restart_enrolled_firefox(&enrolled).await
+            });
+            match restarted {
+                Ok(()) => DoctorFixAction {
+                    status: DoctorFixStatus::Fixed,
+                    name: "firefox-restart".to_string(),
+                    detail: format!(
+                        "restarted Firefox on {} with the installed companion",
+                        profile.profile_dir.display()
+                    ),
+                },
+                Err(error) => DoctorFixAction {
+                    status: DoctorFixStatus::Failed,
+                    name: "firefox-restart".to_string(),
+                    detail: error.message,
+                },
+            }
+        })
+        .collect()
+}
+
+/// On a terminal, offer `bobby doctor --fix` when it is the next action.
+fn offer_fix(
+    report: &DoctorReport,
+    interactive: bool,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> std::io::Result<bool> {
+    let fixable = report
+        .next_action()
+        .is_some_and(|action| action.command == "bobby doctor --fix");
+    if !interactive || !fixable {
+        return Ok(false);
+    }
+    crate::restart_guard::confirm_prompt("Run bobby doctor --fix now? [y/N] ", input, out)
+}
+
 fn repair_host_configs(project_root: &Path) -> Vec<DoctorFixAction> {
     let statuses = match onboarding::configured_host_statuses(project_root) {
         Ok(statuses) => statuses,
@@ -446,6 +496,10 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
         actions.push(skill_permissions::repair(&config.storage.checkpoints_dir));
     }
 
+    if let Ok((selection, _)) = resolve_browser_selection() {
+        actions.extend(restart_enrolled_firefox(&selection));
+    }
+
     let post_fix = run_doctor_with_profile(
         Some(config_path),
         Some(bootstrap_path),
@@ -670,6 +724,36 @@ mod recovery_guidance_tests {
             .unwrap()
             .detail
             .contains("reconcile"));
+    }
+
+    #[test]
+    fn a_terminal_doctor_offers_the_fix_and_runs_it_only_on_yes() {
+        let mut report = DoctorReport::default();
+        report.fail("firefox-bidi", "nothing is listening".into());
+
+        let mut prompt = Vec::new();
+        assert!(offer_fix(&report, true, &mut "y\n".as_bytes(), &mut prompt).unwrap());
+        assert_eq!(
+            String::from_utf8(prompt).unwrap(),
+            "Run bobby doctor --fix now? [y/N] "
+        );
+        assert!(!offer_fix(&report, true, &mut "\n".as_bytes(), &mut Vec::new()).unwrap());
+
+        let mut prompt = Vec::new();
+        assert!(!offer_fix(&report, false, &mut "y\n".as_bytes(), &mut prompt).unwrap());
+        assert!(prompt.is_empty(), "a piped doctor never prompts");
+
+        let mut history = DoctorReport::default();
+        history.fail(
+            "storage-integrity",
+            "durable history requires repair".into(),
+        );
+        let mut prompt = Vec::new();
+        assert!(!offer_fix(&history, true, &mut "y\n".as_bytes(), &mut prompt).unwrap());
+        assert!(
+            prompt.is_empty(),
+            "doctor --fix does not repair durable history"
+        );
     }
 }
 
@@ -948,6 +1032,8 @@ use checks::storage::configured_storage_dirs;
 
 use checks::storage::block_on_inspect;
 
+use checks::firefox_endpoints::inspect_enrolled_firefox;
+
 #[cfg(test)]
 pub(crate) use checks::credential::BOOTSTRAP_EXPIRY_WARN_DAYS;
 
@@ -974,42 +1060,56 @@ pub(crate) fn run_cli(command: DoctorCliOptions) -> Result<()> {
         return Ok(());
     }
     if fix {
-        let report = if downgrade_idempotency {
-            run_idempotency_downgrade(options)?
-        } else {
-            run_doctor_fix(options)?
-        };
-        if json {
-            report.render_actions();
-            report
-                .post_fix
-                .render_json_to(&mut std::io::stdout().lock())?;
-        } else {
-            report.render();
-        }
-        if report.post_fix.failures() > 0
-            || report
-                .actions
-                .iter()
-                .any(|action| action.status == DoctorFixStatus::Failed)
-        {
-            std::process::exit(1);
-        }
+        return run_fix_cli(options, downgrade_idempotency, json);
+    }
+    let report = run_doctor_with_profile(
+        options.config.clone(),
+        options.bootstrap_env.clone(),
+        options.check_health,
+        options.profile,
+    )?;
+    if json {
+        report.render_json_to(&mut std::io::stdout().lock())?;
     } else {
-        let report = run_doctor_with_profile(
-            options.config,
-            options.bootstrap_env,
-            options.check_health,
-            options.profile,
-        )?;
-        if json {
-            report.render_json_to(&mut std::io::stdout().lock())?;
-        } else {
-            report.render();
+        report.render();
+    }
+    if report.failures() > 0 {
+        let interactive =
+            !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if offer_fix(
+            &report,
+            interactive,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stderr(),
+        )? {
+            return run_fix_cli(options, false, json);
         }
-        if report.failures() > 0 {
-            std::process::exit(1);
-        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_fix_cli(options: DoctorFixOptions, downgrade_idempotency: bool, json: bool) -> Result<()> {
+    let report = if downgrade_idempotency {
+        run_idempotency_downgrade(options)?
+    } else {
+        run_doctor_fix(options)?
+    };
+    if json {
+        report.render_actions();
+        report
+            .post_fix
+            .render_json_to(&mut std::io::stdout().lock())?;
+    } else {
+        report.render();
+    }
+    if report.post_fix.failures() > 0
+        || report
+            .actions
+            .iter()
+            .any(|action| action.status == DoctorFixStatus::Failed)
+    {
+        std::process::exit(1);
     }
     Ok(())
 }

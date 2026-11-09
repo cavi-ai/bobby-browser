@@ -82,7 +82,7 @@ Read-only checks of configuration, browser selection, credential, storage, sidec
 | `--download-model` | With `--fix`, allow downloading the selected MLX model |
 | `--downgrade-idempotency` | Convert healthy idempotency ledgers for use by older binaries |
 
-Exit status is 1 when any check fails and 0 for warnings only. An unhealthy report starts with `next: bobby doctor --fix`, and repairable failures name the fix. Output is plain text when piped or when `NO_COLOR` is set.
+Exit status is 1 when any check fails and 0 for warnings only. An unhealthy report starts with `next: bobby doctor --fix`, and repairable failures name the fix. On a terminal, doctor then asks whether to run `bobby doctor --fix`; only `y` or `yes` runs it. Output is plain text when piped or when `NO_COLOR` is set.
 
 `--fix` is idempotent. It restores an unrestricted credential's capabilities, creates missing storage directories, normalizes the selected vision provider, starts a loopback Ollama if the selected provider is down, and readiness-tests the provider. It never chooses a provider or model, overwrites a custom endpoint, stores secrets, installs system packages or leaves a daemon running. A missing MLX model stays an action item until you pass `--download-model`.
 

@@ -186,7 +186,16 @@ pub(crate) fn confirm(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> std::io::Result<bool> {
-    write!(out, "{}", action.prompt())?;
+    confirm_prompt(action.prompt(), input, out)
+}
+
+/// Write `prompt` and read one answer; only `y` or `yes` (any case) says yes.
+pub(crate) fn confirm_prompt(
+    prompt: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> std::io::Result<bool> {
+    write!(out, "{prompt}")?;
     out.flush()?;
     let mut line = String::new();
     if input.read_line(&mut line)? == 0 {

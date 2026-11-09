@@ -97,17 +97,65 @@ fn extension_heal(installed: &str, connected: Option<&str>, attempted: bool) -> 
 /// unpacked directory wins if both exist. `None` when the installed
 /// companion carries no valid id.
 fn installed_extension_build(profile_dir: &Path) -> Option<String> {
+    match installed_companion(profile_dir) {
+        InstalledCompanion::Unpacked(path) => {
+            let metadata = std::fs::metadata(&path).ok()?;
+            if !metadata.is_file() || metadata.len() > MAX_BUILD_ID_FILE_BYTES {
+                return None;
+            }
+            parse_build_id(&std::fs::read(path).ok()?)
+        }
+        InstalledCompanion::Packed(xpi) => packed_extension_build(&xpi),
+    }
+}
+
+/// The file that carries the installed companion's build id.
+enum InstalledCompanion {
+    /// `build-id.json` in the unpacked sideload directory.
+    Unpacked(PathBuf),
+    /// The signed `.xpi`.
+    Packed(PathBuf),
+}
+
+fn installed_companion(profile_dir: &Path) -> InstalledCompanion {
     let extensions = profile_dir.join("extensions");
     let unpacked = extensions.join(COMPANION_GECKO_ID);
     if unpacked.is_dir() {
-        let path = unpacked.join("build-id.json");
-        let metadata = std::fs::metadata(&path).ok()?;
-        if !metadata.is_file() || metadata.len() > MAX_BUILD_ID_FILE_BYTES {
-            return None;
-        }
-        return parse_build_id(&std::fs::read(path).ok()?);
+        InstalledCompanion::Unpacked(unpacked.join("build-id.json"))
+    } else {
+        InstalledCompanion::Packed(extensions.join(format!("{COMPANION_GECKO_ID}.xpi")))
     }
-    packed_extension_build(&extensions.join(format!("{COMPANION_GECKO_ID}.xpi")))
+}
+
+/// True when the profile's companion was installed after the running Firefox
+/// published its BiDi endpoint. Firefox loads extensions only at start, so that
+/// Firefox still runs the build it found then.
+pub fn companion_installed_after_start(profile_dir: &Path) -> bool {
+    let Ok(started) = std::fs::metadata(profile_dir.join("WebDriverBiDiServer.json"))
+        .and_then(|metadata| metadata.modified())
+    else {
+        return false;
+    };
+    let (InstalledCompanion::Unpacked(path) | InstalledCompanion::Packed(path)) =
+        installed_companion(profile_dir);
+    installed_at(&path).is_some_and(|installed| installed > started)
+}
+
+/// When the file landed in the profile. Install copies keep the build's
+/// modification time, so Unix uses the inode change time.
+fn installed_at(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let seconds = u64::try_from(metadata.ctime()).ok()?;
+        let nanos = u32::try_from(metadata.ctime_nsec()).ok()?;
+        Some(std::time::UNIX_EPOCH + Duration::new(seconds, nanos))
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.modified().ok()
+    }
 }
 
 fn packed_extension_build(xpi: &Path) -> Option<String> {
@@ -547,8 +595,7 @@ impl ConfiguredFirefoxFactory {
     /// truth, so a refused connection retries against it once. Its parser
     /// enforces the same loopback rule the enrolled URL is held to.
     async fn connect_bidi(&self) -> Result<crate::BidiClient, CommandError> {
-        let configured = live_endpoint_override(&self.config.profile_dir, &self.config.bidi_url)
-            .unwrap_or_else(|| self.config.bidi_url.clone());
+        let configured = live_bidi_url(&self.config.profile_dir, &self.config.bidi_url);
         let error =
             match crate::BidiClient::connect_session(configured.clone(), self.config.timeout).await
             {
@@ -631,8 +678,7 @@ impl ConfiguredFirefoxFactory {
         {
             return Ok(());
         }
-        let endpoint = live_endpoint_override(&self.config.profile_dir, &self.config.bidi_url)
-            .unwrap_or_else(|| self.config.bidi_url.clone());
+        let endpoint = live_bidi_url(&self.config.profile_dir, &self.config.bidi_url);
         match crate::bidi::session_slot_occupied(endpoint, self.config.timeout).await {
             Ok(false) => Ok(()),
             Ok(true) if self.config.attachment_only => {
@@ -869,6 +915,12 @@ fn live_endpoint_override(profile_dir: &Path, configured: &Url) -> Option<Url> {
     crate::read_bidi_url_from_profile_dir(profile_dir)
         .ok()
         .filter(|live| live != configured)
+}
+
+/// The BiDi endpoint the runtime connects to: the one Firefox published in the
+/// profile at its last start, else the enrolled one.
+pub fn live_bidi_url(profile_dir: &Path, enrolled: &Url) -> Url {
+    live_endpoint_override(profile_dir, enrolled).unwrap_or_else(|| enrolled.clone())
 }
 
 fn bidi_listen_port(url: &Url) -> Option<u16> {
@@ -1201,9 +1253,25 @@ async fn recycle_enrolled_firefox(
     if config.attachment_only {
         return Err(attachment_only_error("a browser restart"));
     }
+    restart_firefox(config, session).await
+}
+
+/// Restart the enrolled profile's Firefox, or start it when it is down, so it
+/// loads the installed companion. Attachment-only mode stops only the runtime
+/// from doing this on its own, so it does not block this operator request.
+pub async fn restart_enrolled_firefox(
+    profile: &FirefoxCompanionConfig,
+) -> Result<(), CommandError> {
+    let config = FirefoxRuntimeConfig::try_from(profile.clone()).map_err(companion_error)?;
+    restart_firefox(&config, None).await
+}
+
+async fn restart_firefox(
+    config: &FirefoxRuntimeConfig,
+    session: Option<crate::BidiClient>,
+) -> Result<(), CommandError> {
     validate_enrolled_profile(&config.profile_dir)?;
-    let endpoint = live_endpoint_override(&config.profile_dir, &config.bidi_url)
-        .unwrap_or_else(|| config.bidi_url.clone());
+    let endpoint = live_bidi_url(&config.profile_dir, &config.bidi_url);
     let port = bidi_listen_port(&endpoint)
         .ok_or_else(|| companion_error("Firefox BiDi URL is missing a port"))?;
     let bin = enrolled_firefox_bin().ok_or_else(|| {
