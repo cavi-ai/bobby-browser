@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
     ContentChunk, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
     PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v1::{
     SessionCloseCapabilities, SessionNotification, SessionUpdate, StopReason, TextContent,
     ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Lines, Result as AcpResult};
+use agent_client_protocol::{v1::ConnectionTo, Agent, Client, Lines, Result as AcpResult};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use intent_engine::vision_gate_closed;
@@ -531,7 +531,7 @@ impl AcpServer {
         let cancel_server = self.clone();
         let disconnect_server = self;
         let transport_result = Agent
-            .builder()
+            .v1()
             .name("bobby-browser")
             .on_receive_request(
                 async move |initialize: InitializeRequest, responder, _connection| {
@@ -639,7 +639,7 @@ impl AcpServer {
             },
         );
         Ok(NewSessionResponse::new(
-            agent_client_protocol::schema::v1::SessionId::new(acp_session_id),
+            agent_client_protocol::v1::schema::SessionId::new(acp_session_id),
         ))
     }
 
@@ -1048,7 +1048,7 @@ impl AcpServer {
             Escalation::AlreadyPermitted => Ok(PromptResponse::new(StopReason::Refusal)),
             Escalation::AskUser { capability } => {
                 let permission = connection.send_request(RequestPermissionRequest::new(
-                    agent_client_protocol::schema::v1::SessionId::new(acp_session_id),
+                    agent_client_protocol::v1::schema::SessionId::new(acp_session_id),
                     ToolCallUpdate::new(
                         permission_tool_call_id(),
                         ToolCallUpdateFields::new().title(format!(
@@ -1294,7 +1294,7 @@ fn parse_prompt(blocks: &[ContentBlock]) -> Result<StructuredPrompt, agent_clien
 
 fn send_chunk(connection: &ConnectionTo<Client>, acp_session_id: &str, text: String) {
     let _ = connection.send_notification(SessionNotification::new(
-        agent_client_protocol::schema::v1::SessionId::new(acp_session_id),
+        agent_client_protocol::v1::schema::SessionId::new(acp_session_id),
         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
             text,
         )))),

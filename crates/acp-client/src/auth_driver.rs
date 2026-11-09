@@ -1,11 +1,12 @@
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use agent_client_protocol::{
-    schema::{
-        v1::{AuthMethod, AuthMethodId, AuthenticateRequest, InitializeRequest},
-        ProtocolVersion,
+    schema::ProtocolVersion,
+    v1::{
+        schema::{AuthMethod, AuthMethodId, AuthenticateRequest, InitializeRequest},
+        ConnectionTo,
     },
-    AcpAgent, AcpAgentConfig, Agent, ConnectionTo, ErrorCode as AcpErrorCode,
+    AcpAgent, AcpAgentConfig, Agent, ErrorCode as AcpErrorCode,
 };
 use async_trait::async_trait;
 use auth_broker::{
@@ -78,7 +79,7 @@ impl AcpAuthDriver {
         let agent = AcpAgent::new(launch);
         let initialized = tokio::time::timeout(self.timeout, async {
             agent_client_protocol::Client
-                .builder()
+                .v1()
                 .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
                     connection
                         .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -105,7 +106,7 @@ impl AcpAuthDriver {
         let profile = profile.clone();
         let outcome = tokio::time::timeout(self.timeout, async {
             agent_client_protocol::Client
-                .builder()
+                .v1()
                 .connect_with(agent, move |connection: ConnectionTo<Agent>| {
                     let method_id = method_id.clone();
                     let method_id_for_error = method_id_for_error.clone();
@@ -127,7 +128,7 @@ impl AcpAuthDriver {
                                     Arc::new(method_id.0.to_string()),
                                 )))
                             }
-                            Err(error) if error.code == AcpErrorCode::AuthRequired => {
+                            Err(error) if error.code == AcpErrorCode::AUTH_REQUIRED => {
                                 Ok(AuthenticateOutcome::Pending(AuthChallenge {
                                     id: method_id_for_error,
                                     strategy,
