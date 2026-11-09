@@ -12,6 +12,7 @@
 - Parallel reads of a static document no longer fail on an HTTP state conflict.
 - A file a widget removed no longer blocks the next upload, and `clear` empties a file control on Chromium.
 - Headed Chromium opens a session's pages as tabs of one window.
+- `bobby doctor` probes the BiDi port Firefox published in its profile and fails an attachment-only Firefox that is down or started before its companion install; `--fix`, or yes at the terminal prompt, restarts it.
 
 ## 0.24.0 - 2026-11-08
 

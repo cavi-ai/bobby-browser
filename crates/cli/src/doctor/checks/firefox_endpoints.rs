@@ -35,35 +35,54 @@ pub(super) fn firefox_endpoints(
             }
         }
         for profile in &selection.firefox {
-            match Url::parse(&profile.bidi_url) {
-                Ok(url) if matches!(url.scheme(), "ws" | "wss") => {
-                    match probe_firefox_bidi(&profile.bidi_url) {
-                        Ok(()) => report.ok(
-                            "firefox-bidi",
-                            format!("{} accepted a WebDriver BiDi handshake", profile.bidi_url),
-                        ),
-                        Err(BidiProbeFailure::Unreachable(error)) => {
-                            context.unreachable_bidi.push(profile.bidi_url.clone());
-                            report.warn(
-                                "firefox-bidi",
-                                format!(
-                                    "nothing is listening on {} ({error:#}); the enrolled Firefox companion is not running there",
-                                    profile.bidi_url,
-                                ),
-                            );
-                        }
-                        Err(failure @ BidiProbeFailure::NotBidi(_)) => {
-                            report.warn(
-                                "firefox-bidi",
-                                format!(
-                                    "{} answered but is not a Firefox WebDriver BiDi endpoint ({failure}); another service may own the port",
-                                    profile.bidi_url,
-                                ),
-                            );
-                        }
+            match inspect_enrolled_firefox(profile) {
+                Some(EnrolledFirefox::Live {
+                    endpoint,
+                    stale_companion,
+                }) => {
+                    report.ok(
+                        "firefox-bidi",
+                        format!("{endpoint} accepted a WebDriver BiDi handshake"),
+                    );
+                    if profile.attachment_only && stale_companion {
+                        report.fail(
+                            "firefox-companion-build",
+                            "the companion was installed after this Firefox started; Firefox loads it only at start, and attachment-only mode refuses sessions until Firefox restarts".to_string(),
+                        );
+                    } else if profile.attachment_only {
+                        report.ok(
+                            "firefox-companion-build",
+                            "Firefox started after the installed companion".to_string(),
+                        );
                     }
                 }
-                _ => {
+                Some(EnrolledFirefox::Down { endpoint, error }) => {
+                    context.unreachable_bidi.push(endpoint.to_string());
+                    if profile.attachment_only {
+                        report.fail(
+                            "firefox-bidi",
+                            format!(
+                                "nothing is listening on {endpoint} ({error:#}); attachment-only mode refuses sessions until the enrolled Firefox runs"
+                            ),
+                        );
+                    } else {
+                        report.warn(
+                            "firefox-bidi",
+                            format!(
+                                "nothing is listening on {endpoint} ({error:#}); the enrolled Firefox companion is not running there"
+                            ),
+                        );
+                    }
+                }
+                Some(EnrolledFirefox::NotBidi { endpoint, failure }) => {
+                    report.warn(
+                        "firefox-bidi",
+                        format!(
+                            "{endpoint} answered but is not a Firefox WebDriver BiDi endpoint ({failure}); another service may own the port"
+                        ),
+                    );
+                }
+                None => {
                     report.fail(
                         "firefox-bidi",
                         format!(
@@ -103,6 +122,58 @@ pub(super) fn firefox_endpoints(
     }
 
     Ok(())
+}
+
+/// What the enrolled profile's Firefox looks like from its live BiDi endpoint.
+pub(in crate::doctor) enum EnrolledFirefox {
+    Live {
+        endpoint: Url,
+        stale_companion: bool,
+    },
+    Down {
+        endpoint: Url,
+        error: anyhow::Error,
+    },
+    NotBidi {
+        endpoint: Url,
+        failure: BidiProbeFailure,
+    },
+}
+
+impl EnrolledFirefox {
+    /// Attachment-only mode refuses sessions in these states and never restarts Firefox itself.
+    pub(in crate::doctor) fn needs_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::Live {
+                stale_companion: true,
+                ..
+            } | Self::Down { .. }
+        )
+    }
+}
+
+/// Probe the endpoint the runtime connects to. `None` when the enrolled
+/// `bidiUrl` is not a ws:// or wss:// URL.
+pub(in crate::doctor) fn inspect_enrolled_firefox(
+    profile: &config::FirefoxCompanionConfig,
+) -> Option<EnrolledFirefox> {
+    let enrolled = Url::parse(&profile.bidi_url)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "ws" | "wss"))?;
+    let endpoint = firefox_companion::selection::live_bidi_url(&profile.profile_dir, &enrolled);
+    Some(match probe_firefox_bidi(endpoint.as_str()) {
+        Ok(()) => EnrolledFirefox::Live {
+            stale_companion: firefox_companion::selection::companion_installed_after_start(
+                &profile.profile_dir,
+            ),
+            endpoint,
+        },
+        Err(BidiProbeFailure::Unreachable(error)) => EnrolledFirefox::Down { endpoint, error },
+        Err(failure @ BidiProbeFailure::NotBidi(_)) => {
+            EnrolledFirefox::NotBidi { endpoint, failure }
+        }
+    })
 }
 
 pub(in crate::doctor) fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
@@ -241,5 +312,172 @@ mod bidi_probe_tests {
             matches!(error, BidiProbeFailure::Unreachable(_)),
             "nothing is listening, so this is unreachable, not a protocol mismatch: {error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod enrolled_firefox_tests {
+    use super::super::test_support;
+    use super::*;
+    use crate::doctor::DoctorColorMode;
+    use config::{AppConfig, BrowserSelectionConfig, FirefoxCompanionConfig};
+    use std::io::{Read, Write};
+    use std::path::Path;
+    use std::time::SystemTime;
+
+    /// Answers every connection with a WebSocket upgrade, as Firefox's BiDi listener does.
+    fn bidi_listener() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut chunk = [0_u8; 256];
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                );
+            }
+        });
+        port
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn enrolled(root: &Path, port: u16, attachment_only: bool) -> FirefoxCompanionConfig {
+        let profile_dir = root.join("firefox-profile");
+        std::fs::create_dir_all(profile_dir.join("extensions")).unwrap();
+        FirefoxCompanionConfig {
+            profile_id: uuid::Uuid::new_v4().to_string(),
+            bidi_url: format!("ws://127.0.0.1:{port}/session"),
+            profile_dir,
+            companion_bind: "127.0.0.1:0".to_string(),
+            descriptor_path: root.join("firefox-native-host-descriptor.json"),
+            attachment_only,
+            timeout_ms: 30_000,
+            pairing_code_ttl_ms: 300_000,
+            attachment_ttl_ms: 300_000,
+        }
+    }
+
+    /// The endpoint file Firefox writes when its BiDi listener starts.
+    fn publish_endpoint(profile: &FirefoxCompanionConfig, port: u16, at: SystemTime) {
+        let path = profile.profile_dir.join("WebDriverBiDiServer.json");
+        std::fs::write(
+            &path,
+            format!("{{\"ws_host\":\"127.0.0.1\",\"ws_port\":{port}}}"),
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn install_companion(profile: &FirefoxCompanionConfig) {
+        let dir = profile
+            .profile_dir
+            .join("extensions/firefox-companion@bobby-browser.local");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("build-id.json"),
+            br#"{"buildId":"22563e26dc3ef3469eeeba24df3c104f"}"#,
+        )
+        .unwrap();
+    }
+
+    fn doctor(root: &Path, profile: &FirefoxCompanionConfig) -> (DoctorReport, String) {
+        let mut context = test_support::context(root);
+        context.config = Some(AppConfig::default());
+        context.selection = Some(BrowserSelectionConfig {
+            preference: Default::default(),
+            firefox: vec![profile.clone()],
+            chromium: Vec::new(),
+        });
+        let mut report = DoctorReport::default();
+        firefox_endpoints(&mut context, &mut report).unwrap();
+        let mut rendered = Vec::new();
+        report
+            .render_to(&mut rendered, DoctorColorMode::Never)
+            .unwrap();
+        (report, String::from_utf8(rendered).unwrap())
+    }
+
+    fn line<'a>(rendered: &'a str, check: &str) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| line.contains(&format!("] {check}:")))
+            .unwrap_or_else(|| panic!("no {check} line in:\n{rendered}"))
+    }
+
+    #[test]
+    fn firefox_bidi_probes_the_port_firefox_published_in_the_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let live = bidi_listener();
+        let profile = enrolled(root.path(), free_port(), false);
+        publish_endpoint(&profile, live, SystemTime::now());
+
+        let (_, rendered) = doctor(root.path(), &profile);
+        let bidi = line(&rendered, "firefox-bidi");
+        assert!(bidi.starts_with("[ok]"), "{rendered}");
+        assert!(bidi.contains(&format!("127.0.0.1:{live}")), "{rendered}");
+    }
+
+    #[test]
+    fn attachment_only_firefox_started_before_the_companion_install_fails_until_restarted() {
+        let root = tempfile::tempdir().unwrap();
+        let live = bidi_listener();
+        let profile = enrolled(root.path(), live, true);
+        publish_endpoint(
+            &profile,
+            live,
+            SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        install_companion(&profile);
+
+        let (_, rendered) = doctor(root.path(), &profile);
+        let build = line(&rendered, "firefox-companion-build");
+        assert!(build.starts_with("[fail]"), "{rendered}");
+        assert!(build.contains("fix: bobby doctor --fix"), "{rendered}");
+
+        publish_endpoint(
+            &profile,
+            live,
+            SystemTime::now() + std::time::Duration::from_secs(60),
+        );
+        let (report, rendered) = doctor(root.path(), &profile);
+        assert!(
+            report
+                .checks
+                .iter()
+                .filter(|check| check.name.starts_with("firefox"))
+                .all(|check| check.status == DoctorStatus::Ok),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn attachment_only_firefox_that_is_not_running_fails_with_the_fix() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = enrolled(root.path(), free_port(), true);
+
+        let (_, rendered) = doctor(root.path(), &profile);
+        let bidi = line(&rendered, "firefox-bidi");
+        assert!(bidi.starts_with("[fail]"), "{rendered}");
+        assert!(bidi.contains("fix: bobby doctor --fix"), "{rendered}");
     }
 }
