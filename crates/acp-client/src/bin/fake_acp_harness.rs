@@ -9,7 +9,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    schema::v1::{
+    v1::schema::{
         AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
         CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk, InitializeRequest,
         InitializeResponse, NewSessionRequest, NewSessionResponse, Notice, NoticeSeverity,
@@ -42,7 +42,7 @@ async fn main() -> agent_client_protocol::Result<()> {
     let client_takes_notices = Arc::new(AtomicBool::new(false));
     let notices_at_initialize = Arc::clone(&client_takes_notices);
     Agent
-        .builder()
+        .v1()
         .on_receive_request(
             async move |request: InitializeRequest, responder, _connection| {
                 if initialize_mode == "initialize-disconnect" {

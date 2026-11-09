@@ -6,17 +6,18 @@ use std::{
 };
 
 use agent_client_protocol::{
-    schema::{
-        v1::{
+    schema::ProtocolVersion,
+    v1::{
+        schema::{
             AuthenticateRequest, ClientCapabilities, ClientSessionCapabilities,
             CloseSessionRequest, ContentBlock, ImageContent, InitializeRequest, Meta,
             NewSessionRequest, NoticeCapabilities, PromptRequest, RequestPermissionOutcome,
             RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
             SessionUpdate, TextContent,
         },
-        ProtocolVersion,
+        ConnectionTo,
     },
-    AcpAgent, AcpAgentConfig, Agent, ConnectionTo, ErrorCode as AcpErrorCode,
+    AcpAgent, AcpAgentConfig, Agent, ErrorCode as AcpErrorCode,
 };
 use auth_broker::{AuthError, AuthStrategy};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -453,7 +454,7 @@ async fn start_harness(
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let chunk_outputs = Arc::clone(&outputs);
     let builder = agent_client_protocol::Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
@@ -653,7 +654,7 @@ fn transport(error: impl std::fmt::Display) -> AcpClientError {
 
 async fn authenticate_for_strategy(
     connection: &ConnectionTo<Agent>,
-    auth_methods: &[agent_client_protocol::schema::v1::AuthMethod],
+    auth_methods: &[agent_client_protocol::v1::schema::AuthMethod],
     strategy: AuthStrategy,
 ) -> Result<(), AcpClientError> {
     if strategy == AuthStrategy::None {
@@ -688,7 +689,7 @@ fn classify_authentication_error(
     error: agent_client_protocol::Error,
 ) -> AcpClientError {
     let message = format!("method {method_id}: {error}");
-    if error.code == AcpErrorCode::AuthRequired {
+    if error.code == AcpErrorCode::AUTH_REQUIRED {
         AcpClientError::Authentication(message)
     } else {
         AcpClientError::Transport(format!(
