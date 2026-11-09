@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.24.0 - 2026-11-08
+
 ### Added
 
 - With vision assist on, `intent_submit_and_verify` and `intent_follow` return `outcomeReading` evidence: the confirmation or error message the page shows after the activation.
@@ -14,6 +16,7 @@
 - `intent_complete_form` and `intent_submit_and_verify` take `screenshot` to attach a viewport screenshot of at most 1280 pixels on success, defaulting to `[mcp].success_screenshots`, which `bobby install` sets; `screenshot` takes `maxEdge`.
 - `screenshot` evidence names its `sessionId`, `workflowId`, `pageId`, `url` and `capturedAt`, and `upload` evidence lists each file's `sha256`; an upload's journaled source reads `upload://source/`, a digest of its path.
 - `workflow_run` runs a workflow by name with its `inputs` in one call through the existing tools and their checks: built-in `fillForm`, `extractPage` and `collectLinks`, or a JSON workflow file from `<config dir>/workflows` or `[mcp].workflow_dirs`, listed in `bobby://workflows` and checked by `bobby workflow validate`.
+- `"attachmentOnly": true` on a `firefox` selection entry attaches to a running Firefox and refuses automatic repair; `runtime_info.capabilities` lists `firefox-background-attachment` when every default candidate enforces it.
 
 ### Changed
 
@@ -25,6 +28,8 @@
 - `type_text` replaces the field's text unless `clearFirst` is false; a value of only line breaks presses Enter without clearing.
 - On Chromium, `upload_files` and `setFiles` refuse a file control that already holds or shows another file until it is cleared.
 - Releases publish the Firefox companion as a listed add-on on addons.mozilla.org.
+- With `headless = true`, attaching to a shared Chromium profile refuses a headed or unverified browser and a live owner of the profile; `runtime_info.capabilities` lists `headless-chromium` when every default candidate enforces it.
+- Firefox opens new tabs in the background.
 
 ### Fixed
 
@@ -57,6 +62,9 @@
 - A required checkbox group reads valid in `form_snapshot` once one of its boxes is checked.
 - A humanized click scrolls its target into view, including an option scrolled out of its list.
 - An intent hint `ordinal` picks among controls that share a name and have no id, in `intent_fill` and `intent_complete_form`.
+- A durable Chromium profile links the user's Chrome native-messaging hosts, so extensions such as password managers reach their desktop app.
+- Screenshots and humanized typing no longer raise a visible browser window or take the desktop keyboard focus.
+- A refused Firefox attachment fails with `engineUnreachable` and names its reason.
 
 ## 0.23.0 - 2026-11-04
 
