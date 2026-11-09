@@ -7736,3 +7736,453 @@ pub async fn a_for_each_step_runs_a_workflow_per_item(rig: &Rig, dir: &std::path
     }
     live.close().await;
 }
+
+fn file_control_ids(snapshot: &Value) -> Vec<Value> {
+    let mut controls = Vec::new();
+    controls_of_kind(snapshot, "file", &mut controls);
+    controls
+        .into_iter()
+        .map(|control| control["id"].clone())
+        .collect()
+}
+
+/// A file control id reaches its own input when hidden inputs share a name
+/// with the visible buttons beside them.
+pub async fn a_file_control_id_uploads_into_its_own_slot(rig: &Rig, dir: &std::path::Path) {
+    let resume = dir.join("resume.txt");
+    std::fs::write(&resume, "resume-bytes").expect("write resume");
+    let body = r#"<form>
+        <div class="field"><div>Resume</div><button type="button">Attach</button>
+          <input type="file" id="resume" aria-label="Attach" style="display:none"></div>
+        <div class="field"><div>Cover</div><button type="button">Attach</button>
+          <input type="file" id="cover" aria-label="Attach" style="display:none"></div>
+        </form><p id="echo"></p>
+        <script>
+          for (const input of document.querySelectorAll('input[type="file"]')) {
+            input.addEventListener("change", () => {
+              document.getElementById("echo").textContent += ` ${input.id}=${input.files[0]?.name}`;
+            });
+          }
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/slots", Route::Html(page("Slots", body)))]).await;
+    let live = Live::open(rig, &site.url("/slots")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let ids = file_control_ids(&snapshot);
+    assert_eq!(ids.len(), 2, "{snapshot}");
+    let uploaded = live
+        .call(
+            "upload_files",
+            json!({"controlId":ids[0],"paths":[resume.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "resume=resume.txt"), "{page}");
+    assert!(!page_text_contains(&page, "cover="), "{page}");
+    live.close().await;
+}
+
+const TWO_SUGGESTION_BOXES: &str = r#"<form>
+    <input id="first" role="combobox" aria-autocomplete="list" autocomplete="off" placeholder="Start typing...">
+    <input id="second" role="combobox" aria-autocomplete="list" autocomplete="off" placeholder="Start typing...">
+    </form><p id="picked"></p><div id="portal"></div>
+    <script>
+      const first = document.getElementById("first");
+      const second = document.getElementById("second");
+      const portal = document.getElementById("portal");
+      first.addEventListener("input", () => first.removeAttribute("placeholder"));
+      second.addEventListener("input", () => {
+        portal.innerHTML = "";
+        const list = document.createElement("ul");
+        list.setAttribute("role", "listbox");
+        const option = document.createElement("li");
+        option.setAttribute("role", "option");
+        option.textContent = "Company Website";
+        option.addEventListener("mousedown", (press) => {
+          press.preventDefault();
+          second.value = option.textContent;
+          portal.innerHTML = "";
+          document.getElementById("picked").textContent = `Source: ${second.value}`;
+        });
+        list.append(option);
+        portal.append(list);
+      });
+    </script>"#;
+
+/// A target taken from a snapshot stays on its control after an earlier
+/// control with the same name stops matching that name.
+pub async fn a_snapshot_target_survives_a_sibling_losing_its_name(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/boxes",
+        Route::Html(page("Boxes", TWO_SUGGESTION_BOXES)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/boxes")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut boxes = Vec::new();
+    controls_of_kind(&snapshot, "combobox", &mut boxes);
+    assert_eq!(boxes.len(), 2, "{snapshot}");
+    let typed = live
+        .call(
+            "control_action",
+            json!({"target":boxes[0]["target"],"action":{"kind":"setText","value":"Miami"}}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "{typed}");
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":boxes[1]["target"],
+                   "action":{"kind":"selectOne","value":"Company Website"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Source: Company Website"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// A field addressed by its control id is filled after its label changes.
+pub async fn a_control_id_survives_its_name_changing(rig: &Rig) {
+    let body = r#"<form>
+        <label for="a">First</label><input id="a">
+        <label for="b" id="b-label">Second</label><input id="b">
+        </form><p id="echo"></p>
+        <script>
+          document.getElementById("a").addEventListener("input", () => {
+            document.getElementById("b-label").textContent = "Second, reworded";
+          });
+          document.addEventListener("input", () => {
+            document.getElementById("echo").textContent = "Values: " +
+              [...document.querySelectorAll("input")].map((input) => input.value).join("|");
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/rename", Route::Html(page("Rename", body)))]).await;
+    let live = Live::open(rig, &site.url("/rename")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let first = snapshot_control(&snapshot, "text", "First")["id"].clone();
+    let second = snapshot_control(&snapshot, "text", "Second")["id"].clone();
+    let filled = live
+        .call(
+            "intent_complete_form",
+            json!({"purpose":"Fill both fields",
+                   "fields":[{"name":first,"purpose":"first","value":{"kind":"setText","value":"one"}},
+                             {"name":second,"purpose":"second","value":{"kind":"setText","value":"two"}}]}),
+        )
+        .await;
+    assert_eq!(filled["status"], "completed", "{filled}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Values: one|two"), "{page}");
+    live.close().await;
+}
+
+/// An activate that removes its own control is complete.
+pub async fn activating_a_control_that_removes_itself_completes(rig: &Rig) {
+    let body = r#"<form><button type="button" aria-label="Remove file"
+        onclick="this.remove(); document.getElementById('echo').textContent='Removed it'">x</button>
+        </form><p id="echo"></p>"#;
+    let site = FixtureSite::spawn(vec![("/remove", Route::Html(page("Remove", body)))]).await;
+    let live = Live::open(rig, &site.url("/remove")).await;
+    let activated = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"button","accessibleName":"Remove file"},
+                   "action":{"kind":"activate"}}),
+        )
+        .await;
+    assert_eq!(activated["status"], "completed", "{activated}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Removed it"), "{page}");
+    live.close().await;
+}
+
+/// An activate that navigates away is complete and is not retried.
+pub async fn activating_a_control_that_navigates_completes(rig: &Rig) {
+    let body = r#"<form><button type="button"
+        onclick="location.href='/arrived'">Apply</button></form>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(page("Start", body))),
+        (
+            "/arrived",
+            Route::Html(page("Arrived", "<h1>Application form</h1>")),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/start")).await;
+    let activated = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"button","accessibleName":"Apply"},
+                   "action":{"kind":"activate"}}),
+        )
+        .await;
+    assert_eq!(activated["status"], "completed", "{activated}");
+    assert_eq!(site.hits("/arrived"), 1);
+    live.close().await;
+}
+
+/// A choice whose control shows only part of the option, spaced differently,
+/// reads back as chosen.
+pub async fn a_shown_value_reads_back_with_its_own_spacing(rig: &Rig) {
+    let body = r#"<form><label for="country">Country</label>
+        <div><span id="shown"></span>
+          <input id="country" role="combobox" aria-autocomplete="list" autocomplete="off"></div>
+        </form><div id="portal"></div>
+        <script>
+          const input = document.getElementById("country");
+          const portal = document.getElementById("portal");
+          input.addEventListener("input", () => {
+            portal.innerHTML = "";
+            const list = document.createElement("ul");
+            list.setAttribute("role", "listbox");
+            const option = document.createElement("li");
+            option.setAttribute("role", "option");
+            option.textContent = "United States +1";
+            option.addEventListener("mousedown", (press) => {
+              press.preventDefault();
+              input.value = "";
+              document.getElementById("shown").textContent = "+ 1";
+              portal.innerHTML = "";
+            });
+            list.append(option);
+            portal.append(list);
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/phone", Route::Html(page("Phone", body)))]).await;
+    let live = Live::open(rig, &site.url("/phone")).await;
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"Country"},
+                   "action":{"kind":"selectOne","value":"United States +1"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    live.close().await;
+}
+
+/// A selection waits through a loading row that outlasts the plain option wait.
+pub async fn a_combobox_waits_through_its_loading_row(rig: &Rig) {
+    let body = r#"<form><label for="city">City</label>
+        <input id="city" role="combobox" aria-autocomplete="list" autocomplete="off">
+        </form><p id="picked"></p><div id="portal"></div>
+        <script>
+          const input = document.getElementById("city");
+          const portal = document.getElementById("portal");
+          const list = (text, pick) => {
+            portal.innerHTML = "";
+            const box = document.createElement("ul");
+            box.setAttribute("role", "listbox");
+            const option = document.createElement("li");
+            option.setAttribute("role", "option");
+            option.textContent = text;
+            if (pick) option.addEventListener("mousedown", (press) => { press.preventDefault(); pick(); });
+            box.append(option);
+            portal.append(box);
+          };
+          let search = 0;
+          input.addEventListener("input", () => {
+            const current = ++search;
+            list("Loading...");
+            setTimeout(() => {
+              if (current !== search) return;
+              list("Miami, Florida", () => {
+                input.value = "Miami, Florida";
+                portal.innerHTML = "";
+                document.getElementById("picked").textContent = `City: ${input.value}`;
+              });
+            }, 4500);
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/city", Route::Html(page("City", body)))]).await;
+    let live = Live::open(rig, &site.url("/city")).await;
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"City"},
+                   "action":{"kind":"selectOne","value":"Miami, Florida"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "City: Miami, Florida"), "{page}");
+    live.close().await;
+}
+
+/// An option that moves right after it is read is still the option pressed.
+pub async fn a_combobox_presses_an_option_that_moves_as_it_is_read(rig: &Rig) {
+    let body = r#"<form><label for="q">Status</label>
+        <input id="q" role="combobox" aria-autocomplete="list" autocomplete="off">
+        </form><p id="picked"></p><div id="portal" style="position:absolute;left:0;top:120px"></div>
+        <script>
+          const input = document.getElementById("q");
+          const portal = document.getElementById("portal");
+          let moved = false;
+          Element.prototype.scrollIntoView = function () {
+            if (moved) return;
+            moved = true;
+            queueMicrotask(() => { portal.style.top = "420px"; });
+          };
+          input.addEventListener("input", () => {
+            portal.innerHTML = "";
+            const list = document.createElement("ul");
+            list.setAttribute("role", "listbox");
+            const option = document.createElement("li");
+            option.setAttribute("role", "option");
+            option.style.height = "30px";
+            option.textContent = "I am currently a “Person”";
+            option.addEventListener("mousedown", (press) => {
+              press.preventDefault();
+              input.value = option.textContent;
+              portal.innerHTML = "";
+              document.getElementById("picked").textContent = `Picked: ${input.value}`;
+            });
+            list.append(option);
+            portal.append(list);
+          });
+          document.addEventListener("mousedown", (press) => {
+            if (!portal.contains(press.target) && press.target !== input) portal.innerHTML = "";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/moves", Route::Html(page("Moves", body)))]).await;
+    let live = Live::open(rig, &site.url("/moves")).await;
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"Status"},
+                   "action":{"kind":"selectOne","value":"I am currently a “Person”"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Picked: I am currently"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+/// A button group's chosen button reads as checked in the snapshot.
+pub async fn a_chosen_button_reads_as_checked(rig: &Rig) {
+    let body = r#"<form><div>
+        <button type="button" class="option">Yes</button>
+        <button type="button" class="option">No</button>
+        </div></form>
+        <script>
+          const options = [...document.querySelectorAll(".option")];
+          for (const option of options) {
+            option.addEventListener("click", () => {
+              for (const other of options) other.classList.remove("_active_a1b2");
+              option.classList.add("_active_a1b2");
+            });
+          }
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/yesno", Route::Html(page("YesNo", body)))]).await;
+    let live = Live::open(rig, &site.url("/yesno")).await;
+    let activated = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"button","accessibleName":"Yes"},
+                   "action":{"kind":"activate"}}),
+        )
+        .await;
+    assert_eq!(activated["status"], "completed", "{activated}");
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut buttons = Vec::new();
+    controls_of_kind(&snapshot, "other", &mut buttons);
+    let state = |name: &str| {
+        buttons
+            .iter()
+            .find(|control| control["accessibleName"] == name)
+            .unwrap_or_else(|| panic!("no {name} button: {snapshot}"))["state"]
+            .clone()
+    };
+    assert_eq!(state("Yes"), json!({"kind":"checked","checked":true}));
+    assert_eq!(state("No"), json!({"kind":"empty"}));
+    live.close().await;
+}
+
+/// A listbox reads as one option per line, so its options never run together
+/// into text that looks like a credential.
+pub async fn inspect_reads_a_listbox_one_option_per_line(rig: &Rig) {
+    let body = r#"<div id="menu"></div><script>
+        document.getElementById("menu").innerHTML =
+          '<ul role="listbox" aria-label="Codes">' +
+          ["Islands+358", "Albania+355", "Algeria+213", "American+1"]
+            .map((code) => `<li role="option" style="display:inline">${code}</li>`).join("") +
+          "</ul>";
+      </script>"#;
+    let site = FixtureSite::spawn(vec![("/codes", Route::Html(page("Codes", body)))]).await;
+    let live = Live::open(rig, &site.url("/codes")).await;
+    let inspected = live
+        .call("inspect", json!({"selector":"[role=\"listbox\"]"}))
+        .await;
+    let text = inspected["evidence"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["kind"] == "inspection"))
+        .unwrap_or_else(|| panic!("no inspection: {inspected}"))["text"]
+        .clone();
+    assert_eq!(
+        text,
+        json!("Islands+358\nAlbania+355\nAlgeria+213\nAmerican+1")
+    );
+    live.close().await;
+}
+
+/// A widget's removed file no longer blocks the next upload, and a file
+/// control clears.
+pub async fn a_removed_file_is_replaced_and_a_file_control_clears(
+    rig: &Rig,
+    dir: &std::path::Path,
+) {
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    std::fs::write(&first, "first-bytes").expect("write first");
+    std::fs::write(&second, "second-bytes").expect("write second");
+    let body = r#"<form><div class="slot"><button type="button">Attach</button>
+        <input type="file" id="resume" aria-label="Resume" style="display:none">
+        <span id="row"></span>
+        <button type="button" aria-label="Remove"
+          onclick="document.getElementById('row').textContent=''">x</button>
+        </div></form>
+        <script>
+          const input = document.getElementById("resume");
+          input.addEventListener("change", () => {
+            document.getElementById("row").textContent = input.files[0]?.name || "";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/slot", Route::Html(page("Slot", body)))]).await;
+    let live = Live::open(rig, &site.url("/slot")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let control = snapshot_control(&snapshot, "file", "Resume").clone();
+    let upload = |path: &std::path::Path| json!({"controlId":control["id"],"paths":[path.to_str().expect("utf8 path")]});
+    let uploaded = live.call("upload_files", upload(&first)).await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let removed = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"button","accessibleName":"Remove"},
+                   "action":{"kind":"activate"}}),
+        )
+        .await;
+    assert_eq!(removed["status"], "completed", "{removed}");
+    let replaced = live.call("upload_files", upload(&second)).await;
+    assert_eq!(replaced["status"], "completed", "{replaced}");
+    let cleared = live
+        .call(
+            "control_action",
+            json!({"target":control["target"],"action":{"kind":"clear"}}),
+        )
+        .await;
+    assert_eq!(cleared["status"], "completed", "{cleared}");
+    let after = live.call("form_snapshot", json!({})).await;
+    assert_eq!(
+        snapshot_control(&after, "file", "Resume")["state"]["count"],
+        0,
+        "{after}"
+    );
+    live.close().await;
+}

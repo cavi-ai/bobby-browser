@@ -35,6 +35,7 @@ enum DriverMode {
     TargetDetached,
     DeadOnOpen,
     StateConflict,
+    StateConflictOnce,
     CommitFail,
     CommitPause,
     /// First launch's page commands fail with a dead-browser error;
@@ -601,7 +602,16 @@ impl worker_pool::WebStateEngine for FakeWorker {
                 retryable: false,
             });
         }
-        if matches!(self.mode, DriverMode::StateConflict) {
+        let commits = self
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| *event == "http:commit")
+            .count();
+        if matches!(self.mode, DriverMode::StateConflict)
+            || (matches!(self.mode, DriverMode::StateConflictOnce) && commits == 1)
+        {
             Err(CommandError {
                 code: ErrorCode::HttpStateConflict,
                 message: "injected conflict".into(),
@@ -2296,6 +2306,31 @@ async fn state_conflict_after_prepared_inspect_requires_reconciliation_without_r
     let events = events.lock().await;
     assert!(!events.contains(&"browser:inspect".to_string()));
     assert!(events.contains(&"journal:resultprepared".to_string()));
+}
+
+#[tokio::test]
+async fn parallel_prepared_inspect_completes_after_one_state_conflict() {
+    let url = http_fixture("<title>Candidate</title><p>candidate-only</p>", "text/html").await;
+    let (runtime, session, page, events, _root) =
+        adaptive_runtime(DriverMode::StateConflictOnce).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(
+        |item| matches!(item, Evidence::Inspection { text, .. } if text.contains("candidate-only"))
+    ));
+    assert!(!events.lock().await.contains(&"browser:inspect".to_string()));
 }
 
 #[tokio::test]

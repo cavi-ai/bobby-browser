@@ -46,6 +46,15 @@ cases::every_case!(
     a_custom_select_reads_and_verifies_its_shown_value,
     a_checked_box_satisfies_its_required_group,
     a_file_slot_reports_the_file_its_row_shows,
+    a_snapshot_target_survives_a_sibling_losing_its_name,
+    a_control_id_survives_its_name_changing,
+    activating_a_control_that_removes_itself_completes,
+    activating_a_control_that_navigates_completes,
+    a_shown_value_reads_back_with_its_own_spacing,
+    a_combobox_waits_through_its_loading_row,
+    a_combobox_presses_an_option_that_moves_as_it_is_read,
+    a_chosen_button_reads_as_checked,
+    inspect_reads_a_listbox_one_option_per_line,
     element_screenshots_show_the_element,
     screenshots_name_their_session_and_page,
     nested_shadow_controls_act_from_their_targets,
@@ -61,6 +70,22 @@ async fn a_file_control_reports_the_file_its_widget_shows() {
     let dir = tempfile::tempdir().expect("upload dir");
     let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
     cases::a_file_control_reports_the_file_its_widget_shows(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_file_control_id_uploads_into_its_own_slot() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_file_control_id_uploads_into_its_own_slot(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_removed_file_is_replaced_and_a_file_control_clears() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_removed_file_is_replaced_and_a_file_control_clears(&rig, dir.path()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

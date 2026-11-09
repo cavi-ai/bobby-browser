@@ -276,9 +276,9 @@ fn target_key(role: String, name: String, control: &RawFormControl) -> TargetKey
         serde_json::to_string(&(&control.frame_path, &control.shadow_path)).unwrap_or_default();
     (
         role,
-        name.clone(),
+        name,
         scope,
-        name.is_empty() && control_kind(control) == FormControlKind::File,
+        control_kind(control) == FormControlKind::File,
     )
 }
 
@@ -323,10 +323,17 @@ fn normalize_control(
                 (target_totals.get(&key).copied().unwrap_or_default() > 1).then_some(*seen);
             *seen += 1;
             Some(FormControlTarget {
+                // A named control's stamp outlives changes to its name and ordinal.
                 attributes: Box::new(
-                    (kind == FormControlKind::File && name.is_empty())
+                    (kind == FormControlKind::File)
                         .then(|| ("type".to_owned(), "file".to_owned()))
                         .into_iter()
+                        .chain(raw.stamp.filter(|_| !name.is_empty()).map(|stamp| {
+                            (
+                                dom_engine::CONTROL_STAMP_ATTRIBUTE.to_owned(),
+                                stamp.to_string(),
+                            )
+                        }))
                         .collect(),
                 ),
                 role,
@@ -360,6 +367,11 @@ fn normalize_control(
             count: raw.file_count.max(raw.file_names.len()),
             names: raw.file_names.clone(),
         },
+        FormControlKind::Submit | FormControlKind::Reset | FormControlKind::Other
+            if raw.checked =>
+        {
+            FormControlState::Checked { checked: true }
+        }
         _ => raw
             .value
             .clone()
@@ -603,10 +615,18 @@ fn supported_operations(
 /// explicitly (a11y targets do); both mean "the first match", so a struct
 /// compare false-rejects a target copied from a different snapshot.
 pub fn target_specs_equivalent(a: &types::FormControlTarget, b: &types::FormControlTarget) -> bool {
+    // Only an unnamed control's identity is its stamp.
+    let identity = |target: &types::FormControlTarget| {
+        let mut attributes = (*target.attributes).clone();
+        if !target.accessible_name.is_empty() {
+            attributes.remove(dom_engine::CONTROL_STAMP_ATTRIBUTE);
+        }
+        attributes
+    };
     a.ordinal.unwrap_or(0) == b.ordinal.unwrap_or(0)
         && a.role.eq_ignore_ascii_case(&b.role)
         && a.accessible_name == b.accessible_name
-        && a.attributes == b.attributes
+        && identity(a) == identity(b)
         && a.frame_path == b.frame_path
         && a.shadow_path == b.shadow_path
 }
@@ -881,8 +901,11 @@ const controlLabel=__CONTROL_LABEL_FUNCTION__;
 const label=(element)=>{const isButton=element.getAttribute('role')==='button'||element.tagName.toLowerCase()==='button';return text(element.getAttribute('aria-label'))||text(resolveRefs(element,'aria-labelledby').join(' '))||text(controlLabel(element))||(isButton?text(element.textContent):null)||text(element.getAttribute('placeholder'))};
 __SHOWN_VALUE_FUNCTION__
 const checkedPeer=e=>{const fieldset=e.closest('fieldset');const scope=e.form||fieldset||e.getRootNode();return [...scope.querySelectorAll('input[type="checkbox"]')].some(o=>o!==e&&o.checked&&(e.name?o.name===e.name:Boolean(fieldset)&&o.closest('fieldset')===fieldset))};
-const fileNames=e=>{if(e.files?.length)return [...e.files].slice(0,32).map(f=>clip(f.name,256));let box=null;for(let node=e.parentElement,hop=0;node&&hop<5&&!/^(FORM|FIELDSET|BODY)$/.test(node.tagName);node=node.parentElement,hop++){if([...node.querySelectorAll('input[type="file"]')].some(other=>other!==e))break;box=node}const shown=new Set();const walker=box&&box.ownerDocument.createTreeWalker(box,NodeFilter.SHOW_TEXT);for(let node=walker?.nextNode();node&&shown.size<8;node=walker.nextNode()){for(const match of node.data.matchAll(/[^\s\/\\:*?"<>|]+\.(?:pdf|docx?|odt|rtf|txt|md|pages|png|jpe?g|gif|webp|heic|csv|xlsx?|pptx?|zip)\b/giu))shown.add(clip(match[0],256))}return [...shown].slice(0,8)};
-const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
+const pressedMark=/(^|[-_])(active|selected|checked|pressed)([-_]|$)/i;
+const isButton=e=>e.tagName==='BUTTON'||e.getAttribute('role')==='button';
+const pressed=e=>{if(!isButton(e))return false;if(e.getAttribute('aria-pressed')==='true'||e.getAttribute('aria-selected')==='true'||(e.getAttribute('aria-current')||'false')!=='false')return true;const marks=[...e.classList].filter(c=>pressedMark.test(c));return marks.length>0&&[...(e.parentElement?.children||[])].some(o=>o!==e&&isButton(o)&&marks.some(c=>!o.classList.contains(c)))};
+const fileNames=e=>{let box=null;for(let node=e.parentElement,hop=0;node&&hop<5&&!/^(FORM|FIELDSET|BODY)$/.test(node.tagName);node=node.parentElement,hop++){if([...node.querySelectorAll('input[type="file"]')].some(other=>other!==e))break;box=node}const shown=new Set();const walker=box&&box.ownerDocument.createTreeWalker(box,NodeFilter.SHOW_TEXT);for(let node=walker?.nextNode();node&&shown.size<8;node=walker.nextNode()){for(const match of node.data.matchAll(/[^\s\/\\:*?"<>|]+\.(?:pdf|docx?|odt|rtf|txt|md|pages|png|jpe?g|gif|webp|heic|csv|xlsx?|pptx?|zip)\b/giu))shown.add(clip(match[0],256))}const held=[...(e.files||[])].slice(0,32).map(f=>clip(f.name,256));if(!held.length)return [...shown].slice(0,8);const r=e.getBoundingClientRect(),s=getComputedStyle(e);return !box||shown.size||(r.width>=4&&r.height>=4&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0)?held:[]};
+const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
 "#;
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{

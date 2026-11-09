@@ -2170,6 +2170,14 @@ fn form_control_target(
     // carries over only to a target with that name; otherwise the stamp
     // identifies the control.
     let (accessible_name, attributes, ordinal) = match (name, stamp) {
+        // A control the intent addressed by its stamp stays on it.
+        (name, Some(stamp)) if dom_engine::is_stamped_control_target(intent_target) => (
+            name.unwrap_or_default(),
+            [(dom_engine::CONTROL_STAMP_ATTRIBUTE.to_owned(), stamp)]
+                .into_iter()
+                .collect(),
+            None,
+        ),
         (Some(name), _) if names_by_intent(candidate, intent_target) => {
             (name, Default::default(), intent_target.ordinal)
         }

@@ -486,3 +486,49 @@ fn names_that_differ_beyond_a_required_marker_still_do_not_match() {
         );
     }
 }
+
+fn stamped_target(name: &str, ordinal: Option<usize>, stamp: &str) -> TargetSpec {
+    TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some(name.into()),
+        ordinal,
+        attributes: [("data-bobby-control".into(), stamp.into())]
+            .into_iter()
+            .collect(),
+        ..TargetSpec::default()
+    }
+}
+
+fn stamped(id: &str, name: &str, stamp: &str) -> Candidate {
+    let mut item = candidate(id, name, true);
+    item.attributes
+        .insert("data-bobby-control".into(), stamp.into());
+    item
+}
+
+#[test]
+fn a_stamp_finds_its_control_after_the_name_and_ordinal_change() {
+    let candidates = vec![stamped("a", "Attach", "1"), stamped("b", "Renamed", "2")];
+    let decision = resolve_candidates(
+        &stamped_target("Attach", Some(1), "2"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("b"));
+}
+
+#[test]
+fn a_target_resolves_by_name_and_ordinal_once_its_stamp_is_gone() {
+    let candidates = vec![
+        candidate("a", "Attach", true),
+        candidate("b", "Attach", true),
+    ];
+    let decision = resolve_candidates(
+        &stamped_target("Attach", Some(1), "9"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("b"));
+}

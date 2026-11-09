@@ -2437,6 +2437,16 @@ impl FirefoxCompanionWorker {
             return Ok((top_context.to_owned(), selector.to_owned(), Vec::new()));
         };
         let (context, owners) = self.resolve_input_scope(top_context, target).await?;
+        let semantic = match dom_engine::without_control_stamp(target) {
+            Some(semantic) if !self.control_stamp_held(&context, target).await? => Some(semantic),
+            _ => None,
+        };
+        let target = semantic.as_ref().unwrap_or(target);
+        if let Some(selector) =
+            dom_engine::control_stamp_selector(target).filter(|_| target.shadow_path.is_empty())
+        {
+            return Ok((context, selector, owners));
+        }
         if !target.shadow_path.is_empty() || dom_engine::is_unnamed_file_target(target) {
             let response = self
                 .shadow_target_response(&context, target, ShadowRead::Selector)
@@ -2763,6 +2773,21 @@ impl FirefoxCompanionWorker {
             return Err(error);
         }
         Ok(response)
+    }
+
+    async fn control_stamp_held(
+        &self,
+        context: &str,
+        target: &types::TargetSpec,
+    ) -> Result<bool, CommandError> {
+        match self
+            .shadow_target_response(context, target, ShadowRead::Element)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.code == ErrorCode::TargetNotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     async fn resolve_shadow_element(
@@ -5197,20 +5222,24 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 }
             }
         }
-        let after = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
-            .await?
-            .into_iter()
-            .find_map(|item| match item {
+        // An activate is complete once dispatched: its click may remove the
+        // control or navigate away, so what is read after it is best effort.
+        let activated = matches!(command.action, ControlAction::Activate);
+        let after = match worker_pool::ObservationEngine::form_snapshot(self, page_id, None).await {
+            Ok(evidence) => evidence.into_iter().find_map(|item| match item {
                 Evidence::FormSnapshot { snapshot } => Some(snapshot),
                 _ => None,
-            })
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "missing post-action form snapshot",
-                    true,
-                )
-            })?;
+            }),
+            Err(_) if activated => None,
+            Err(error) => return Err(error),
+        };
+        if after.is_none() && !activated {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "missing post-action form snapshot",
+                true,
+            ));
+        }
         let replaced = async || -> Result<Option<FormControl>, CommandError> {
             let (context, selector) = self
                 .resolve_input_target(page_id, &top_context, "", Some(&target))
@@ -5218,24 +5247,29 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             self.describe_control(&context, &selector, &command.target)
                 .await
         };
-        let control = match self
+        let after_control = match self
             .describe_control(&context, &selector, &command.target)
             .await
         {
             Ok(Some(control)) => Some(control),
             _ => replaced().await.ok().flatten(),
-        }
-        .ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetDetached,
-                "form control was replaced after dispatch",
-                true,
-            )
-        })?;
+        };
+        let node_replaced = after_control.is_none();
+        let control = match after_control {
+            Some(control) => control,
+            None if activated => control,
+            None => {
+                return Err(driver_error(
+                    ErrorCode::TargetDetached,
+                    "form control was replaced after dispatch",
+                    true,
+                ))
+            }
+        };
         let mut action_evidence = worker_pool::control_action_evidence(
             &control,
             &command.action,
-            false,
+            node_replaced,
             committed.as_deref(),
         )?;
         // Conditional fields: controls that exist only after this action,
@@ -5248,10 +5282,9 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             .filter_map(|control| control.target.as_ref())
             .collect();
         action_evidence.revealed_controls = after
-            .forms
             .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(after.unowned_controls.iter())
+            .flat_map(|after| after.forms.iter().flat_map(|form| form.controls.iter()))
+            .chain(after.iter().flat_map(|after| after.unowned_controls.iter()))
             .filter(|control| {
                 control.target.as_ref().is_some_and(|target| {
                     !before_targets

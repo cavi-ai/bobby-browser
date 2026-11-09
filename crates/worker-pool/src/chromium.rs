@@ -55,7 +55,7 @@ use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::AtomicBool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
@@ -676,6 +676,8 @@ impl WorkerFactory for ChromiumWorkerFactory {
             mouse_simulator: BezierMouseSimulator::new(behavioral_config.mouse),
             session_jitter: behavioral_config.session_jitter,
             session_random: Mutex::new(SessionRandom::new(generate_session_seed())),
+            headless: self.config.headless,
+            input_gate: Mutex::new(()),
         }))
     }
 }
@@ -779,6 +781,11 @@ struct ChromiumWorker {
     mouse_simulator: BezierMouseSimulator,
     session_jitter: Duration,
     session_random: Mutex<SessionRandom>,
+    /// Whether the browser has a window, so hidden tabs share it.
+    headless: bool,
+    /// Held from bringing a tab forward through its input, so another tab
+    /// cannot take the window in between.
+    input_gate: Mutex<()>,
 }
 
 impl Drop for ChromiumWorker {
@@ -1116,18 +1123,25 @@ impl ChromiumWorker {
     /// never resolves. A visible page is left alone: bringing it to front
     /// activates a headed browser window and takes the desktop's keyboard
     /// focus. Failure here never aborts the caller: it is logged and the
-    /// dispatch proceeds anyway.
-    async fn bring_page_to_front(&self, page: &Page) {
+    /// dispatch proceeds anyway. In a headed browser the returned guard keeps
+    /// the page's tab in front until the caller drops it.
+    #[must_use]
+    async fn bring_page_to_front(&self, page: &Page) -> Option<MutexGuard<'_, ()>> {
+        let gate = if self.headless {
+            None
+        } else {
+            Some(self.input_gate.lock().await)
+        };
         let visibility = bounded_cdp(page.evaluate("document.visibilityState"), command_failed)
             .await
             .ok()
             .and_then(|result| result.into_value::<String>().ok());
-        if !needs_bring_to_front(visibility.as_deref()) {
-            return;
+        if needs_bring_to_front(visibility.as_deref()) {
+            if let Err(error) = bounded_cdp(page.bring_to_front(), command_failed).await {
+                tracing::debug!(?error, "bring-to-front before dispatch failed");
+            }
         }
-        if let Err(error) = bounded_cdp(page.bring_to_front(), command_failed).await {
-            tracing::debug!(?error, "bring-to-front before dispatch failed");
-        }
+        gate
     }
 
     /// Humanized typing: focus the target, then replay `behavioral-engine`
@@ -2026,7 +2040,7 @@ impl crate::TabsEngine for ChromiumWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         let browser = self.browser_handle().await?;
         let page = browser
-            .new_page(blank_window())
+            .new_page(blank_page(self.headless))
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         self.register_page(page_id, page).await
@@ -2040,7 +2054,7 @@ impl crate::TabsEngine for ChromiumWorker {
         let browser = self.browser_handle().await?;
         // Always start blank so init scripts register before first real document.
         let page = browser
-            .new_page(blank_window())
+            .new_page(blank_page(self.headless))
             .await
             .map_err(command_failed)?;
         self.register_page(page_id.clone(), page).await?;
@@ -2239,7 +2253,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .await?;
             let text = match resolved.value(&page).await {
                 Ok(Some(value)) if !value.is_empty() => value,
-                _ => resolved.inner_text(&page).await?.unwrap_or_default(),
+                _ => resolved.listed_text(&page).await?,
             };
             let html = if command.include_html {
                 Some(resolved.outer_html(&page).await?.unwrap_or_default())
@@ -2658,7 +2672,7 @@ impl crate::InputEngine for ChromiumWorker {
                 Err(error) => return Err(error),
             }
             let text = resolved.inner_text(&page).await.ok().flatten();
-            self.bring_page_to_front(&page).await;
+            let _front = self.bring_page_to_front(&page).await;
             let humanized = crate::SessionSettings::humanization_enabled(self);
             // A coordinate-based dispatch, humanized or not, needs the target
             // on-screen and out of any scrolled container's clip; best-effort,
@@ -2840,7 +2854,7 @@ impl crate::InputEngine for ChromiumWorker {
             resolved => resolved?,
         };
         ensure_editable_control(&page, &resolved).await?;
-        self.bring_page_to_front(&page).await;
+        let _front = self.bring_page_to_front(&page).await;
         let mut humanization_evidence = None;
         let mut replaced = false;
         let (observed, control_kind) = if resolved.is_checkable(&page).await? {
@@ -3026,9 +3040,22 @@ impl crate::InputEngine for ChromiumWorker {
             None => Ok(None),
         };
         let target = Self::control_target_spec(&command.target);
-        let resolved = self
-            .resolve_target(page_id, &page, "", Some(&target))
-            .await?;
+        let browser = self.browser_handle().await?;
+        // A file input usually sits hidden behind the control that opens it.
+        let require_visible =
+            command.target.attributes.get("type").map(String::as_str) != Some("file");
+        let resolve = async || {
+            resolve_target_with_visibility(
+                page_id,
+                &page,
+                "",
+                Some(&target),
+                require_visible,
+                Some(&browser),
+            )
+            .await
+        };
+        let resolved = resolve().await?;
         let before = read_snapshot().await?;
         let before_control = describe(&resolved).await?.ok_or_else(|| {
             driver_error(
@@ -3038,7 +3065,7 @@ impl crate::InputEngine for ChromiumWorker {
         })?;
         crate::validate_control_action(&before_control, &command.action)?;
 
-        self.bring_page_to_front(&page).await;
+        let _front = self.bring_page_to_front(&page).await;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
             ControlAction::SetText { value, clear_first } => {
@@ -3075,7 +3102,7 @@ impl crate::InputEngine for ChromiumWorker {
                 resolved.set_files(&page, paths).await?;
             }
             ControlAction::Clear => match before_control.control_kind {
-                types::FormControlKind::File => resolved.set_files(&page, Vec::new()).await?,
+                types::FormControlKind::File => resolved.clear_files(&page).await?,
                 types::FormControlKind::ContentEditable => resolved.clear_editable(&page).await?,
                 _ => resolved.clear_control(&page).await?,
             },
@@ -3113,24 +3140,40 @@ impl crate::InputEngine for ChromiumWorker {
             }
         }
 
-        let after = read_snapshot().await?;
+        // An activate is complete once dispatched: its click may remove the
+        // control or navigate away, so what is read after it is best effort.
+        let activated = matches!(command.action, ControlAction::Activate);
+        let after = match read_snapshot().await {
+            Ok(after) => Some(after),
+            Err(_) if activated => None,
+            Err(error) => return Err(error),
+        };
         let after_control = match describe(&resolved).await {
             Ok(Some(control)) => Some(control),
-            _ => match self.resolve_target(page_id, &page, "", Some(&target)).await {
-                Ok(replacement) => describe(&replacement).await?,
+            _ => match resolve().await {
+                Ok(replacement) => match describe(&replacement).await {
+                    Ok(control) => control,
+                    Err(_) if activated => None,
+                    Err(error) => return Err(error),
+                },
                 Err(_) => None,
             },
-        }
-        .ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetDetached,
-                "form control was replaced or detached after dispatch",
-            )
-        })?;
+        };
+        let node_replaced = after_control.is_none();
+        let after_control = match after_control {
+            Some(control) => control,
+            None if activated => before_control.clone(),
+            None => {
+                return Err(driver_error(
+                    ErrorCode::TargetDetached,
+                    "form control was replaced or detached after dispatch",
+                ))
+            }
+        };
         let mut evidence = crate::control_action_evidence(
             &after_control,
             &command.action,
-            false,
+            node_replaced,
             committed.as_deref(),
         )?;
         // Conditional fields: controls that exist only after this action
@@ -3144,10 +3187,9 @@ impl crate::InputEngine for ChromiumWorker {
             .filter_map(|control| control.target.as_ref())
             .collect();
         evidence.revealed_controls = after
-            .forms
             .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(after.unowned_controls.iter())
+            .flat_map(|after| after.forms.iter().flat_map(|form| form.controls.iter()))
+            .chain(after.iter().flat_map(|after| after.unowned_controls.iter()))
             .filter(|control| {
                 control.target.as_ref().is_some_and(|target| {
                     !before_targets
@@ -3286,7 +3328,7 @@ impl crate::EventsEngine for ChromiumWorker {
         .await?;
         // Same H3 class as `click`: a native element click on a backgrounded
         // tab hangs to the CDP request timeout, so surface the opener first.
-        self.bring_page_to_front(&opener).await;
+        let _front = self.bring_page_to_front(&opener).await;
         press(&opener, &resolved).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
@@ -3374,7 +3416,7 @@ impl crate::EventsEngine for ChromiumWorker {
         let mut progress = futures::stream::select_all(progress_streams);
         // A popup may have backgrounded the opener. Activate it before DOM
         // resolution, which can stall on a background target too.
-        self.bring_page_to_front(&page).await;
+        let _front = self.bring_page_to_front(&page).await;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
@@ -3505,7 +3547,7 @@ impl crate::CaptureEngine for ChromiumWorker {
 
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        self.bring_page_to_front(&page).await;
+        let _front = self.bring_page_to_front(&page).await;
         let bytes = page
             .screenshot(
                 ScreenshotParams::builder()
@@ -3529,7 +3571,7 @@ impl crate::CaptureEngine for ChromiumWorker {
         command: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        self.bring_page_to_front(&page).await;
+        let _front = self.bring_page_to_front(&page).await;
         let captured_at = chrono::Utc::now();
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
@@ -4125,9 +4167,11 @@ async fn read_page_scoped_text(
 /// A blank page in its own window, shown without taking focus. A page that
 /// shares a window goes hidden behind the active tab, and a hidden page renders
 /// no frames, so pointer moves and wheel scrolls never complete on it.
-fn blank_window() -> CreateTargetParams {
+/// A headed session's pages are background tabs of its window; a headless
+/// page keeps a window of its own, so every page goes on rendering.
+fn blank_page(headless: bool) -> CreateTargetParams {
     let mut params = CreateTargetParams::new("about:blank");
-    params.new_window = Some(true);
+    params.new_window = headless.then_some(true);
     params.background = Some(true);
     params
 }
@@ -5762,7 +5806,19 @@ mod tests {
             mouse_simulator: super::BezierMouseSimulator::new(behavioral.mouse.clone()),
             session_jitter: behavioral.session_jitter,
             session_random: super::Mutex::new(super::SessionRandom::new(1)),
+            headless: true,
+            input_gate: super::Mutex::new(()),
         }
+    }
+
+    #[test]
+    fn headed_pages_open_as_tabs_and_headless_pages_as_windows() {
+        let headed = super::blank_page(false);
+        assert_eq!(headed.new_window, None);
+        assert_eq!(headed.background, Some(true));
+        let headless = super::blank_page(true);
+        assert_eq!(headless.new_window, Some(true));
+        assert_eq!(headless.background, Some(true));
     }
 
     #[tokio::test]

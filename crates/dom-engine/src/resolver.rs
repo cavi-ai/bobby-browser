@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use regex::Regex;
 use thiserror::Error;
 use types::{CandidateEvidence, TargetSpec, TextMatch};
@@ -63,6 +65,25 @@ pub fn rank_candidates<'a>(
     candidates: &'a [Candidate],
     policy: &ResolutionPolicy,
 ) -> Result<Vec<(&'a Candidate, CandidateEvidence)>, ResolutionError> {
+    rank(&addressed(target, candidates), candidates, policy)
+}
+
+/// A stamped target as it applies to `candidates`: the stamp replaces the
+/// ordinal while an element carries it; otherwise its name and ordinal apply.
+fn addressed<'a>(target: &'a TargetSpec, candidates: &[Candidate]) -> Cow<'a, TargetSpec> {
+    if crate::control_stamp_decides(target, candidates) {
+        let mut stamped = target.clone();
+        stamped.ordinal = None;
+        return Cow::Owned(stamped);
+    }
+    crate::without_control_stamp(target).map_or(Cow::Borrowed(target), Cow::Owned)
+}
+
+fn rank<'a>(
+    target: &TargetSpec,
+    candidates: &'a [Candidate],
+    policy: &ResolutionPolicy,
+) -> Result<Vec<(&'a Candidate, CandidateEvidence)>, ResolutionError> {
     let regex = match &target.text {
         Some(TextMatch::Regex(pattern)) => {
             if pattern.len() > policy.max_regex_len {
@@ -107,7 +128,8 @@ pub fn resolve_candidates(
     candidates: &[Candidate],
     policy: &ResolutionPolicy,
 ) -> Result<ResolutionDecision, ResolutionError> {
-    let ranked = rank_candidates(target, candidates, policy)?;
+    let target = addressed(target, candidates);
+    let ranked = rank(&target, candidates, policy)?;
     // An explicit ordinal picks one match deterministically, so a large
     // matching set is not ambiguity for it; the bound guards the ranked
     // choice below.

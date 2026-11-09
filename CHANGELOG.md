@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- Form snapshot targets carry the control's stamp, so a control id or target stays on its control when names or ordinals change, and hidden file inputs no longer shift a slot's ordinal.
+- `control_action` activate completes once dispatched when the click removes the control or navigates.
+- `selectOne` waits up to 15 seconds through a loading option list, presses an option only once it holds still, and accepts a shown value spaced differently from the option.
+- `form_snapshot` reports a chosen button of a button group as checked.
+- `inspect` reads a listbox one option per line, so adjacent options no longer redact as a credential.
+- Parallel reads of a static document no longer fail on an HTTP state conflict.
+- A file a widget removed no longer blocks the next upload, and `clear` empties a file control on Chromium.
+- Headed Chromium opens a session's pages as tabs of one window.
+
 ## 0.24.0 - 2026-11-08
 
 ### Added

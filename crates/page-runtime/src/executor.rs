@@ -318,6 +318,7 @@ impl PageRuntime {
             };
             let journal = Arc::clone(journal);
             let prepared_record = prepared_record(&envelope, prepared_result);
+            let reads_only = prepared.artifact.is_none() && prepared.download.is_none();
             let pending = prepared.artifact.take();
             let pending_download = prepared.download.take();
             let observer = self.phase_observer.clone();
@@ -356,20 +357,29 @@ impl PageRuntime {
                     );
                 }
             }
-            if let Err(error) = worker_pool::web_state_or_default(
+            let web_state = worker_pool::web_state_or_default(
                 lease_slot
                     .as_ref()
                     .expect("lease survives to state commit")
                     .worker()
                     .web_state(),
-            )
-            .commit_http_state(
-                envelope.page_id.as_ref().expect("validated page id"),
-                prepared.state_version,
-                prepared.state,
-            )
-            .await
-            {
+            );
+            let state_page = envelope.page_id.as_ref().expect("validated page id");
+            let retried_state = reads_only.then(|| prepared.state.clone());
+            let mut commit = web_state
+                .commit_http_state(state_page, prepared.state_version, prepared.state)
+                .await;
+            // Parallel reads race for the version; a read's state applies at the current one.
+            if let Some(state) = retried_state.filter(|_| {
+                matches!(&commit, Err(error) if error.code == types::ErrorCode::HttpStateConflict)
+            }) {
+                if let Ok(current) = web_state.http_state(state_page).await {
+                    commit = web_state
+                        .commit_http_state(state_page, current.version, state)
+                        .await;
+                }
+            }
+            if let Err(error) = commit {
                 let (outcome, terminal_durable) = self
                     .finish_failure_durable(
                         &envelope,
