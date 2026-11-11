@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- The TypeScript SDK and the source build require Node 24 or later.
+
+### Security
+
+- Updated `rustls`, `rustls-webpki`, `webpki-root-certs` and `quinn-proto` past their open advisories.
+
 ### Fixed
 
 - Form snapshot targets carry the control's stamp, so a control id or target stays on its control when names or ordinals change, and hidden file inputs no longer shift a slot's ordinal.

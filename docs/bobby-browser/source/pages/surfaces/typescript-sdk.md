@@ -4,7 +4,7 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # TypeScript SDK
 
-`@cavi-ai/bobby-browser` is a typed client for the [HTTP API](http-api.md). It requires Node 22 or later.
+`@cavi-ai/bobby-browser` is a typed client for the [HTTP API](http-api.md). It requires Node 24 or later.
 
 ```bash
 npm install @cavi-ai/bobby-browser
