@@ -2035,112 +2035,25 @@ async fn act_fill(
     intent_target: &TargetSpec,
     value: &ControlAction,
 ) -> Result<Vec<Evidence>, CommandError> {
-    let (selector, target) = action_target(candidate, intent_target);
-    match value {
-        // Worker-pool has no select API; SelectOne is typed via TypeTextCommand.
-        ControlAction::SetText { value, clear_first } => {
-            browser
-                .type_text(
-                    page_id,
-                    &TypeTextCommand {
-                        selector,
-                        target: Some(target),
-                        value: value.clone(),
-                        clear_first: *clear_first,
-                        expected_url: None,
-                    },
-                )
-                .await
-        }
-        ControlAction::SelectOne { value } => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: ControlAction::SelectOne {
-                            value: value.clone(),
-                        },
-                    },
-                )
-                .await
-        }
-        ControlAction::SetChecked { checked } => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: ControlAction::SetChecked { checked: *checked },
-                    },
-                )
-                .await
-        }
-        ControlAction::SetFiles { paths } => {
-            browser
-                .upload_files(
-                    page_id,
-                    &UploadFilesCommand {
-                        selector,
-                        target: Some(target),
-                        paths: paths.clone(),
-                    },
-                )
-                .await
-        }
-        ControlAction::SelectMany { values } => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: ControlAction::SelectMany {
-                            values: values.clone(),
-                        },
-                    },
-                )
-                .await
-        }
-        ControlAction::Clear => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: ControlAction::Clear,
-                    },
-                )
-                .await
-        }
-        ControlAction::PasswordManagerFill => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: ControlAction::PasswordManagerFill,
-                    },
-                )
-                .await
-        }
-        ControlAction::Credential { .. } => {
-            browser
-                .control_action(
-                    page_id,
-                    &ControlActionCommand {
-                        target: form_control_target(candidate, intent_target)?,
-                        action: value.clone(),
-                    },
-                )
-                .await
-        }
-        ControlAction::Activate => Err(CommandError {
+    if matches!(value, ControlAction::Activate) {
+        return Err(CommandError {
             code: ErrorCode::InvalidRequest,
             message: "activate is not valid for fill; use control_action instead".into(),
             layer: ErrorLayer::Page,
             retryable: false,
-        }),
+        });
     }
+    // One route. The control-action module picks the page primitive and
+    // returns one evidence record for verification.
+    browser
+        .control_action(
+            page_id,
+            &ControlActionCommand {
+                target: form_control_target(candidate, intent_target)?,
+                action: value.clone(),
+            },
+        )
+        .await
 }
 
 fn form_control_target(
