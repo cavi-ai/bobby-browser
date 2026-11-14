@@ -803,7 +803,7 @@ fn describe_parameters(name: &str, schema: &mut Value) {
 
 fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
     Some(match (tool, property) {
-        ("runtime_info", "engine") => "Inspect this engine's capabilities without starting a browser; omit for the default engine.",
+        ("runtime_info", "engine") => "Engine to inspect; default if omitted.",
         ("download_url", "url") => "URL to download.",
         ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
         ("download_url", "saveAs") => "Absolute path to save the file to.",
@@ -1028,6 +1028,14 @@ fn compact_advertised_node(schema: &mut Value) {
                 if !INSTANCE_KEYWORDS.contains(&key.as_str()) {
                     compact_advertised_node(value);
                 }
+            }
+            if fields.get("type") == Some(&json!("string"))
+                && fields
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+            {
+                fields.remove("type");
             }
             if let Some(folded) = folded_nullable(fields) {
                 *schema = folded;
@@ -3972,7 +3980,10 @@ mod tests {
             properties["nullFirst"],
             json!({"type":["integer","null"],"minimum":1})
         );
-        assert_eq!(properties["choice"], original["properties"]["choice"]);
+        assert_eq!(
+            properties["choice"],
+            json!({"oneOf":[{"enum":["a"]},{"type":"null"}]})
+        );
         assert_eq!(properties["pinned"], original["properties"]["pinned"]);
         assert_eq!(properties["described"], original["properties"]["described"]);
         assert_eq!(schema["examples"], original["examples"]);
@@ -3985,6 +3996,57 @@ mod tests {
             json!({"choice":null}),
             json!({"choice":"b"}),
             json!({"pinned":"b"}),
+        ] {
+            assert_eq!(
+                accepts(&schema, &instance),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_removes_only_redundant_string_enum_types() {
+        let mut schema = json!({
+            "type":"object",
+            "properties":{
+                "choice":{"type":"string","enum":["a","long"],"maxLength":3},
+                "mixed":{"type":"string","enum":["a",1]},
+                "empty":{"type":"string","enum":[]}
+            },
+            "examples":[{"type":"string","enum":["a"]}],
+            "default":{"type":"string","enum":["a"]}
+        });
+        let original = schema.clone();
+        compact_advertised_node(&mut schema);
+        assert_eq!(
+            schema["properties"]["choice"],
+            json!({"enum":["a","long"],"maxLength":3})
+        );
+        assert_eq!(
+            schema["properties"]["mixed"],
+            original["properties"]["mixed"]
+        );
+        assert_eq!(
+            schema["properties"]["empty"],
+            original["properties"]["empty"]
+        );
+        for key in ["examples", "default"] {
+            assert_eq!(schema[key], original[key]);
+        }
+        let mut instance_data =
+            json!({"const":{"type":"string","enum":["a"]},"enum":[{"type":"string","enum":["a"]}]});
+        let original_data = instance_data.clone();
+        compact_advertised_node(&mut instance_data);
+        assert_eq!(instance_data, original_data);
+        for instance in [
+            json!({}),
+            json!({"choice":"a"}),
+            json!({"choice":"b"}),
+            json!({"choice":"long"}),
+            json!({"choice":1}),
+            json!({"mixed":1}),
+            json!({"mixed":"a"}),
         ] {
             assert_eq!(
                 accepts(&schema, &instance),
