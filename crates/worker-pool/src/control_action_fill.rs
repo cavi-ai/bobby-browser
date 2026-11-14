@@ -13,8 +13,8 @@ use types::{
 };
 
 use crate::{
-    PASSWORD_MANAGER_FILL_POLL, PASSWORD_MANAGER_FILL_WAIT, control_action_evidence,
-    password_manager_filled, target_specs_equivalent, validate_control_action,
+    control_action_evidence, password_manager_filled, target_specs_equivalent,
+    validate_control_action, PASSWORD_MANAGER_FILL_POLL, PASSWORD_MANAGER_FILL_WAIT,
 };
 
 /// Page primitives a browser adapter performs. The shared sequence lives in
@@ -238,6 +238,8 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
                 .await?;
         }
         ControlAction::PasswordManagerFill => {
+            // Only watches: the field is never clicked, focused, or typed
+            // into, which would raise the browser's own credential dialogs.
             let deadline = tokio::time::Instant::now() + PASSWORD_MANAGER_FILL_WAIT;
             while tokio::time::Instant::now() < deadline {
                 match adapter.describe(&prepared, &command.target).await {
@@ -388,13 +390,13 @@ fn revealed_controls(before: &FormSnapshot, after: Option<&FormSnapshot>) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use super::*;
     use types::{
-        FORM_SNAPSHOT_SCHEMA_VERSION, FormControlConstraints, FormControlOperation,
-        FormControlValidity,
+        FormControlConstraints, FormControlOperation, FormControlValidity,
+        FORM_SNAPSHOT_SCHEMA_VERSION,
     };
 
     struct FakeAdapter {

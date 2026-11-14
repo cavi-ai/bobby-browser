@@ -68,7 +68,7 @@ use types::{
 use zeroize::Zeroizing;
 
 use crate::{
-    process_registry, resolve_upload_paths, session_download_dir,
+    process_registry, session_download_dir,
     targeting::{
         gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
         resolve_target as resolve_browser_target, resolve_target_with_visibility,
@@ -3179,13 +3179,28 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
         before: &types::FormControl,
         paths: &[String],
     ) -> Result<(), CommandError> {
-        let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-        let paths: Vec<String> = resolve_upload_paths(&self.upload_roots, &requested)?
-            .into_iter()
+        let resolved_uploads = crate::upload::resolve_upload_sources(
+            paths,
+            &self.upload_roots,
+            Some(&self.artifacts),
+            Some(&self.session_id),
+            Some(&self.download_dir),
+        )
+        .await?;
+        let mut upload_cache = self.upload_cache.lock().await;
+        let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
+        let path_strings = resolved_uploads
+            .paths
+            .iter()
             .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        refuse_shown_files(&before.state, &paths)?;
-        prepared.resolved.set_files(&prepared.page, paths).await?;
+            .collect::<Vec<_>>();
+        refuse_shown_files(&before.state, &path_strings)?;
+        let _digests = crate::upload::content_digests(&resolved_uploads.paths)?;
+        upload_cache.commit(resolved_uploads);
+        prepared
+            .resolved
+            .set_files(&prepared.page, path_strings)
+            .await?;
         Ok(())
     }
 
