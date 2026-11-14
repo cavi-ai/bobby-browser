@@ -349,15 +349,19 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                // CHANGELOG 0.15.0: "exactly one of the two is required". A
-                // follow with neither is an unverified click -- reject it
-                // rather than defaulting a wait silently, which would let the
-                // caller believe a destination was checked when none was.
-                let Some(expected_destination) = input.expected_destination else {
-                    let mut response = invalid_params_reason(id, "malformedArguments");
-                    response["error"]["message"] =
-                        json!(INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE);
-                    return response;
+                // A follow with neither spelling is an unverified click. Both
+                // spellings together are the same rejection. The module owns
+                // that rule; do not default a wait here.
+                let expected_destination = match crate::argument_contracts::exactly_one_follow_wait(
+                    input.expected_destination,
+                    input.expected_state,
+                ) {
+                    Ok(wait) => wait,
+                    Err(message) => {
+                        let mut response = invalid_params_reason(id, "malformedArguments");
+                        response["error"]["message"] = json!(message);
+                        return response;
+                    }
                 };
                 let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 let intent = types::IntentCommand::Follow(types::FollowIntent {
@@ -538,14 +542,6 @@ impl Server {
             .await
     }
 }
-
-/// Verbatim `error.message` when `intent_follow` names neither
-/// `expectedState` nor `expectedDestination`. `error.data.reason` stays
-/// `malformedArguments`; this replaces only the derived message with the
-/// exact fix so an agent reading `error.message` alone still sees the shape.
-const INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE: &str = "intent_follow needs exactly one of \
-    expectedState or expectedDestination (a WaitForCommand: {condition, timeoutMs}); e.g. \
-    expectedState: {\"condition\":{\"kind\":\"url\",\"matcher\":{\"kind\":\"contains\",\"value\":\"/next\"}},\"timeoutMs\":10000}";
 
 fn project_verified_action_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
     if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
@@ -867,7 +863,19 @@ mod tests {
                 arguments.insert(key.clone(), dummy);
             }
             if name == "intent_follow" {
-                arguments.remove("expectedDestination");
+                let both = serde_json::from_value::<crate::tool_args::IntentFollowArgs>(
+                    Value::Object(arguments.clone()),
+                )
+                .expect("both follow spellings parse");
+                assert!(
+                    crate::argument_contracts::exactly_one_follow_wait(
+                        both.expected_destination,
+                        both.expected_state,
+                    )
+                    .is_err(),
+                    "both spellings are not exactly one"
+                );
+                arguments.remove(crate::argument_contracts::EXPECTED_STATE);
             }
             let arguments = Value::Object(arguments);
 
