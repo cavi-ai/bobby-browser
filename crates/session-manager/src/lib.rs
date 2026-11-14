@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use config::BrowserSelectionConfig;
 use tokio::sync::RwLock;
 use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
 use worker_pool::{choose_session_engine, WorkerPool};
@@ -17,7 +16,6 @@ pub struct SessionManager {
     inner: Arc<RwLock<HashMap<SessionId, SessionState>>>,
     workers: Option<Arc<WorkerPool>>,
     release_timeout: Duration,
-    browser_selection: BrowserSelectionConfig,
 }
 
 impl Default for SessionManager {
@@ -26,7 +24,6 @@ impl Default for SessionManager {
             inner: Arc::default(),
             workers: None,
             release_timeout: DEFAULT_RELEASE_TIMEOUT,
-            browser_selection: BrowserSelectionConfig::default(),
         }
     }
 }
@@ -41,11 +38,6 @@ impl SessionManager {
 
     pub fn with_release_timeout(mut self, release_timeout: Duration) -> Self {
         self.release_timeout = release_timeout;
-        self
-    }
-
-    pub fn with_browser_selection(mut self, selection: BrowserSelectionConfig) -> Self {
-        self.browser_selection = selection;
         self
     }
 
@@ -77,8 +69,9 @@ impl SessionManager {
         };
         if let Some(workers) = &self.workers {
             if let Some(engine) = session.execution_policy.engine {
-                let chosen = choose_session_engine(self.browser_selection.clone(), Some(engine))
-                    .map_err(|error| RuntimeError::InvalidRequest(error.to_string()))?;
+                let chosen =
+                    choose_session_engine(config::BrowserSelectionConfig::default(), Some(engine))
+                        .map_err(|error| RuntimeError::InvalidRequest(error.to_string()))?;
                 workers
                     .pin_session_engine(&session.id, chosen.preference)
                     .await
