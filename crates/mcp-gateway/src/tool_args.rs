@@ -323,17 +323,15 @@ intent_args!(IntentWaitForStateArgs {
     timeout_ms: u64,
 });
 
-// `expectedDestination`/`expectedState` is `Option` here only so the dispatch
-// arm can tell "absent" apart from "malformed" and reject the former with a
-// message naming the exact fix: exactly one of the two is required.
-// Do not add a default here or in the dispatch arm: a follow with neither is
-// an unverified click, and defaulting a wait silently would misreport one as
-// verified.
+// Both spellings stay `Option` so serde accepts neither and both. Exactly one
+// is decided by `argument_contracts::exactly_one_follow_wait`, not by this
+// struct. Do not default a wait here: a follow with neither is an unverified
+// click, and a default would misreport it as verified.
 intent_args!(IntentFollowArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
-    #[serde(alias = "expectedState")]
     expected_destination: Option<types::WaitForCommand>,
+    expected_state: Option<types::WaitForCommand>,
     evidence_detail: Option<EvidenceDetail>,
     boundary: Option<bool>,
     auto_checkpoint: Option<bool>,
@@ -765,23 +763,35 @@ mod tests {
             "condition":{"kind":"url","matcher":{"kind":"contains","value":"/reports"}},
             "timeoutMs":30_000
         });
-        for key in ["expectedDestination", "expectedState"] {
+        for key in crate::argument_contracts::FOLLOW_WAIT_FIELDS {
             let mut value = base.clone();
             value[key] = wait.clone();
-            serde_json::from_value::<IntentFollowArgs>(value)
+            let args = serde_json::from_value::<IntentFollowArgs>(value)
                 .unwrap_or_else(|error| panic!("{key} must parse: {error}"));
+            crate::argument_contracts::exactly_one_follow_wait(
+                args.expected_destination,
+                args.expected_state,
+            )
+            .unwrap_or_else(|error| panic!("{key} must be the one wait: {error}"));
         }
         let mut both = base.clone();
-        both["expectedDestination"] = wait.clone();
-        both["expectedState"] = wait;
-        assert!(serde_json::from_value::<IntentFollowArgs>(both).is_err());
-        // Neither spelling: this struct alone must not reject it (it stays
-        // `Option` so the dispatch arm -- not `bounded_parse` -- can name the
-        // fix instead of a generic `malformedArguments`). See
-        // `intent_follow_without_expected_state_names_the_fix` in
-        // `tests/workflow_handles.rs` for the end-to-end rejection message.
+        both[crate::argument_contracts::EXPECTED_DESTINATION] = wait.clone();
+        both[crate::argument_contracts::EXPECTED_STATE] = wait;
+        let args = serde_json::from_value::<IntentFollowArgs>(both)
+            .expect("both spellings parse; the contract rejects them");
+        assert!(crate::argument_contracts::exactly_one_follow_wait(
+            args.expected_destination,
+            args.expected_state,
+        )
+        .is_err());
+        // Neither spelling still parses. Dispatch names the fix through
+        // `exactly_one_follow_wait` instead of a generic `malformedArguments`.
         let args = serde_json::from_value::<IntentFollowArgs>(base)
             .expect("expectedDestination-less intent_follow still parses");
-        assert!(args.expected_destination.is_none());
+        assert!(crate::argument_contracts::exactly_one_follow_wait(
+            args.expected_destination,
+            args.expected_state,
+        )
+        .is_err());
     }
 }
