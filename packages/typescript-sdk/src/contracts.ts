@@ -341,8 +341,8 @@ export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; e
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /**
  * Follow a control and wait for the destination.
- * Pass exactly one of `expectedState` or `expectedDestination` (both spellings are accepted; both or neither is rejected).
- * The wire command records that wait as `expectedDestination`.
+ * MCP `intent_follow` accepts exactly one of `expectedState` or `expectedDestination` (both spellings are accepted; both or neither is rejected).
+ * This wire command records that wait as `expectedDestination`.
  * Set `boundary` when activation may mutate state or trigger a side effect
  * (same meaning as {@link ClickCommand.boundary}).
  */
