@@ -803,6 +803,7 @@ fn describe_parameters(name: &str, schema: &mut Value) {
 
 fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
     Some(match (tool, property) {
+        ("runtime_info", "engine") => "Inspect this engine's capabilities without starting a browser; omit for the default engine.",
         ("download_url", "url") => "URL to download.",
         ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
         ("download_url", "saveAs") => "Absolute path to save the file to.",
