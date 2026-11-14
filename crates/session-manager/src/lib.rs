@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::RwLock;
 use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
-use worker_pool::{EnginePreference, WorkerPool};
+use worker_pool::{choose_session_engine, WorkerPool};
 
 /// Longest a session close waits on browser-side teardown before it unregisters
 /// the session anyway.
@@ -69,8 +69,11 @@ impl SessionManager {
         };
         if let Some(workers) = &self.workers {
             if let Some(engine) = session.execution_policy.engine {
+                let chosen =
+                    choose_session_engine(config::BrowserSelectionConfig::default(), Some(engine))
+                        .map_err(|error| RuntimeError::InvalidRequest(error.to_string()))?;
                 workers
-                    .pin_session_engine(&session.id, EnginePreference::for_engine(engine))
+                    .pin_session_engine(&session.id, chosen.preference)
                     .await
                     .map_err(|_| {
                         RuntimeError::InvalidRequest(format!(
