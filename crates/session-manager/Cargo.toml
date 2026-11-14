@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+config.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types.workspace = true

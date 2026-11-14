@@ -4488,6 +4488,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "companion-protocol",
+ "config",
  "tokio",
  "tracing",
  "types",
@@ -5934,6 +5935,7 @@ dependencies = [
  "tracing-subscriber",
  "types",
  "url",
+ "uuid",
  "zeroize",
 ]
 

@@ -19,6 +19,7 @@ pub mod policy;
 pub mod process_registry;
 pub mod secret_material;
 mod selection;
+mod session_engine;
 mod skill_adapter;
 mod targeting;
 pub mod typed_focus;
@@ -68,6 +69,7 @@ pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_LEASE_LAUNCH_TIMEOUT, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
 };
+pub use session_engine::{choose_session_engine, ChosenSessionEngine, SessionEngineError};
 pub use skill_adapter::{
     skill_engine, ChromiumSkillAdapter, FirefoxSkillAdapter,
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,

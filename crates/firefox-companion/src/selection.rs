@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use types::{CommandError, ErrorCode, ErrorLayer, ProfileId, SessionId};
 use url::Url;
 use worker_pool::{
-    BrowserWorker, BrowserWorkerSelector, ChromiumWorkerFactory, EnginePreference,
+    choose_session_engine, BrowserWorker, BrowserWorkerSelector, ChromiumWorkerFactory,
     FactoryRegistration, RequiredCapabilities, SelectedWorkerFactory, WorkerFactory,
 };
 
@@ -1725,6 +1725,9 @@ fn compose_worker_factory_inner(
     enrollment: Option<EnrolledFirefoxProfile>,
     warm: bool,
 ) -> Result<Arc<dyn WorkerFactory>> {
+    let chosen = choose_session_engine(selection, None)?;
+    let selection = chosen.selection;
+    let preference = chosen.preference;
     let firefox_artifacts = ArtifactStore::new(
         config.browser.artifacts_dir.clone(),
         config.browser.max_artifact_bytes,
@@ -1878,7 +1881,6 @@ fn compose_worker_factory_inner(
             registration.factory,
         )
     }));
-    let preference = preference(selection.preference)?;
     let selector = Arc::new(BrowserWorkerSelector::new(
         registrations,
         RequiredCapabilities::default(),
@@ -1892,40 +1894,6 @@ fn compose_worker_factory_inner(
         );
     }
     Ok(Arc::new(SelectedWorkerFactory::new(selector, preference)))
-}
-
-fn preference(config: EnginePreferenceConfig) -> Result<EnginePreference> {
-    Ok(match config {
-        EnginePreferenceConfig::ManagedChromium => EnginePreference::ManagedChromium,
-        EnginePreferenceConfig::Exact { engine, profile_id } => {
-            let engine = browser_engine(engine);
-            let profile_id = match engine {
-                // A Chromium exact selection's profile id already picked the
-                // durable-vs-disposable user-data-dir when the worker
-                // factory was composed (see chromium_durable_profile_id
-                // above); there is only ever one Chromium registration, so
-                // routing needs no profile_id to match against, and the
-                // Firefox-only ProfileId (a UUID) cannot carry an arbitrary
-                // Chromium profile name anyway.
-                BrowserEngine::Chromium => None,
-                _ => profile_id
-                    .map(|value| uuid::Uuid::parse_str(&value).map(ProfileId))
-                    .transpose()?,
-            };
-            EnginePreference::Exact { engine, profile_id }
-        }
-        EnginePreferenceConfig::Prefer { engines } => EnginePreference::Prefer {
-            engines: engines.into_iter().map(browser_engine).collect(),
-        },
-    })
-}
-
-fn browser_engine(value: BrowserEngineConfig) -> BrowserEngine {
-    match value {
-        BrowserEngineConfig::Firefox => BrowserEngine::Firefox,
-        BrowserEngineConfig::Chromium => BrowserEngine::Chromium,
-        BrowserEngineConfig::WebKit => BrowserEngine::WebKit,
-    }
 }
 
 pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
@@ -2028,26 +1996,10 @@ pub fn resolve_browser_selection_with(
     env: Option<&str>,
     persisted_path: Option<&Path>,
 ) -> Result<(BrowserSelectionConfig, SelectionSource)> {
-    resolve_declared_selection(env, persisted_path)
-        .map(|(selection, source)| (startable(selection), source))
-}
-
-/// A Firefox preference with no enrolled profile has nothing to launch;
-/// managed Chromium needs no enrollment, so the runtime starts on it until a
-/// profile is paired.
-fn startable(mut selection: BrowserSelectionConfig) -> BrowserSelectionConfig {
-    if selection.firefox.is_empty()
-        && matches!(
-            selection.preference,
-            EnginePreferenceConfig::Exact {
-                engine: BrowserEngineConfig::Firefox,
-                ..
-            }
-        )
-    {
-        selection.preference = EnginePreferenceConfig::ManagedChromium;
-    }
-    selection
+    resolve_declared_selection(env, persisted_path).and_then(|(selection, source)| {
+        let chosen = choose_session_engine(selection, None)?;
+        Ok((chosen.selection, source))
+    })
 }
 
 fn resolve_declared_selection(
@@ -3157,6 +3109,8 @@ mod tests {
     async fn unsatisfiable_exact_firefox_preference_fails_at_composition() {
         let config = AppConfig::default();
         let profile_id = ProfileId::new();
+        let enrolled = ProfileId::new();
+        let root = tempfile::tempdir().unwrap();
         let error = match compose_worker_factory(
             &config,
             BrowserSelectionConfig {
@@ -3164,7 +3118,17 @@ mod tests {
                     engine: BrowserEngineConfig::Firefox,
                     profile_id: Some(profile_id.0.to_string()),
                 },
-                firefox: Vec::new(),
+                firefox: vec![FirefoxCompanionConfig {
+                    profile_id: enrolled.0.to_string(),
+                    bidi_url: "ws://127.0.0.1:9222/session".into(),
+                    profile_dir: root.path().join("missing-firefox-profile"),
+                    companion_bind: "127.0.0.1:0".into(),
+                    descriptor_path: root.path().join("firefox-descriptor.json"),
+                    attachment_only: false,
+                    timeout_ms: 1,
+                    pairing_code_ttl_ms: 1_000,
+                    attachment_ttl_ms: 1_000,
+                }],
                 chromium: Vec::new(),
             },
         ) {
