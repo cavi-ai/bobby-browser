@@ -271,6 +271,20 @@ async fn changed_fields(
     }])
 }
 
+async fn network_quiet(page_id: &PageId, browser: &dyn IntentBrowser, timeout_ms: u64) -> bool {
+    let quiet = WaitForCommand {
+        condition: WaitCondition::NetworkQuiet {
+            idle_ms: NETWORK_QUIET_MS,
+            max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: true,
+        },
+        timeout_ms,
+    };
+    browser.wait_for(page_id, &quiet).await.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,18 +311,4 @@ mod tests {
         };
         assert!(!same_fields(&changed));
     }
-}
-
-async fn network_quiet(page_id: &PageId, browser: &dyn IntentBrowser, timeout_ms: u64) -> bool {
-    let quiet = WaitForCommand {
-        condition: WaitCondition::NetworkQuiet {
-            idle_ms: NETWORK_QUIET_MS,
-            max_in_flight: 0,
-            ignore_url_substrings: Vec::new(),
-            ignore_resource_types: Vec::new(),
-            ignore_long_lived: true,
-        },
-        timeout_ms,
-    };
-    browser.wait_for(page_id, &quiet).await.is_ok()
 }
