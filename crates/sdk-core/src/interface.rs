@@ -459,6 +459,37 @@ impl AuthenticatedRuntime {
 
 #[async_trait]
 impl RuntimeInterface for AuthenticatedRuntime {
+    async fn runtime_info_for_engine(
+        &self,
+        ctx: RequestContext,
+        engine: types::SkillBrowserEngine,
+    ) -> InterfaceResult<RuntimeInfo> {
+        let mut info = self.runtime_info(ctx).await?;
+        info.engine_scope = Some(engine);
+        info.capabilities.retain(|c| {
+            c != "headless-chromium"
+                && c != "firefox-background-attachment"
+                && !c.starts_with("engine:")
+        });
+        if let Some((chromium, firefox, features)) = self
+            .inner
+            .workers
+            .as_ref()
+            .and_then(|w| w.for_engine_info(engine))
+        {
+            if chromium {
+                info.capabilities.push("headless-chromium".into());
+            }
+            if firefox {
+                info.capabilities
+                    .push("firefox-background-attachment".into());
+            }
+            let features: std::collections::BTreeSet<_> =
+                features.iter().flat_map(|s| s.capabilities()).collect();
+            info.capabilities.extend(features);
+        }
+        Ok(info)
+    }
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::RuntimeInfo)?;

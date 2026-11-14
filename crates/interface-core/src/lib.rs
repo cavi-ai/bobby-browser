@@ -50,6 +50,24 @@ pub type InterfaceResult<T> = Result<T, InterfaceError>;
 pub trait RuntimeInterface: Send + Sync {
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo>;
 
+    async fn runtime_info_for_engine(
+        &self,
+        ctx: RequestContext,
+        _engine: types::SkillBrowserEngine,
+    ) -> InterfaceResult<RuntimeInfo> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "engine-scoped runtime info is not supported".into(),
+            correlation_id: ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
+
     /// Authorizes `operation` against the caller's capability set without
     /// performing it. Lets read surfaces gate a compound request on an
     /// operation whose capability differs from the method that serves it.

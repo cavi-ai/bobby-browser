@@ -56,6 +56,97 @@ impl WorkerFactory for FailOnceFactory {
 
 struct NamedFactory(&'static str);
 
+struct SafeFirefox(Arc<AtomicUsize>);
+
+#[async_trait]
+impl WorkerFactory for SafeFirefox {
+    fn enforces_headless_chromium(&self) -> bool {
+        true
+    }
+    fn enforces_background_firefox_attachment(&self) -> bool {
+        true
+    }
+    async fn launch(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        unreachable!("scope inspection must not launch")
+    }
+}
+
+#[test]
+fn scoped_info_checks_all_candidates_without_launch_or_default_fallback() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let safe = || {
+        FactoryRegistration::negotiated(
+            BrowserEngine::Firefox,
+            None,
+            Arc::new(SafeFirefox(calls.clone())),
+        )
+    };
+    let selected = |registrations| {
+        SelectedWorkerFactory::new(
+            Arc::new(BrowserWorkerSelector::new(
+                registrations,
+                RequiredCapabilities::default(),
+            )),
+            EnginePreference::ManagedChromium,
+        )
+    };
+    let root = tempfile::tempdir().unwrap();
+    let chromium = Arc::new(worker_pool::ChromiumWorkerFactory::with_pid_registry_dir(
+        config::BrowserConfig {
+            headless: true,
+            ..Default::default()
+        },
+        root.path().join("pids"),
+    ));
+    let factory = selected(vec![
+        FactoryRegistration::negotiated(BrowserEngine::Chromium, None, chromium),
+        safe(),
+    ]);
+    assert!(factory.enforces_headless_chromium());
+    assert!(!factory.enforces_background_firefox_attachment());
+    assert!(
+        !factory
+            .for_engine_info(SkillBrowserEngine::Firefox)
+            .unwrap()
+            .0
+    );
+    let misregistered = selected(vec![FactoryRegistration::negotiated(
+        BrowserEngine::Chromium,
+        None,
+        Arc::new(SafeFirefox(calls.clone())),
+    )]);
+    assert!(
+        !misregistered
+            .for_engine_info(SkillBrowserEngine::Chromium)
+            .unwrap()
+            .1
+    );
+    assert!(
+        factory
+            .for_engine_info(SkillBrowserEngine::Firefox)
+            .unwrap()
+            .1
+    );
+    assert!(factory
+        .for_engine_info(SkillBrowserEngine::WebKit)
+        .is_none());
+    let mixed = selected(vec![
+        safe(),
+        registration("unsafe", BrowserEngine::Firefox, None, true),
+    ]);
+    assert!(
+        !mixed
+            .for_engine_info(SkillBrowserEngine::Firefox)
+            .unwrap()
+            .1
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 struct NamedWorker {
     id: WorkerId,
     name: &'static str,

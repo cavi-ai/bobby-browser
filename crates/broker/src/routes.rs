@@ -70,12 +70,18 @@ pub(crate) async fn healthz() -> Json<serde_json::Value> {
 async fn runtime_info(
     State(state): State<AppState>,
     Extension(request): Extension<AuthenticatedRequest>,
+    Extension(query): Extension<RuntimeInfoQuery>,
 ) -> Result<Json<types::RuntimeInfo>, ProtocolError> {
-    let mut info = request
-        .runtime
-        .runtime_info(request.context)
-        .await
-        .map_err(ProtocolError::from)?;
+    let mut info = match query.engine {
+        Some(engine) => {
+            request
+                .runtime
+                .runtime_info_for_engine(request.context, engine)
+                .await
+        }
+        None => request.runtime.runtime_info(request.context).await,
+    }
+    .map_err(ProtocolError::from)?;
     for (store, reason) in [
         ("jobJournal", state.scheduler.integrity_issue()),
         ("jobIdempotency", state.job_idempotency.integrity_issue()),
@@ -88,6 +94,11 @@ async fn runtime_info(
         }
     }
     Ok(Json(info))
+}
+
+#[derive(Clone)]
+struct RuntimeInfoQuery {
+    engine: Option<types::SkillBrowserEngine>,
 }
 
 async fn session_capabilities(
@@ -1126,7 +1137,21 @@ pub(crate) async fn validate_request_boundary(
                 | (&Method::POST, "/v1/jobs")
         );
 
-    if path == "/v1/events" {
+    if path == "/v1/runtime" {
+        let engine = match request.uri().query() {
+            None => None,
+            Some("engine=chromium") => Some(types::SkillBrowserEngine::Chromium),
+            Some("engine=firefox") => Some(types::SkillBrowserEngine::Firefox),
+            Some("engine=webKit") => Some(types::SkillBrowserEngine::WebKit),
+            Some(_) => {
+                return Err(ProtocolError::invalid_with(
+                    InterfaceErrorCode::InvalidRequest,
+                    correlation_id,
+                ))
+            }
+        };
+        request.extensions_mut().insert(RuntimeInfoQuery { engine });
+    } else if path == "/v1/events" {
         let query = parse_event_query(request.uri().query(), state, &correlation_id)?;
         request.extensions_mut().insert(query);
     } else if path.starts_with("/v1/sessions/") && path.ends_with("/forms") {

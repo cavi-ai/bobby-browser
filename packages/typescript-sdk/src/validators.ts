@@ -286,7 +286,8 @@ export function isStorageIntegrityIssue(value: unknown): value is StorageIntegri
 }
 
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity"])
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["engineScope", "visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity"])
+    && optional(value, "engineScope", (engine): engine is "chromium" | "firefox" | "webKit" => oneOf(engine, ["chromium", "firefox", "webKit"]))
     && optional(value, "storageIntegrity", (issues): issues is StorageIntegrityIssue[] => Array.isArray(issues) && issues.length <= 4 && issues.every(isStorageIntegrityIssue))
     && isString(value.version)
     && isStringArray(value.capabilities)

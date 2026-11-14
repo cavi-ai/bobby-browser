@@ -544,6 +544,28 @@ async fn runtime_info_calls_the_authenticated_runtime_and_returns_structured_con
 }
 
 #[tokio::test]
+async fn runtime_info_scopes_to_requested_engine_without_fallback() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({"name":"runtime_info","arguments":{"engine":"firefox"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let info = &response["result"]["structuredContent"];
+    assert_eq!(info["engineScope"], "firefox");
+    assert!(!info["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "headless-chromium"));
+    assert_eq!(info["active_sessions"], 0);
+}
+
+#[tokio::test]
 async fn unavailable_or_malformed_tool_calls_fail_without_dispatch() {
     let server = fixture_server(vec![Capability::SessionRead]).await;
     let unavailable = server

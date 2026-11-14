@@ -22,6 +22,13 @@ pub(crate) struct ToolCall {
 pub(crate) struct EmptyArgs {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeInfoArgs {
+    #[serde(default)]
+    pub(crate) engine: Option<types::SkillBrowserEngine>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SessionCreateArgs {
     pub(crate) profile: String,
