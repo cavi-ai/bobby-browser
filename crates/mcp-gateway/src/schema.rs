@@ -539,6 +539,13 @@ pub(crate) fn recovery_status_schema() -> (Value, Vec<&'static str>) {
 }
 
 pub(crate) fn runtime_info_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"engine":{"type":"string","enum":["chromium","firefox","webKit"]}}),
+        vec![],
+    )
+}
+
+pub(crate) fn empty_schema() -> (Value, Vec<&'static str>) {
     (json!({}), vec![])
 }
 
@@ -1276,6 +1283,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "runtime_info" => object(
             json!({
                 "version":string(0, 256),
+                "engineScope":{"type":"string","enum":["chromium","firefox","webKit"]},
                 "capabilities":array(string(0, 64), 32),
                 "active_sessions":{"type":"integer","minimum":0},
                 "queued_jobs":{"type":"integer","minimum":0},

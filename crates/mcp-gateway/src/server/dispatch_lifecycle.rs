@@ -50,26 +50,27 @@ impl Server {
     ) -> Value {
         let result = match call.name.as_str() {
             "runtime_info" => {
-                if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
-                    return invalid_params_reason(id, "malformedArguments");
-                }
+                let input: RuntimeInfoArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
                 // Principal-scoped, so it is added here rather than on the
                 // runtime-wide `RuntimeInfo`. Without it a caller cannot see
                 // the credential expiry coming.
                 let credential_expires_at = self.handle.expires_at();
-                self.runtime
-                    .runtime_info(context)
-                    .await
-                    .and_then(to_json)
-                    .map(|mut value| {
-                        if let Some(object) = value.as_object_mut() {
-                            object.insert(
-                                "credentialExpiresAt".to_owned(),
-                                json!(credential_expires_at.to_rfc3339()),
-                            );
-                        }
-                        value
-                    })
+                let info = match input.engine {
+                    Some(engine) => self.runtime.runtime_info_for_engine(context, engine).await,
+                    None => self.runtime.runtime_info(context).await,
+                };
+                info.and_then(to_json).map(|mut value| {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "credentialExpiresAt".to_owned(),
+                            json!(credential_expires_at.to_rfc3339()),
+                        );
+                    }
+                    value
+                })
             }
             "session_capabilities" => {
                 let input: SessionCloseArgs = match bounded_parse(call.arguments) {

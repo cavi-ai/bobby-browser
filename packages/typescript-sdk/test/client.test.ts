@@ -18,6 +18,16 @@ const CORRELATION_ID = "00000000-0000-4000-8000-000000000008";
 const PAGE_ID = "00000000-0000-4000-8000-000000000009";
 const JOB_ID = "job_00000000-0000-4000-8000-000000000010";
 
+test("runtimeInfoForEngine sends and accepts the requested scope", async () => {
+  await withServer((request, response) => {
+    assert.equal(request.url, "/v1/runtime?engine=firefox");
+    writeJson(response, 200, { engineScope: "firefox", version: "test", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 1 });
+  }, async (baseUrl) => {
+    const info = await new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN }).runtimeInfoForEngine("firefox");
+    assert.equal(info.engineScope, "firefox");
+  });
+});
+
 async function withServer(
   handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
   run: (baseUrl: string) => Promise<void>,

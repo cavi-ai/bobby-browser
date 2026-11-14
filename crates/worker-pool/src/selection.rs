@@ -421,6 +421,37 @@ impl SelectedWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for SelectedWorkerFactory {
+    fn for_engine_info(
+        &self,
+        engine: SkillBrowserEngine,
+    ) -> Option<(bool, bool, Vec<crate::EngineFeatureSupport>)> {
+        let candidates = self.selector.find(&EnginePreference::for_engine(engine));
+        if candidates.is_empty() {
+            return None;
+        }
+        Some((
+            engine == SkillBrowserEngine::Chromium
+                && candidates
+                    .iter()
+                    .all(|r| r.factory.enforces_headless_chromium()),
+            engine == SkillBrowserEngine::Firefox
+                && candidates
+                    .iter()
+                    .all(|r| r.factory.enforces_background_firefox_attachment()),
+            candidates
+                .iter()
+                .flat_map(|r| r.factory.engine_feature_support())
+                .filter(|feature| {
+                    feature.engine_name()
+                        == match engine {
+                            SkillBrowserEngine::Chromium => "chromium",
+                            SkillBrowserEngine::Firefox => "firefox",
+                            SkillBrowserEngine::WebKit => "webkit",
+                        }
+                })
+                .collect(),
+        ))
+    }
     fn enforces_background_firefox_attachment(&self) -> bool {
         let candidates = self.selector.find(&self.preference);
         !candidates.is_empty()
