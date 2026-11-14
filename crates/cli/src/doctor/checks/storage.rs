@@ -590,6 +590,7 @@ mod slo_tests {
         metrics: &observability::OperationalMetrics,
     ) -> types::RuntimeInfo {
         types::RuntimeInfo {
+            engine_scope: None,
             storage_integrity: Vec::new(),
             version: "0.14.0".to_string(),
             capabilities: Vec::new(),

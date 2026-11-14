@@ -318,8 +318,8 @@ tools! {
     recovery_status { order: 40, title: "Recovery status", description: "Read a workflow's checkpoint and recovery receipts without attempting recovery, or pass sessionId instead of workflowId to list that session's recoverable workflows newest-first. Pass exactly one. Requires recovery:read.",
         capabilities: &[types::Capability::RecoveryRead], operation: Some(types::InterfaceOperation::ReadCheckpoint), schema: recovery_status_schema, args: RecoveryStatusArgs,
         phases: VERIFY, group: Workflow, hints: (true, false, false, false) }
-    runtime_info { order: 41, title: "Runtime info", description: "Version, sessions, and credential expiry. Requires session:read.",
-        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: EmptyArgs,
+    runtime_info { order: 41, title: "Runtime info", description: "Runtime state. Requires session:read.",
+        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: RuntimeInfoArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
     screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
@@ -334,7 +334,7 @@ tools! {
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::CreateSession), schema: session_create_schema, args: SessionCreateArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, false, false, false) }
     session_list { order: 46, title: "List sessions", description: "List sessions visible to this principal. Requires session:read.",
-        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: runtime_info_schema, args: EmptyArgs,
+        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: empty_schema, args: EmptyArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
     toolset_select { order: 47, title: "Select a toolset phase", description: "Narrow tools/list to one phase (explore, act, intent, verify, full). Requires no capability.",
         capabilities: &[], operation: None, schema: toolset_select_schema, args: ToolsetSelectArgs,

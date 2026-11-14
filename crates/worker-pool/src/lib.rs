@@ -267,6 +267,13 @@ fn unsupported_error() -> CommandError {
 
 #[async_trait]
 pub trait WorkerFactory: Send + Sync {
+    /// Guarantees and features for all loaded candidates for an explicit engine.
+    fn for_engine_info(
+        &self,
+        _engine: types::SkillBrowserEngine,
+    ) -> Option<(bool, bool, Vec<EngineFeatureSupport>)> {
+        None
+    }
     /// Configured implementation features. Unknown factories report none;
     /// these declarations never grant authority or change dispatch behavior.
     fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
@@ -664,6 +671,13 @@ impl WorkerPool {
 
     pub fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
         self.inner.factory.engine_feature_support()
+    }
+
+    pub fn for_engine_info(
+        &self,
+        engine: types::SkillBrowserEngine,
+    ) -> Option<(bool, bool, Vec<EngineFeatureSupport>)> {
+        self.inner.factory.for_engine_info(engine)
     }
 
     pub fn enforces_headless_chromium(&self) -> bool {

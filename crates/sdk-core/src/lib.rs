@@ -527,6 +527,7 @@ impl RuntimeService {
             capabilities.extend(features);
         }
         RuntimeInfo {
+            engine_scope: None,
             storage_integrity: [
                 ("commandIdempotency", self.idempotency.integrity_issue()),
                 (

@@ -18,6 +18,12 @@ pub enum PageMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeInfo {
+    #[serde(
+        default,
+        rename = "engineScope",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub engine_scope: Option<crate::SkillBrowserEngine>,
     /// Nonempty means affected execution history requires authoritative repair.
     #[serde(
         default,

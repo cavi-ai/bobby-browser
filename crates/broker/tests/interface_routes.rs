@@ -61,6 +61,14 @@ impl CountingRuntime {
 
 #[async_trait::async_trait]
 impl RuntimeInterface for CountingRuntime {
+    async fn runtime_info_for_engine(
+        &self,
+        ctx: RequestContext,
+        engine: types::SkillBrowserEngine,
+    ) -> InterfaceResult<RuntimeInfo> {
+        self.count();
+        self.inner.runtime_info_for_engine(ctx, engine).await
+    }
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo> {
         self.count();
         self.inner.runtime_info(ctx).await
@@ -156,6 +164,29 @@ impl RuntimeInterface for CountingRuntime {
         self.count();
         self.inner.recover(ctx, workflow).await
     }
+}
+
+#[tokio::test]
+async fn runtime_info_engine_scope_is_dispatched_without_a_session() {
+    let (app, token, calls) =
+        counted_app([Capability::SessionRead], InterfaceConfig::default()).await;
+    let response = app
+        .oneshot(authorized(
+            "GET",
+            "/v1/runtime?engine=firefox",
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["engineScope"], "firefox");
+    assert_eq!(body["active_sessions"], 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 async fn counted_app(

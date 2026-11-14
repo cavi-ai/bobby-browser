@@ -131,6 +131,26 @@ impl BrowserRuntimeClient {
             .await
     }
 
+    /// `GET /v1/runtime?engine=...` — guarantees for loaded candidates of one engine.
+    pub async fn runtime_info_for_engine(
+        &self,
+        engine: crate::SkillBrowserEngine,
+        options: Option<RequestOptions>,
+    ) -> Result<RuntimeInfo, ClientError> {
+        let engine = match engine {
+            crate::SkillBrowserEngine::Chromium => "chromium",
+            crate::SkillBrowserEngine::Firefox => "firefox",
+            crate::SkillBrowserEngine::WebKit => "webKit",
+        };
+        self.json(
+            Method::GET,
+            &format!("/v1/runtime?engine={engine}"),
+            None::<()>,
+            options,
+        )
+        .await
+    }
+
     /// `POST /v1/sessions` — create a browser session.
     pub async fn create_session(
         &self,
@@ -841,6 +861,29 @@ mod tests {
         let info = client.runtime_info(None).await.unwrap();
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_info_for_engine_sends_scope() {
+        async fn scoped(uri: axum::http::Uri) -> impl IntoResponse {
+            assert_eq!(uri.query(), Some("engine=firefox"));
+            axum::Json(
+                json!({"engineScope":"firefox","version":"test","capabilities":[],
+                "active_sessions":0,"queued_jobs":0,"uptime_ms":1}),
+            )
+        }
+        let app = Router::new().route("/v1/runtime", get(scoped));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = BrowserRuntimeClient::new(format!("http://{addr}"), "test-token").unwrap();
+        let info = client
+            .runtime_info_for_engine(crate::SkillBrowserEngine::Firefox, None)
+            .await
+            .unwrap();
+        assert_eq!(info.engine_scope, Some(crate::SkillBrowserEngine::Firefox));
     }
 
     #[tokio::test]
