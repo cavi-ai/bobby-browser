@@ -1,6 +1,7 @@
 mod enter_code;
 mod locate;
 mod page_change;
+pub mod submit_settlement;
 use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -2720,8 +2721,8 @@ async fn execute_submit_and_verify(
                 };
             }
         };
-        let validation_issues = match browser.validation_issues(page_id).await {
-            Ok(issues) => issues,
+        let settlement = match submit_settlement::observe(page_id, browser, None).await {
+            Ok(settlement) => settlement,
             Err(error) => {
                 return IntentOutcome::Failed {
                     error,
@@ -2743,17 +2744,19 @@ async fn execute_submit_and_verify(
                 };
             }
         };
-        let outcome = if validation_issues.is_empty() {
-            types::SubmitSettlementOutcome::Settled
-        } else {
-            settlement_verification = "validationRejected";
-            types::SubmitSettlementOutcome::ValidationRejected
-        };
-        wait_evidence.push(Evidence::SubmitSettlement { outcome });
-        if !validation_issues.is_empty() {
-            wait_evidence.push(Evidence::FormValidation {
-                issues: validation_issues,
-            });
+        // DidNotLook is not an empty issue list: the expected state held, and
+        // the form was not read, so this does not claim the submit settled.
+        if let submit_settlement::Observation::Looked(issues) = settlement.issues {
+            let outcome = if issues.is_empty() {
+                types::SubmitSettlementOutcome::Settled
+            } else {
+                settlement_verification = "validationRejected";
+                types::SubmitSettlementOutcome::ValidationRejected
+            };
+            wait_evidence.push(Evidence::SubmitSettlement { outcome });
+            if !issues.is_empty() {
+                wait_evidence.push(Evidence::FormValidation { issues });
+            }
         }
         wait_evidence.append(&mut inspection_evidence);
     }

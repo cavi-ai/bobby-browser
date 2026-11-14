@@ -22,7 +22,7 @@ const SETTLE_MS: u64 = 2_000;
 #[derive(Default)]
 pub(super) struct Baseline {
     url: Option<String>,
-    fields: Option<Vec<(types::FormControlKind, String)>>,
+    fields: Option<Vec<submit_settlement::Field>>,
 }
 
 pub(super) enum PageChange {
@@ -61,6 +61,7 @@ pub(super) async fn await_change(
         deadline = deadline.min(command_deadline.checked_sub(reserve).unwrap_or(started));
     }
     let mut observations = 0;
+    let mut saw_same_fields = false;
     loop {
         observations += 1;
         // A seen change settles first; a navigation it was part of wins.
@@ -81,36 +82,50 @@ pub(super) async fn await_change(
                 });
             }
         }
-        if fields_changed(page_id, browser, before).await.is_some() {
+        let mut settlement = read_settlement(page_id, browser, before).await;
+        if changed_fields(page_id, browser, &settlement)
+            .await
+            .is_some()
+        {
             network_quiet(page_id, browser, SETTLE_MS).await;
             if let Some(changed) =
                 url_changed(page_id, browser, before, started, observations).await
             {
                 return Ok(changed);
             }
-            if let Some(evidence) = fields_changed(page_id, browser, before).await {
+            settlement = read_settlement(page_id, browser, before).await;
+            if let Some(evidence) = changed_fields(page_id, browser, &settlement).await {
                 return Ok(PageChange::Changed {
                     evidence,
                     verification: "formChanged",
                 });
             }
         }
+        if same_fields(&settlement) {
+            saw_same_fields = true;
+        }
         let now = tokio::time::Instant::now();
         let last = now >= deadline;
         if now.duration_since(started) >= REJECTION_AFTER
             && (last || network_quiet(page_id, browser, CONTROL_POLL_MS * 2).await)
         {
-            let issues = browser.validation_issues(page_id).await.unwrap_or_default();
-            if !issues.is_empty() {
-                return Ok(PageChange::Rejected { issues });
+            if let submit_settlement::Observation::Looked(issues) = settlement.issues {
+                if !issues.is_empty() {
+                    return Ok(PageChange::Rejected { issues });
+                }
             }
         }
         if last {
+            let fields = if saw_same_fields {
+                "the same form fields"
+            } else {
+                "the form was not read"
+            };
             return Err(CommandError {
                 code: ErrorCode::WaitConditionTimedOut,
                 message: format!(
                     "the page did not change within {PAGE_CHANGE_MS}ms: same URL, the submit \
-                     control still shown, the same form fields. A page that confirms in place \
+                     control still shown, {fields}. A page that confirms in place \
                      needs an expectedState"
                 ),
                 layer: ErrorLayer::Page,
@@ -197,59 +212,49 @@ async fn control_left(
     browser.wait_for(page_id, &left).await.ok()
 }
 
-type Field = (types::FormControlKind, String);
-
-fn field(control: &types::FormControl) -> Field {
-    (
-        control.control_kind,
-        control.accessible_name.clone().unwrap_or_default(),
-    )
-}
-
-async fn form_controls(
+async fn form_fields(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
-) -> Option<Vec<types::FormControl>> {
+) -> Option<Vec<submit_settlement::Field>> {
     let snapshot = browser.form_snapshot(page_id).await.ok()??;
-    Some(
-        snapshot
-            .forms
-            .into_iter()
-            .flat_map(|form| form.controls)
-            .chain(snapshot.unowned_controls)
-            .collect(),
-    )
+    Some(submit_settlement::fields(&snapshot))
 }
 
-async fn form_fields(page_id: &PageId, browser: &dyn IntentBrowser) -> Option<Vec<Field>> {
-    let mut fields = form_controls(page_id, browser)
-        .await?
-        .iter()
-        .map(field)
-        .collect::<Vec<_>>();
-    fields.sort_by(|a, b| a.1.cmp(&b.1));
-    Some(fields)
+/// One snapshot for this poll. A failed read is "did not look", not an
+/// unchanged form and not a valid form.
+async fn read_settlement(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    before: &Baseline,
+) -> submit_settlement::SubmitSettlementCheck {
+    match submit_settlement::observe(page_id, browser, before.fields.as_deref()).await {
+        Ok(settlement) => settlement,
+        Err(_) => submit_settlement::SubmitSettlementCheck::unobserved(),
+    }
+}
+
+fn same_fields(settlement: &submit_settlement::SubmitSettlementCheck) -> bool {
+    matches!(
+        settlement.field_change,
+        submit_settlement::Observation::Looked(submit_settlement::FieldChange::Unchanged)
+    )
 }
 
 /// Evidence that the form shows other fields than before the submit: a wait
 /// on the first new field, or the settled submit when fields only left.
-async fn fields_changed(
+/// Unread and unchanged snapshots are not a change.
+async fn changed_fields(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
-    before: &Baseline,
+    settlement: &submit_settlement::SubmitSettlementCheck,
 ) -> Option<Vec<Evidence>> {
-    let before = before.fields.as_ref()?;
-    let controls = form_controls(page_id, browser).await?;
-    let mut now = controls.iter().map(field).collect::<Vec<_>>();
-    now.sort_by(|a, b| a.1.cmp(&b.1));
-    if now == *before {
+    let submit_settlement::Observation::Looked(submit_settlement::FieldChange::Changed {
+        new_target,
+    }) = &settlement.field_change
+    else {
         return None;
-    }
-    let new_field = controls
-        .iter()
-        .filter(|control| !before.contains(&field(control)))
-        .find_map(|control| control.target.as_ref());
-    if let Some(target) = new_field {
+    };
+    if let Some(target) = new_target {
         let shown = WaitForCommand {
             condition: WaitCondition::Element {
                 target: Box::new(enter_code::target_spec(target)),
@@ -264,6 +269,34 @@ async fn fields_changed(
     Some(vec![Evidence::SubmitSettlement {
         outcome: types::SubmitSettlementOutcome::Settled,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_looked_unchanged_form_counts_as_the_same_fields() {
+        let unread = submit_settlement::SubmitSettlementCheck {
+            field_change: submit_settlement::Observation::DidNotLook,
+            issues: submit_settlement::Observation::DidNotLook,
+        };
+        assert!(!same_fields(&unread));
+        let unchanged = submit_settlement::SubmitSettlementCheck {
+            field_change: submit_settlement::Observation::Looked(
+                submit_settlement::FieldChange::Unchanged,
+            ),
+            issues: submit_settlement::Observation::Looked(Vec::new()),
+        };
+        assert!(same_fields(&unchanged));
+        let changed = submit_settlement::SubmitSettlementCheck {
+            field_change: submit_settlement::Observation::Looked(
+                submit_settlement::FieldChange::Changed { new_target: None },
+            ),
+            issues: submit_settlement::Observation::Looked(Vec::new()),
+        };
+        assert!(!same_fields(&changed));
+    }
 }
 
 async fn network_quiet(page_id: &PageId, browser: &dyn IntentBrowser, timeout_ms: u64) -> bool {
