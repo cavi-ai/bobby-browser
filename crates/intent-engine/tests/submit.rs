@@ -16,7 +16,7 @@ struct CallLog {
     waits: Vec<WaitForCommand>,
     inspections: u32,
     inspection_evidence: Vec<Evidence>,
-    validation_issues: Vec<types::FormValidationIssue>,
+    form_snapshot: Option<types::FormSnapshot>,
     post_settlement_calls: Vec<&'static str>,
     /// The page's candidates once a click has landed, when it changes.
     candidates_after_click: Option<Vec<Candidate>>,
@@ -109,13 +109,13 @@ impl IntentBrowser for FakeBrowser {
         Ok(calls.inspection_evidence.clone())
     }
 
-    async fn validation_issues(
+    async fn form_snapshot(
         &self,
         _page_id: &PageId,
-    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
+    ) -> Result<Option<types::FormSnapshot>, CommandError> {
         let mut calls = self.calls.lock().expect("call log");
-        calls.post_settlement_calls.push("validation");
-        Ok(calls.validation_issues.clone())
+        calls.post_settlement_calls.push("form_snapshot");
+        Ok(calls.form_snapshot.clone())
     }
 
     async fn capture_screenshot(
@@ -469,8 +469,80 @@ async fn explicit_submit_accessible_name_remains_authoritative() {
     );
 }
 
-#[tokio::test]
-async fn network_quiet_submit_returns_settled_inspection_without_failing_validation() {
+fn email_snapshot(valid: bool) -> types::FormSnapshot {
+    let control = types::FormControl {
+        id: "email".into(),
+        form_id: Some("apply".into()),
+        group_id: None,
+        target: Some(types::FormControlTarget {
+            attributes: Default::default(),
+            role: "textbox".into(),
+            accessible_name: "Email".into(),
+            ordinal: None,
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        }),
+        control_kind: types::FormControlKind::Email,
+        accessible_name: Some("Email".into()),
+        label: None,
+        description: None,
+        placeholder: None,
+        autocomplete: None,
+        state: types::FormControlState::Empty,
+        constraints: types::FormControlConstraints {
+            required: !valid,
+            read_only: false,
+            disabled: false,
+            pattern: None,
+            min_length: None,
+            max_length: None,
+            min: None,
+            max: None,
+            step: None,
+            multiple: false,
+            accept: Vec::new(),
+        },
+        validity: types::FormControlValidity {
+            will_validate: true,
+            valid,
+            flags: if valid {
+                Vec::new()
+            } else {
+                vec![types::FormValidityFlag::ValueMissing]
+            },
+            message: (!valid).then(|| "Email is required".to_owned()),
+            described_by: Vec::new(),
+        },
+        options: Vec::new(),
+        supported_operations: vec![types::FormControlOperation::SetText],
+    };
+    types::FormSnapshot {
+        schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
+        page_id: PageId::new(),
+        forms: vec![types::FormDescriptor {
+            id: "apply".into(),
+            target: None,
+            accessible_name: Some("Apply".into()),
+            description: None,
+            groups: Vec::new(),
+            controls: vec![control],
+            submit_control_ids: Vec::new(),
+            reset_control_ids: Vec::new(),
+            validity: types::FormValidity {
+                valid,
+                invalid_control_ids: if valid {
+                    Vec::new()
+                } else {
+                    vec!["email".into()]
+                },
+            },
+        }],
+        unowned_controls: Vec::new(),
+        truncated: false,
+    }
+}
+
+async fn settle_network_quiet(snapshot: Option<types::FormSnapshot>) -> IntentOutcome {
     let calls = Arc::new(Mutex::new(CallLog {
         inspection_evidence: vec![Evidence::Inspection {
             selector: None,
@@ -479,26 +551,7 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
             text: "Email is required".into(),
             html: None,
         }],
-        validation_issues: vec![types::FormValidationIssue {
-            control_id: "email".into(),
-            control_kind: types::FormControlKind::Email,
-            accessible_name: Some("Email".into()),
-            target: Some(types::FormControlTarget {
-                attributes: Default::default(),
-                role: "textbox".into(),
-                accessible_name: "Email".into(),
-                ordinal: None,
-                frame_path: Vec::new(),
-                shadow_path: Vec::new(),
-            }),
-            validity: types::FormControlValidity {
-                will_validate: true,
-                valid: false,
-                flags: vec![types::FormValidityFlag::ValueMissing],
-                message: Some("Email is required".into()),
-                described_by: Vec::new(),
-            },
-        }],
+        form_snapshot: snapshot,
         ..CallLog::default()
     }));
     let expected_state = WaitForCommand {
@@ -528,7 +581,6 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
         }],
         wait_error: None,
     };
-
     let outcome = IntentEngine::execute(
         &submit("Submit", Some("button"), expected_state),
         &PageId::new(),
@@ -536,10 +588,6 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
         &VisionContext::default(),
     )
     .await;
-
-    let IntentOutcome::Completed { evidence } = outcome else {
-        panic!("expected settled Completed outcome, got {outcome:?}");
-    };
     let log = calls.lock().expect("call log");
     assert_eq!(
         log.clicks.len(),
@@ -550,16 +598,32 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
     assert_eq!(log.inspections, 1);
     assert_eq!(
         log.post_settlement_calls,
-        ["inspect", "validation"],
-        "the inspection must let the settled UI render before validation is classified"
+        ["inspect", "form_snapshot"],
+        "the inspection must let the settled UI render before the form is read"
     );
-    drop(log);
-    assert!(evidence.iter().any(|item| matches!(
-        item,
-        Evidence::SubmitSettlement {
-            outcome: types::SubmitSettlementOutcome::ValidationRejected
-        }
-    )));
+    outcome
+}
+
+fn settlement_outcomes(evidence: &[Evidence]) -> Vec<types::SubmitSettlementOutcome> {
+    evidence
+        .iter()
+        .filter_map(|item| match item {
+            Evidence::SubmitSettlement { outcome } => Some(*outcome),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn network_quiet_submit_returns_settled_inspection_without_failing_validation() {
+    let outcome = settle_network_quiet(Some(email_snapshot(false))).await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected settled Completed outcome, got {outcome:?}");
+    };
+    assert_eq!(
+        settlement_outcomes(&evidence),
+        vec![types::SubmitSettlementOutcome::ValidationRejected]
+    );
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::FormValidation { issues }
@@ -578,6 +642,36 @@ async fn network_quiet_submit_returns_settled_inspection_without_failing_validat
         record.expect("IntentExecution evidence").verification,
         "validationRejected"
     );
+}
+
+#[tokio::test]
+async fn network_quiet_submit_with_a_valid_form_settles() {
+    let outcome = settle_network_quiet(Some(email_snapshot(true))).await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert_eq!(
+        settlement_outcomes(&evidence),
+        vec![types::SubmitSettlementOutcome::Settled]
+    );
+    assert!(!evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::FormValidation { .. })));
+}
+
+#[tokio::test]
+async fn network_quiet_submit_without_a_form_snapshot_is_not_settled() {
+    let outcome = settle_network_quiet(None).await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the expected state held, got {outcome:?}");
+    };
+    assert!(
+        settlement_outcomes(&evidence).is_empty(),
+        "an unread form is not a valid settled form: {evidence:?}"
+    );
+    assert!(!evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::FormValidation { .. })));
 }
 
 #[tokio::test]

@@ -14,8 +14,8 @@ pub use corpus::{
     CorpusCandidate, CorpusHealth, CorpusRecord, ResolvedElement, VisionCorpus,
 };
 pub use engine::{
-    near_miss_order, vision_gate_closed, IntentBrowser, IntentEngine, IntentOutcome, VisionContext,
-    VISION_CAPABILITY_GATE_MESSAGE, VISION_SESSION_GATE_MESSAGE,
+    near_miss_order, submit_settlement, vision_gate_closed, IntentBrowser, IntentEngine,
+    IntentOutcome, VisionContext, VISION_CAPABILITY_GATE_MESSAGE, VISION_SESSION_GATE_MESSAGE,
 };
 pub use http_vision::{
     HttpVisionAssist, StructuredExtractRequest, StructuredExtractor, VISION_TEXT_TIER_HEADER,
