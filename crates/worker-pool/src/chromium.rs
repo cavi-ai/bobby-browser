@@ -59,16 +59,16 @@ use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, ControlAction, ControlActionCommand, ErrorCode,
-    ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControlTarget, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
-    SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
+    ClickCommand, ClosePageCommand, CommandError, ControlActionCommand, ErrorCode, ErrorLayer,
+    EvaluateJavaScriptCommand, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode, SessionId,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
     UploadFilesCommand, WaitCondition, WorkerId,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    process_registry, resolve_upload_paths, session_download_dir,
+    process_registry, session_download_dir,
     targeting::{
         gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
         resolve_target as resolve_browser_target, resolve_target_with_visibility,
@@ -3010,201 +3010,253 @@ impl crate::InputEngine for ChromiumWorker {
         page_id: &PageId,
         command: &ControlActionCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        command
-            .action
-            .validate()
-            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message))?;
+        crate::control_action_fill::run(self, page_id, command).await
+    }
+}
+
+pub(crate) struct ChromiumPreparedControl {
+    page: Page,
+    resolved: crate::targeting::ResolvedTarget,
+}
+
+#[async_trait]
+impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
+    type Prepared = ChromiumPreparedControl;
+
+    async fn read_snapshot(
+        &self,
+        page_id: &PageId,
+        _after: bool,
+    ) -> Result<types::FormSnapshot, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let read_snapshot = async || -> Result<types::FormSnapshot, CommandError> {
-            let value: serde_json::Value = page
-                .evaluate(crate::form_snapshot_expression(page_id))
-                .await
-                .map_err(command_failed)?
-                .into_value()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            let encoded = value.as_str().ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "form snapshot returned non-text JSON",
-                )
-            })?;
-            crate::decode_form_snapshot(page_id.clone(), encoded, 512)
-        };
-        // The control is the element the target resolves to, read with the
-        // snapshot's projection; snapshot names can differ from resolver names.
-        let describe = async |resolved: &crate::targeting::ResolvedTarget| match resolved
-            .form_control(&page)
-            .await?
-        {
-            Some(encoded) => crate::decode_form_control(&encoded, command.target.clone()).map(Some),
-            None => Ok(None),
-        };
-        let target = Self::control_target_spec(&command.target);
-        let browser = self.browser_handle().await?;
-        // A file input usually sits hidden behind the control that opens it.
-        let require_visible =
-            command.target.attributes.get("type").map(String::as_str) != Some("file");
-        let resolve = async || {
-            resolve_target_with_visibility(
-                page_id,
-                &page,
-                "",
-                Some(&target),
-                require_visible,
-                Some(&browser),
-            )
+        let value: serde_json::Value = page
+            .evaluate(crate::form_snapshot_expression(page_id))
             .await
-        };
-        let resolved = resolve().await?;
-        let before = read_snapshot().await?;
-        let before_control = describe(&resolved).await?.ok_or_else(|| {
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let encoded = value.as_str().ok_or_else(|| {
             driver_error(
-                ErrorCode::TargetNotFound,
-                "form control target was not found",
+                ErrorCode::BrowserCommandFailed,
+                "form snapshot returned non-text JSON",
             )
         })?;
-        crate::validate_control_action(&before_control, &command.action)?;
+        crate::decode_form_snapshot(page_id.clone(), encoded, 512)
+    }
 
-        let _front = self.bring_page_to_front(&page).await;
-        let mut committed: Option<Vec<String>> = None;
-        match &command.action {
-            ControlAction::SetText { value, clear_first } => {
-                resolved.type_text(&page, value, *clear_first).await?;
-            }
-            ControlAction::SetChecked { checked } => {
-                resolved.set_checked(&page, *checked).await?;
-            }
-            ControlAction::SelectOne { value } => {
-                committed = Some(vec![
-                    if crate::presses_options(before_control.control_kind) {
-                        resolved.select_combobox_option(&page, value).await?
-                    } else {
-                        resolved.select_option(&page, value).await?
-                    },
-                ]);
-            }
-            ControlAction::SelectMany { values } => {
-                committed = Some(
-                    if before_control.control_kind == types::FormControlKind::Combobox {
-                        resolved.select_combobox_options(&page, values).await?
-                    } else {
-                        resolved.select_options(&page, values).await?
-                    },
-                );
-            }
-            ControlAction::SetFiles { paths } => {
-                let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-                let paths: Vec<String> = resolve_upload_paths(&self.upload_roots, &requested)?
-                    .into_iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect();
-                refuse_shown_files(&before_control.state, &paths)?;
-                resolved.set_files(&page, paths).await?;
-            }
-            ControlAction::Clear => match before_control.control_kind {
-                types::FormControlKind::File => resolved.clear_files(&page).await?,
-                types::FormControlKind::ContentEditable => resolved.clear_editable(&page).await?,
-                _ => resolved.clear_control(&page).await?,
-            },
-            ControlAction::Activate => resolved.click(&page).await?,
-            ControlAction::Credential { name } => {
-                let origin = resolved.document_origin(&page).await?;
-                let credential = crate::credentials::select(&self.credentials, name, &origin)?;
-                let secret = crate::credentials::resolve(credential).await?;
-                // The command can wait on an unlock; the page may have moved on.
-                if resolved.document_origin(&page).await? != origin {
-                    return Err(driver_error(
-                        ErrorCode::PolicyDenied,
-                        "the field's page changed origin while its credential was read",
-                    ));
-                }
-                if !resolved.fill_secret(&page, &secret.fill_script()).await? {
-                    return Err(driver_error(
-                        ErrorCode::IntentActionMismatch,
-                        "a credential fills only a password field",
-                    ));
-                }
-            }
-            ControlAction::PasswordManagerFill => {
-                // Only watches: the field is never clicked, focused or typed
-                // into, which would raise the browser's own credential dialogs.
-                let deadline = tokio::time::Instant::now() + crate::PASSWORD_MANAGER_FILL_WAIT;
-                while tokio::time::Instant::now() < deadline {
-                    match describe(&resolved).await {
-                        Ok(Some(control)) if !crate::password_manager_filled(&control.state) => {
-                            tokio::time::sleep(crate::PASSWORD_MANAGER_FILL_POLL).await;
-                        }
-                        _ => break,
-                    }
-                }
-            }
+    async fn resolve(
+        &self,
+        page_id: &PageId,
+        target: &FormControlTarget,
+        require_visible: bool,
+    ) -> Result<ChromiumPreparedControl, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        let spec = Self::control_target_spec(target);
+        let resolved = resolve_target_with_visibility(
+            page_id,
+            &page,
+            "",
+            Some(&spec),
+            require_visible,
+            Some(&browser),
+        )
+        .await?;
+        Ok(ChromiumPreparedControl { page, resolved })
+    }
+
+    async fn describe(
+        &self,
+        prepared: &ChromiumPreparedControl,
+        target: &FormControlTarget,
+    ) -> Result<Option<types::FormControl>, CommandError> {
+        match prepared.resolved.form_control(&prepared.page).await? {
+            Some(encoded) => crate::decode_form_control(&encoded, target.clone()).map(Some),
+            None => Ok(None),
         }
+    }
 
-        // An activate is complete once dispatched: its click may remove the
-        // control or navigate away, so what is read after it is best effort.
-        let activated = matches!(command.action, ControlAction::Activate);
-        let after = match read_snapshot().await {
-            Ok(after) => Some(after),
-            Err(_) if activated => None,
-            Err(error) => return Err(error),
+    async fn recover(
+        &self,
+        page_id: &PageId,
+        target: &FormControlTarget,
+        require_visible: bool,
+        activated: bool,
+    ) -> Result<Option<types::FormControl>, CommandError> {
+        let prepared = match self.resolve(page_id, target, require_visible).await {
+            Ok(prepared) => prepared,
+            Err(_) => return Ok(None),
         };
-        let after_control = match describe(&resolved).await {
-            Ok(Some(control)) => Some(control),
-            _ => match resolve().await {
-                Ok(replacement) => match describe(&replacement).await {
-                    Ok(control) => control,
-                    Err(_) if activated => None,
-                    Err(error) => return Err(error),
-                },
-                Err(_) => None,
-            },
+        match self.describe(&prepared, target).await {
+            Ok(control) => Ok(control),
+            Err(_) if activated => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn before_primitive(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<(), CommandError> {
+        let _front = self.bring_page_to_front(&prepared.page).await;
+        Ok(())
+    }
+
+    async fn type_text(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        value: &str,
+        clear_first: bool,
+    ) -> Result<(), CommandError> {
+        prepared
+            .resolved
+            .type_text(&prepared.page, value, clear_first)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_checked(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        checked: bool,
+    ) -> Result<(), CommandError> {
+        prepared
+            .resolved
+            .set_checked(&prepared.page, checked)
+            .await?;
+        Ok(())
+    }
+
+    async fn select_one(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        value: &str,
+        kind: types::FormControlKind,
+    ) -> Result<String, CommandError> {
+        if crate::presses_options(kind) {
+            prepared
+                .resolved
+                .select_combobox_option(&prepared.page, value)
+                .await
+        } else {
+            prepared.resolved.select_option(&prepared.page, value).await
+        }
+    }
+
+    async fn select_many(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        values: &[String],
+        kind: types::FormControlKind,
+    ) -> Result<Option<Vec<String>>, CommandError> {
+        let committed = if kind == types::FormControlKind::Combobox {
+            prepared
+                .resolved
+                .select_combobox_options(&prepared.page, values)
+                .await?
+        } else {
+            prepared
+                .resolved
+                .select_options(&prepared.page, values)
+                .await?
         };
-        let node_replaced = after_control.is_none();
-        let after_control = match after_control {
-            Some(control) => control,
-            None if activated => before_control.clone(),
-            None => {
-                return Err(driver_error(
-                    ErrorCode::TargetDetached,
-                    "form control was replaced or detached after dispatch",
-                ))
+        Ok(Some(committed))
+    }
+
+    async fn set_files(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        before: &types::FormControl,
+        paths: &[String],
+    ) -> Result<(), CommandError> {
+        let resolved_uploads = crate::upload::resolve_upload_sources(
+            paths,
+            &self.upload_roots,
+            Some(&self.artifacts),
+            Some(&self.session_id),
+            Some(&self.download_dir),
+        )
+        .await?;
+        let mut upload_cache = self.upload_cache.lock().await;
+        let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
+        let path_strings = resolved_uploads
+            .paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        refuse_shown_files(&before.state, &path_strings)?;
+        let _digests = crate::upload::content_digests(&resolved_uploads.paths)?;
+        upload_cache.commit(resolved_uploads);
+        prepared
+            .resolved
+            .set_files(&prepared.page, path_strings)
+            .await?;
+        Ok(())
+    }
+
+    async fn clear(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        kind: types::FormControlKind,
+    ) -> Result<(), CommandError> {
+        match kind {
+            types::FormControlKind::File => prepared.resolved.clear_files(&prepared.page).await?,
+            types::FormControlKind::ContentEditable => {
+                prepared.resolved.clear_editable(&prepared.page).await?
             }
-        };
-        let mut evidence = crate::control_action_evidence(
-            &after_control,
-            &command.action,
-            node_replaced,
-            committed.as_deref(),
-        )?;
-        // Conditional fields: controls that exist only after this action
-        // (a plan select revealing a billing-cycle select). Surfacing them
-        // here saves the agent a blind re-snapshot to discover them.
-        let before_targets: Vec<&types::FormControlTarget> = before
-            .forms
-            .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(before.unowned_controls.iter())
-            .filter_map(|control| control.target.as_ref())
-            .collect();
-        evidence.revealed_controls = after
-            .iter()
-            .flat_map(|after| after.forms.iter().flat_map(|form| form.controls.iter()))
-            .chain(after.iter().flat_map(|after| after.unowned_controls.iter()))
-            .filter(|control| {
-                control.target.as_ref().is_some_and(|target| {
-                    !before_targets
-                        .iter()
-                        .any(|before| crate::target_specs_equivalent(before, target))
-                })
-            })
-            .take(8)
-            .map(|control| types::RevealedControl {
-                control_kind: control.control_kind,
-                accessible_name: control.accessible_name.clone(),
-                target: control.target.clone(),
-            })
-            .collect();
-        Ok(vec![Evidence::ControlAction { action: evidence }])
+            _ => prepared.resolved.clear_control(&prepared.page).await?,
+        }
+        Ok(())
+    }
+
+    async fn activate(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+    ) -> Result<(), CommandError> {
+        prepared.resolved.click(&prepared.page).await
+    }
+
+    async fn fill_credential(
+        &self,
+        _page_id: &PageId,
+        prepared: &ChromiumPreparedControl,
+        _target: &FormControlTarget,
+        name: &str,
+    ) -> Result<(), CommandError> {
+        let origin = prepared.resolved.document_origin(&prepared.page).await?;
+        let credential = crate::credentials::select(&self.credentials, name, &origin)?;
+        let secret = crate::credentials::resolve(credential).await?;
+        if prepared.resolved.document_origin(&prepared.page).await? != origin {
+            return Err(driver_error(
+                ErrorCode::PolicyDenied,
+                "the field's page changed origin while its credential was read",
+            ));
+        }
+        if !prepared
+            .resolved
+            .fill_secret(&prepared.page, &secret.fill_script())
+            .await?
+        {
+            return Err(driver_error(
+                ErrorCode::IntentActionMismatch,
+                "a credential fills only a password field",
+            ));
+        }
+        Ok(())
     }
 }
 
