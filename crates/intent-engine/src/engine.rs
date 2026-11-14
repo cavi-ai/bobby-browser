@@ -218,15 +218,6 @@ pub trait IntentBrowser: Send + Sync {
     ) -> Result<Option<types::FormSnapshot>, CommandError> {
         Ok(None)
     }
-
-    /// Compact, value-free invalid-control evidence after a soft submit wait.
-    /// An empty vector means the settled page did not retain a rejected form.
-    async fn validation_issues(
-        &self,
-        _page_id: &PageId,
-    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
-        Ok(Vec::new())
-    }
 }
 
 pub struct IntentEngine;

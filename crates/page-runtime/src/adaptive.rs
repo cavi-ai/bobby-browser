@@ -515,19 +515,6 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         }))
     }
 
-    async fn validation_issues(
-        &self,
-        page_id: &PageId,
-    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
-        // The trait returns a list. An unread snapshot is not a valid form;
-        // submit settlement reads `Observation` and does not call this.
-        let check = intent_engine::submit_settlement::observe(page_id, self, None).await?;
-        Ok(match check.issues {
-            intent_engine::submit_settlement::Observation::Looked(issues) => issues,
-            intent_engine::submit_settlement::Observation::DidNotLook => Vec::new(),
-        })
-    }
-
     async fn capture_screenshot(
         &self,
         page_id: &PageId,
