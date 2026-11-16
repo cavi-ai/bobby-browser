@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,7 +10,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
 
@@ -210,6 +211,46 @@ pub struct JsonlJournal {
     max_record_bytes: usize,
     segment_bytes: u64,
     key: Option<Arc<JournalKey>>,
+    queue: Arc<std::sync::Mutex<Vec<Pending>>>,
+    appended: Arc<AtomicU64>,
+    syncs: Arc<AtomicU64>,
+}
+
+type Reply = oneshot::Sender<Result<(), JournalError>>;
+
+struct Pending {
+    record: JournalRecord,
+    reply: Reply,
+}
+
+struct Staged {
+    command_id: CommandId,
+    sequence: u64,
+    indexed: IndexedRecord,
+    reply: Reply,
+}
+
+/// Gives each waiting caller its own copy of a failure shared by the batch.
+fn reply_all(replies: impl IntoIterator<Item = Reply>, error: &JournalError) {
+    for reply in replies {
+        let copy = match error {
+            JournalError::Io(error) => {
+                JournalError::Io(std::io::Error::new(error.kind(), error.to_string()))
+            }
+            JournalError::Serialization(error) => {
+                JournalError::Io(std::io::Error::other(error.to_string()))
+            }
+            JournalError::UncertainCommand => JournalError::UncertainCommand,
+        };
+        let _ = reply.send(Err(copy));
+    }
+}
+
+/// Counts since this journal was opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JournalStats {
+    pub appends: u64,
+    pub syncs: u64,
 }
 
 struct WriterState {
@@ -418,7 +459,18 @@ impl JsonlJournal {
             max_record_bytes,
             segment_bytes,
             key,
+            queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            appended: Arc::new(AtomicU64::new(0)),
+            syncs: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Counts of records appended and syncs issued by this journal and its clones.
+    pub fn stats(&self) -> JournalStats {
+        JournalStats {
+            appends: self.appended.load(Ordering::Relaxed),
+            syncs: self.syncs.load(Ordering::Relaxed),
+        }
     }
 
     /// Archives are diagnostic data, never command authority.
@@ -494,6 +546,120 @@ impl JsonlJournal {
             incompatible_records: closed.incompatible_records + scan.incompatible_records,
             segments: closed.segments,
         })
+    }
+
+    /// Writes `batch` with one write and one sync and replies to every caller
+    /// after the outcome is known. Index state changes only after the sync.
+    async fn commit_batch(&self, writer: &mut WriterState, batch: Vec<Pending>) {
+        if let Err(error) = self.refresh(writer).await {
+            return reply_all(batch.into_iter().map(|pending| pending.reply), &error);
+        }
+        if writer.file_len > 0 && writer.file_len >= self.segment_bytes {
+            if let Err(error) = segments::roll(&self.path, writer, self.key.as_deref()).await {
+                return reply_all(batch.into_iter().map(|pending| pending.reply), &error);
+            }
+        }
+        let mut next_sequence = writer.next_sequence;
+        let mut last_digest = writer.last_digest;
+        let mut offset = writer.file_len;
+        let mut buffer = Vec::new();
+        let mut staged: Vec<Staged> = Vec::with_capacity(batch.len());
+        for Pending { mut record, reply } in batch {
+            if writer.archived_offsets.contains_key(&record.command_id) {
+                let _ = reply.send(Err(JournalError::UncertainCommand));
+                continue;
+            }
+            let Some(next) = next_sequence.checked_add(1) else {
+                let _ = reply.send(Err(JournalError::UncertainCommand));
+                continue;
+            };
+            record.sequence = next_sequence;
+            let line = match self.encode_line(&record, &last_digest) {
+                Ok(line) => line,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+            };
+            let indexed = IndexedRecord::new(offset, &line, last_digest);
+            last_digest = indexed.digest;
+            offset += line.len() as u64;
+            next_sequence = next;
+            buffer.extend_from_slice(&line);
+            staged.push(Staged {
+                command_id: record.command_id,
+                sequence: record.sequence,
+                indexed,
+                reply,
+            });
+        }
+        if staged.is_empty() {
+            return;
+        }
+        if let Err(error) = self.write_synced(writer, &buffer).await {
+            return reply_all(staged.into_iter().map(|staged| staged.reply), &error);
+        }
+        self.syncs.fetch_add(1, Ordering::Relaxed);
+        self.appended
+            .fetch_add(staged.len() as u64, Ordering::Relaxed);
+        writer
+            .active_first_sequence
+            .get_or_insert(staged[0].sequence);
+        writer.active_records += staged.len();
+        writer.sealed_seen |= self.key.is_some();
+        writer.last_digest = last_digest;
+        writer.file_len = offset;
+        writer.next_sequence = next_sequence;
+        writer.modified = writer
+            .file
+            .metadata()
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        for Staged {
+            command_id,
+            indexed,
+            reply,
+            ..
+        } in staged
+        {
+            writer.offsets.entry(command_id).or_default().push(indexed);
+            let _ = reply.send(Ok(()));
+        }
+    }
+
+    fn encode_line(
+        &self,
+        record: &JournalRecord,
+        previous: &[u8; 32],
+    ) -> Result<Vec<u8>, JournalError> {
+        let mut buffer = durable_file::BoundedBuffer::new(self.max_record_bytes);
+        serde_json::to_writer(&mut buffer, record)?;
+        std::io::Write::write_all(&mut buffer, b"\n")?;
+        let mut bytes = buffer.into_inner();
+        if let Some(key) = self.key.as_deref() {
+            bytes = key.seal_line(&bytes, previous)?;
+            if bytes.len() > self.max_record_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "serialized data exceeds byte limit",
+                )
+                .into());
+            }
+        }
+        Ok(bytes)
+    }
+
+    async fn write_synced(
+        &self,
+        writer: &mut WriterState,
+        bytes: &[u8],
+    ) -> Result<(), JournalError> {
+        durable_file::require_sole_hard_link(&writer.file.metadata().await?, "journal entry")?;
+        writer.file.write_all(bytes).await?;
+        writer.file.flush().await?;
+        writer.file.sync_data().await?;
+        Ok(())
     }
 
     async fn refresh(&self, writer: &mut WriterState) -> Result<(), JournalError> {
@@ -755,58 +921,25 @@ async fn open_writer(
 
 #[async_trait]
 impl CommandJournal for JsonlJournal {
-    async fn append(&self, mut record: JournalRecord) -> Result<(), JournalError> {
+    async fn append(&self, record: JournalRecord) -> Result<(), JournalError> {
+        let (reply, receiver) = oneshot::channel();
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Pending { record, reply });
         let journal = self.clone();
+        // The task outlives a dropped caller, so a queued record is still written.
         tokio::spawn(async move {
             let mut writer = journal.writer.lock().await;
-            journal.refresh(&mut writer).await?;
-            if writer.archived_offsets.contains_key(&record.command_id) {
-                return Err(JournalError::UncertainCommand);
+            let batch =
+                std::mem::take(&mut *journal.queue.lock().unwrap_or_else(PoisonError::into_inner));
+            if !batch.is_empty() {
+                journal.commit_batch(&mut writer, batch).await;
             }
-            let next = writer
-                .next_sequence
-                .checked_add(1)
-                .ok_or(JournalError::UncertainCommand)?;
-            if writer.file_len > 0 && writer.file_len >= journal.segment_bytes {
-                segments::roll(&journal.path, &mut writer, journal.key.as_deref()).await?;
-            }
-            record.sequence = writer.next_sequence;
-            let mut buffer = durable_file::BoundedBuffer::new(journal.max_record_bytes);
-            serde_json::to_writer(&mut buffer, &record)?;
-            std::io::Write::write_all(&mut buffer, b"\n")?;
-            let mut bytes = buffer.into_inner();
-            if let Some(key) = journal.key.as_deref() {
-                bytes = key.seal_line(&bytes, &writer.last_digest)?;
-                if bytes.len() > journal.max_record_bytes {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "serialized data exceeds byte limit",
-                    )
-                    .into());
-                }
-            }
-            durable_file::require_sole_hard_link(&writer.file.metadata().await?, "journal entry")?;
-            writer.file.write_all(&bytes).await?;
-            writer.file.flush().await?;
-            writer.file.sync_data().await?;
-            let offset = writer.file_len;
-            let previous = writer.last_digest;
-            writer
-                .offsets
-                .entry(record.command_id)
-                .or_default()
-                .push(IndexedRecord::new(offset, &bytes, previous));
-            writer.last_digest = Sha256::digest(&bytes).into();
-            writer.sealed_seen |= journal.key.is_some();
-            writer.active_first_sequence.get_or_insert(record.sequence);
-            writer.active_records += 1;
-            writer.file_len += bytes.len() as u64;
-            writer.modified = writer.file.metadata().await?.modified().ok();
-            writer.next_sequence = next;
-            Ok(())
-        })
-        .await
-        .map_err(std::io::Error::other)?
+        });
+        receiver
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("journal append task ended").into()))
     }
 
     async fn history(&self, id: CommandId) -> Result<JournalScan, JournalError> {
