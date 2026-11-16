@@ -5,6 +5,7 @@
 ### Changed
 
 - The command journal rolls into segments at 64 MiB and startup scans only the active file.
+- Release builds use thin link-time optimization and one codegen unit.
 
 ### Security
 
