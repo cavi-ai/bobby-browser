@@ -16,13 +16,36 @@ use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase,
 /// Default physical JSONL record bound, including the trailing newline.
 pub const DEFAULT_MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
+/// Active file size at which the journal rolls into a closed segment.
+pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Limits and sealing key for [`JsonlJournal::open_with`].
+#[derive(Debug)]
+pub struct JournalOptions {
+    pub max_record_bytes: usize,
+    pub segment_bytes: u64,
+    pub key: Option<JournalKey>,
+}
+
+impl Default for JournalOptions {
+    fn default() -> Self {
+        Self {
+            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            segment_bytes: DEFAULT_SEGMENT_BYTES,
+            key: None,
+        }
+    }
+}
+
 mod health;
 mod seal;
+mod segments;
 pub use health::{
     scan_jsonl, scan_jsonl_prefetched, LedgerDecoder, LedgerHealth, LedgerIssue, LedgerIssueKind,
     PreparedRecord, RecordObservation, ScanControl, ScanOptions, SequenceRule, SequenceVerdict,
 };
 pub use seal::{JournalKey, LineOpener};
+pub use segments::journal_files;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +110,8 @@ pub struct JournalHealth {
     pub records: usize,
     pub torn_tail: bool,
     pub incompatible_records: usize,
+    /// Closed segment files beside the active file.
+    pub segments: usize,
 }
 
 /// The sequence of a journal line this build cannot decode, when present.
@@ -144,6 +169,28 @@ struct Scan {
     max_sequence: Option<u64>,
     /// Digest of the last complete line, for chaining the next append.
     last_digest: [u8; 32],
+    /// Whether a sealed line exists at or before the end of the file.
+    sealed_seen: bool,
+    first_sequence: Option<u64>,
+}
+
+/// Where a file's chain and sequence order continue from.
+#[derive(Clone, Copy)]
+struct ScanStart {
+    previous: [u8; 32],
+    sealed_seen: bool,
+    /// Sequences below this are not valid in the scanned file.
+    next_sequence: u64,
+}
+
+impl ScanStart {
+    fn genesis() -> Self {
+        Self {
+            previous: seal::GENESIS,
+            sealed_seen: false,
+            next_sequence: 0,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -161,6 +208,7 @@ pub struct JsonlJournal {
     path: Arc<PathBuf>,
     writer: Arc<Mutex<WriterState>>,
     max_record_bytes: usize,
+    segment_bytes: u64,
     key: Option<Arc<JournalKey>>,
 }
 
@@ -169,8 +217,17 @@ struct WriterState {
     identity: same_file::Handle,
     next_sequence: u64,
     file_len: u64,
-    /// Digest of the last complete line in the active file.
+    /// Digest of the last complete line in the active file, or of the last
+    /// closed segment's tail while the active file is empty.
     last_digest: [u8; 32],
+    /// Digest the active file's first line chains from.
+    active_previous: [u8; 32],
+    /// Whether a sealed line exists at or before the end of the active file.
+    sealed_seen: bool,
+    active_first_sequence: Option<u64>,
+    active_records: usize,
+    /// Highest closed segment number.
+    segment_count: u32,
     modified: Option<std::time::SystemTime>,
     offsets: HashMap<CommandId, Vec<IndexedRecord>>,
     archives: Vec<Arc<PathBuf>>,
@@ -198,6 +255,8 @@ struct IndexedRecord {
     digest: [u8; 32],
     /// Digest of the line before this one in its file.
     previous: [u8; 32],
+    /// The closed segment holding the record; `None` is the active file.
+    segment: Option<Arc<PathBuf>>,
 }
 
 impl IndexedRecord {
@@ -207,6 +266,7 @@ impl IndexedRecord {
             len: bytes.len(),
             digest: Sha256::digest(bytes).into(),
             previous,
+            segment: None,
         }
     }
 }
@@ -256,19 +316,25 @@ async fn read_indexed_records(
 /// Preserve damaged bytes intact before opening a fresh journal. No repair is
 /// inferred from the readable prefix: its missing outcomes remain uncertain.
 pub async fn archive_damaged_journal(path: &Path) -> Result<PathBuf, std::io::Error> {
-    let name = path
+    archive_entry(path, path).await
+}
+
+/// Renames `target`, the journal or one of its segments, to
+/// `<journal file name>.archive-<id>` beside the journal.
+async fn archive_entry(journal: &Path, target: &Path) -> Result<PathBuf, std::io::Error> {
+    let name = journal
         .file_name()
         .ok_or_else(|| std::io::Error::other("journal has no filename"))?;
-    let archive = path.with_file_name(format!(
+    let archive = journal.with_file_name(format!(
         "{}.archive-{}",
         name.to_string_lossy(),
         CommandId::new().0
     ));
-    tokio::fs::rename(path, &archive).await?;
-    sync_parent(path).await?;
+    tokio::fs::rename(target, &archive).await?;
+    sync_parent(journal).await?;
     // Also visible for library consumers without a tracing subscriber.
-    eprintln!("WARNING: damaged journal {} archived intact to {}; starting a fresh journal. Archived operations require reconciliation.", path.display(), archive.display());
-    warn!(path = %path.display(), archive = %archive.display(), "damaged journal archived; starting a fresh journal; old operations require reconciliation");
+    eprintln!("WARNING: damaged journal {} archived intact to {}; starting a fresh journal. Archived operations require reconciliation.", target.display(), archive.display());
+    warn!(path = %target.display(), archive = %archive.display(), "damaged journal archived; starting a fresh journal; old operations require reconciliation");
     Ok(archive)
 }
 
@@ -284,7 +350,7 @@ async fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
 
 impl JsonlJournal {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
-        Self::open_with_max_record_bytes(path, DEFAULT_MAX_RECORD_BYTES).await
+        Self::open_with(path, JournalOptions::default()).await
     }
 
     /// Configure the record bound for an existing or newly created journal.
@@ -293,7 +359,14 @@ impl JsonlJournal {
         path: impl AsRef<Path>,
         max_record_bytes: usize,
     ) -> Result<Self, JournalError> {
-        Self::open_inner(path.as_ref(), max_record_bytes, None).await
+        Self::open_with(
+            path,
+            JournalOptions {
+                max_record_bytes,
+                ..JournalOptions::default()
+            },
+        )
+        .await
     }
 
     /// Open a journal whose new records are sealed with `key`. Existing
@@ -302,16 +375,36 @@ impl JsonlJournal {
         path: impl AsRef<Path>,
         key: JournalKey,
     ) -> Result<Self, JournalError> {
-        Self::open_inner(path.as_ref(), DEFAULT_MAX_RECORD_BYTES, Some(Arc::new(key))).await
+        Self::open_with(
+            path,
+            JournalOptions {
+                key: Some(key),
+                ..JournalOptions::default()
+            },
+        )
+        .await
     }
 
-    async fn open_inner(
-        path: &Path,
-        max_record_bytes: usize,
-        key: Option<Arc<JournalKey>>,
+    /// Open with explicit limits and an optional sealing key.
+    pub async fn open_with(
+        path: impl AsRef<Path>,
+        options: JournalOptions,
     ) -> Result<Self, JournalError> {
+        let JournalOptions {
+            max_record_bytes,
+            segment_bytes,
+            key,
+        } = options;
+        let key = key.map(Arc::new);
         validate_record_limit(max_record_bytes)?;
-        let path = path.to_path_buf();
+        if segment_bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "journal segment byte limit must be positive",
+            )
+            .into());
+        }
+        let path = path.as_ref().to_path_buf();
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -323,6 +416,7 @@ impl JsonlJournal {
             path: Arc::new(path),
             writer: Arc::new(Mutex::new(writer)),
             max_record_bytes,
+            segment_bytes,
             key,
         })
     }
@@ -364,6 +458,7 @@ impl JsonlJournal {
         key: Option<&JournalKey>,
     ) -> Result<JournalHealth, JournalError> {
         validate_record_limit(max_record_bytes)?;
+        let closed = segments::inspect(path, key).await?;
         let file = match open_regular_read(path).await {
             Ok(Some(file)) => file,
             Ok(None) => {
@@ -374,18 +469,30 @@ impl JsonlJournal {
                 .into());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(JournalHealth::default())
+                if closed.segments == 0 {
+                    return Ok(JournalHealth::default());
+                }
+                return Ok(JournalHealth {
+                    exists: true,
+                    bytes: closed.bytes,
+                    records: closed.records,
+                    torn_tail: false,
+                    incompatible_records: closed.incompatible_records,
+                    segments: closed.segments,
+                });
             }
             Err(error) => return Err(error.into()),
         };
         let metadata = file.metadata().await?;
-        let Scan { scan, records, .. } = scan_file(file, None, max_record_bytes, key).await?;
+        let Scan { scan, records, .. } =
+            scan_file(file, None, max_record_bytes, key, closed.start).await?;
         Ok(JournalHealth {
             exists: true,
-            bytes: metadata.len(),
-            records,
+            bytes: closed.bytes + metadata.len(),
+            records: closed.records + records,
             torn_tail: scan.torn_tail,
-            incompatible_records: scan.incompatible_records,
+            incompatible_records: closed.incompatible_records + scan.incompatible_records,
+            segments: closed.segments,
         })
     }
 
@@ -448,6 +555,19 @@ async fn open_regular_read(path: &Path) -> Result<Option<File>, std::io::Error> 
     Ok(Some(file))
 }
 
+/// Opens or creates the owner-only active file, never following a link.
+async fn open_active(path: &Path) -> Result<File, std::io::Error> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true).read(true);
+    durable_file::without_following_links_async(&mut options);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).await?;
+    durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
+    durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
+    Ok(file)
+}
+
 async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
     let file = open_regular_read(path).await?;
     if file.is_none() {
@@ -461,6 +581,7 @@ async fn open_writer(
     max_record_bytes: usize,
     key: Option<&JournalKey>,
 ) -> Result<WriterState, JournalError> {
+    let closed = segments::load(path, max_record_bytes, key).await?;
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata)
             if !metadata.is_file()
@@ -468,44 +589,49 @@ async fn open_writer(
         {
             // Preserve the entry itself: renaming a symlink does not change
             // its target, and a FIFO must never be opened for scanning.
-            archive_damaged_journal(path).await?;
+            segments::archive_active(path, Some(closed.tail), key).await?;
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let mut options = OpenOptions::new();
-    options.create(true).append(true).read(true);
-    durable_file::without_following_links_async(&mut options);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(path).await?;
-    durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
-    durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
-    let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
-    // Validate and index the writer's actual file in one streaming pass.
+    let mut file = open_active(path).await?;
+    let mut active_offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
+    // Validate and index the writer's actual file in one streaming pass,
+    // continuing the chain and sequence order of the closed segments.
     let scan = scan_file(
         file.try_clone().await?,
-        Some(&mut offsets),
+        Some(&mut active_offsets),
         max_record_bytes,
         key,
+        closed.start(),
     )
     .await?;
     let mut last_digest = scan.last_digest;
+    let mut sealed_seen = scan.sealed_seen;
+    let mut active_first_sequence = scan.first_sequence;
+    let mut active_records = scan.records;
     let next_sequence = if scan.scan.torn_tail
         || scan.scan.incompatible_records > 0
         || scan.max_sequence == Some(u64::MAX)
     {
-        archive_damaged_journal(path).await?;
-        offsets.clear();
-        file = options.open(path).await?;
-        durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
-        durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
-        last_digest = seal::GENESIS;
-        0
+        segments::archive_active(path, Some(closed.tail), key).await?;
+        active_offsets.clear();
+        file = open_active(path).await?;
+        last_digest = closed.tail;
+        sealed_seen = closed.sealed_seen;
+        active_first_sequence = None;
+        active_records = 0;
+        closed.next_sequence
     } else {
-        scan.max_sequence.map_or(0, |sequence| sequence + 1)
+        scan.max_sequence
+            .map_or(closed.next_sequence, |sequence| sequence + 1)
+            .max(closed.next_sequence)
     };
+    let mut offsets = closed.entries;
+    for (id, records) in active_offsets {
+        offsets.entry(id).or_default().extend(records);
+    }
     file.sync_all().await?;
     sync_parent(path).await?;
     let metadata = file.metadata().await?;
@@ -521,7 +647,12 @@ async fn open_writer(
         .unwrap_or(Path::new("."));
     let mut entries = tokio::fs::read_dir(parent).await?;
     while let Some(entry) = entries.next_entry().await? {
-        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Sidecars of archived segments are not archive bodies.
+        if !name.starts_with(&prefix)
+            || name.ends_with(".index")
+            || name.ends_with(".index.damaged")
+        {
             continue;
         }
         let archive = Arc::new(entry.path());
@@ -533,7 +664,11 @@ async fn open_writer(
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut offset = 0;
-        let mut opener = LineOpener::new(key);
+        // An archived file that continued a chain records where it started.
+        let mut opener = match segments::archive_start(archive.as_ref(), key).await? {
+            Some(start) => LineOpener::resume(key, start, false),
+            None => LineOpener::new(key),
+        };
         loop {
             let read = (&mut reader)
                 .take((max_record_bytes as u64).saturating_add(1))
@@ -604,6 +739,11 @@ async fn open_writer(
         next_sequence,
         file_len: metadata.len(),
         last_digest,
+        active_previous: closed.tail,
+        sealed_seen,
+        active_first_sequence,
+        active_records,
+        segment_count: closed.count,
         modified: metadata.modified().ok(),
         offsets,
         archives,
@@ -627,6 +767,9 @@ impl CommandJournal for JsonlJournal {
                 .next_sequence
                 .checked_add(1)
                 .ok_or(JournalError::UncertainCommand)?;
+            if writer.file_len > 0 && writer.file_len >= journal.segment_bytes {
+                segments::roll(&journal.path, &mut writer, journal.key.as_deref()).await?;
+            }
             record.sequence = writer.next_sequence;
             let mut buffer = durable_file::BoundedBuffer::new(journal.max_record_bytes);
             serde_json::to_writer(&mut buffer, &record)?;
@@ -654,6 +797,9 @@ impl CommandJournal for JsonlJournal {
                 .or_default()
                 .push(IndexedRecord::new(offset, &bytes, previous));
             writer.last_digest = Sha256::digest(&bytes).into();
+            writer.sealed_seen |= journal.key.is_some();
+            writer.active_first_sequence.get_or_insert(record.sequence);
+            writer.active_records += 1;
             writer.file_len += bytes.len() as u64;
             writer.modified = writer.file.metadata().await?.modified().ok();
             writer.next_sequence = next;
@@ -675,17 +821,30 @@ impl CommandJournal for JsonlJournal {
             {
                 // Read the same file that owns the offsets, even if an external
                 // replacement occurs after refresh. The next operation refreshes it.
-                if let Some(records) =
-                    read_indexed_records(&writer.file, offsets, &id, journal.key.as_deref()).await?
-                {
-                    return Ok(JournalScan {
-                        records,
-                        ..JournalScan::default()
-                    });
-                }
+                let damage =
+                    match segments::read(&writer.file, offsets, &id, journal.key.as_deref()).await?
+                    {
+                        segments::Read::Records(records) => {
+                            return Ok(JournalScan {
+                                records,
+                                ..JournalScan::default()
+                            });
+                        }
+                        segments::Read::Damaged(damage) => damage,
+                    };
                 // In-place damage can leave identity, size and mtime unchanged.
                 // Preserve it even when changed bytes still decode as valid JSON.
-                archive_damaged_journal(&journal.path).await?;
+                match damage {
+                    segments::Damage::Active => {
+                        let start = Some(writer.active_previous);
+                        segments::archive_active(&journal.path, start, journal.key.as_deref())
+                            .await?;
+                    }
+                    segments::Damage::Segment(number) => {
+                        segments::archive_from(&journal.path, number, journal.key.as_deref())
+                            .await?;
+                    }
+                }
                 *writer = open_writer(
                     &journal.path,
                     journal.max_record_bytes,
@@ -878,6 +1037,9 @@ struct CommandDecoder<'a> {
     opener: LineOpener<'a>,
     /// Digest of the line before the one being decoded.
     line_previous: [u8; 32],
+    /// Sequences below this belong to earlier files and are not valid here.
+    floor: u64,
+    first_sequence: Option<u64>,
 }
 
 impl LedgerDecoder for CommandDecoder<'_> {
@@ -895,6 +1057,13 @@ impl LedgerDecoder for CommandDecoder<'_> {
         }
         let bytes = plain.as_deref().unwrap_or(line.bytes);
         Ok(match serde_json::from_slice::<JournalRecord>(bytes) {
+            Ok(record) if plain.is_some() && record.sequence < self.floor => PreparedRecord {
+                observation: RecordObservation::Rejected {
+                    sequence_hint: Some(record.sequence),
+                    kind: LedgerIssueKind::Sequence,
+                },
+                record: None,
+            },
             Ok(record) if plain.is_some() => PreparedRecord {
                 observation: RecordObservation::Accepted {
                     sequence: Some(record.sequence),
@@ -917,8 +1086,15 @@ impl LedgerDecoder for CommandDecoder<'_> {
         &mut self,
         line: &JsonlLine<'_>,
         prepared: PreparedRecord<JournalRecord>,
-        _verdict: SequenceVerdict,
+        verdict: SequenceVerdict,
     ) -> std::io::Result<ScanControl> {
+        if let Some(record) = prepared
+            .record
+            .as_ref()
+            .filter(|_| verdict != SequenceVerdict::Invalid)
+        {
+            self.first_sequence.get_or_insert(record.sequence);
+        }
         // Invalid sequence records retain diagnostic identity, never replay authority.
         if let (Some(index), Some(record)) = (self.index.as_deref_mut(), prepared.record) {
             index
@@ -939,11 +1115,14 @@ async fn scan_file(
     index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
     max_record_bytes: usize,
     key: Option<&JournalKey>,
+    start: ScanStart,
 ) -> Result<Scan, JournalError> {
     let mut decoder = CommandDecoder {
         index,
-        opener: LineOpener::new(key),
-        line_previous: seal::GENESIS,
+        opener: LineOpener::resume(key, start.previous, start.sealed_seen),
+        line_previous: start.previous,
+        floor: start.next_sequence,
+        first_sequence: None,
     };
     let health = scan_jsonl(
         &mut BufReader::new(file),
@@ -964,5 +1143,7 @@ async fn scan_file(
         records: health.decoded_records,
         max_sequence: health.max_observed_sequence,
         last_digest: decoder.opener.previous(),
+        sealed_seen: decoder.opener.sealed_seen(),
+        first_sequence: decoder.first_sequence,
     })
 }

@@ -20,6 +20,8 @@ pub(crate) const GENESIS: [u8; 32] = [
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
+const INDEX_DOMAIN: &[u8] = b"bobby-browser/workflow-journal/segment-index/v1";
+
 /// Binds a sealed line to the exact bytes of the line before it.
 fn associated_data(previous: &[u8; 32]) -> Vec<u8> {
     let mut data = DOMAIN.to_vec();
@@ -109,6 +111,23 @@ impl JournalKey {
     /// whose digest is `previous`, returning the on-disk line with its newline.
     pub(crate) fn seal_line(&self, record: &[u8], previous: &[u8; 32]) -> std::io::Result<Vec<u8>> {
         let record = record.strip_suffix(b"\n").unwrap_or(record);
+        self.seal_with(record, associated_data(previous))
+    }
+
+    /// Seals a segment index; its `previousTail` fixes its place in the chain.
+    pub(crate) fn seal_index(&self, index: &[u8]) -> std::io::Result<Vec<u8>> {
+        self.seal_with(index, INDEX_DOMAIN.to_vec())
+    }
+
+    /// Opens an index sealed by [`Self::seal_index`].
+    pub(crate) fn open_index(&self, line: &[u8]) -> Option<Vec<u8>> {
+        let sealed = parse_sealed(line)?;
+        let mut plain = self.open_with(&sealed, INDEX_DOMAIN.to_vec())?;
+        plain.pop();
+        Some(plain)
+    }
+
+    fn seal_with(&self, record: &[u8], aad: Vec<u8>) -> std::io::Result<Vec<u8>> {
         let mut nonce_bytes = [0u8; NONCE_LEN];
         SystemRandom::new()
             .fill(&mut nonce_bytes)
@@ -117,7 +136,7 @@ impl JournalKey {
         self.cipher()
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce_bytes),
-                Aad::from(associated_data(previous)),
+                Aad::from(aad),
                 &mut ciphertext,
             )
             .map_err(|_| std::io::Error::other("could not seal a journal record"))?;
@@ -131,13 +150,18 @@ impl JournalKey {
     }
 
     fn open_line(&self, sealed: &SealedLine, previous: &[u8; 32]) -> Option<Vec<u8>> {
+        self.open_with(sealed, associated_data(previous))
+    }
+
+    /// Returns the plaintext followed by a newline.
+    fn open_with(&self, sealed: &SealedLine, aad: Vec<u8>) -> Option<Vec<u8>> {
         let nonce: [u8; NONCE_LEN] = STANDARD.decode(&sealed.nonce).ok()?.try_into().ok()?;
         let mut data = STANDARD.decode(&sealed.ct).ok()?;
         let len = self
             .cipher()
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce),
-                Aad::from(associated_data(previous)),
+                Aad::from(aad),
                 &mut data,
             )
             .ok()?
@@ -190,6 +214,19 @@ impl<'k> LineOpener<'k> {
             key,
             previous: GENESIS,
             sealed_seen: false,
+        }
+    }
+
+    /// Continues a chain whose last line had digest `previous`.
+    pub(crate) fn resume(
+        key: Option<&'k JournalKey>,
+        previous: [u8; 32],
+        sealed_seen: bool,
+    ) -> Self {
+        Self {
+            key,
+            previous,
+            sealed_seen,
         }
     }
 

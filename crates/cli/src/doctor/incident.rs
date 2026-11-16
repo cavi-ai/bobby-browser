@@ -160,7 +160,7 @@ fn inspect(path: PathBuf, kind: Kind) -> Result<(bool, Value)> {
                 let h = inspect_command_journal(path, key_path).await?;
                 Ok((
                     !h.torn_tail && h.incompatible_records == 0,
-                    json!({"exists":h.exists,"records":h.records,"bytes":h.bytes,"tornTail":h.torn_tail,"incompatibleRecords":h.incompatible_records}),
+                    json!({"exists":h.exists,"records":h.records,"bytes":h.bytes,"tornTail":h.torn_tail,"incompatibleRecords":h.incompatible_records,"segments":h.segments}),
                 ))
             }
             Kind::Jobs => {

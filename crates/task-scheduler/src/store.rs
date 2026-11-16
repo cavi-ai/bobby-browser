@@ -308,6 +308,7 @@ impl JournalJobStore {
             records: scan.records,
             torn_tail: scan.torn_tail,
             incompatible_records: scan.incompatible_records,
+            segments: 0,
         })
     }
 

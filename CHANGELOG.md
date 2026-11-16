@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The command journal rolls into segments at 64 MiB and startup scans only the active file.
+
 ### Security
 
 - Command journal records are sealed and chained on disk with a key from `storage.journal_key_path`, which defaults to `journal.key` beside the loaded config file.

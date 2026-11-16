@@ -67,7 +67,7 @@ Before starting that Firefox workflow, require `firefox-background-attachment` i
 
 | Key | Default | Meaning |
 |---|---|---|
-| `journal_path` | `./data/storage/commands.jsonl` | Command journal |
+| `journal_path` | `./data/storage/commands.jsonl` | Command journal. At 64 MiB it rolls into `<journal_path>.segment-N` files with `.index` sidecars; startup scans only the active file. |
 | `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Job journal |
 | `checkpoints_dir` | `./data/storage/checkpoints` | Checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority records |
