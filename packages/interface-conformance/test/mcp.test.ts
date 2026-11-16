@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 test("MCP production Server executes the shared real-Chrome canonical matrix", { timeout: 120_000 }, async () => {
   const benchmarking = process.env.CONFORMANCE_PERFORMANCE_SAMPLES !== undefined;
-  const args = ["test", "-q", "-p", "interface-conformance", "--test", "mcp_live"];
+  const args = ["test", "-q", "-p", "interface-conformance", "--test", "mcp_live", "mcp_production_server_executes_every_canonical_step_on_real_chrome"];
   if (benchmarking) args.push("--", "--nocapture");
   const child = spawn(process.env.CARGO ?? "cargo", args, {
     cwd: new URL("../../../..", import.meta.url), stdio: [benchmarking ? "pipe" : "ignore", "pipe", "pipe"],
