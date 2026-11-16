@@ -24,7 +24,7 @@ from mlx_finetune import (
 )
 
 
-def record(index=0, *, success=True, purpose="Choose Search", step="step"):
+def record(index=0, *, success=True, purpose="Choose Search", step="step", journey="authenticated"):
     row = {
         "purpose": purpose,
         "intent_kind": "locate",
@@ -39,7 +39,7 @@ def record(index=0, *, success=True, purpose="Choose Search", step="step"):
             "action": {"kind": "clickCandidate", "index": index},
         },
         "success": success,
-        "journey": "authenticated",
+        "journey": journey,
         "step": step,
         "privacy_version": 1,
     }
@@ -66,6 +66,9 @@ class ModelPromotionTests(unittest.TestCase):
         rows = [record(step=f"positive-{i}") for i in range(4)]
         rows.append(record(None, success=False, purpose="Unknown control", step="negative"))
         self.corpus.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        self.heldout = self.root / "heldout.jsonl"
+        self.write_heldout([record(step=f"heldout-{i}", journey="documents") for i in range(3)])
 
         self.suites = {
             "corpus": {
@@ -98,19 +101,105 @@ class ModelPromotionTests(unittest.TestCase):
                     "abstain_precision": 1.0,
                 },
             },
+            "heldout": {
+                "metrics": {
+                    "element_accuracy": 1.0,
+                    "abstain_recall": 1.0,
+                    "abstain_precision": 1.0,
+                },
+                "floors": {
+                    "element_accuracy": 0.98,
+                    "abstain_recall": None,
+                    "abstain_precision": None,
+                },
+            },
         }
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def assessment(self):
+    def write_heldout(self, rows):
+        self.heldout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def assessment(self, suites=None):
         return build_assessment(
             adapter_dir=self.adapter,
             corpus_path=self.corpus,
             base_model="local/base",
             schema="v1",
-            suites=self.suites,
+            suites=self.suites if suites is None else suites,
+            heldout_path=self.heldout,
         )
+
+    def test_assessment_requires_the_heldout_suite(self):
+        without = {name: self.suites[name] for name in ("corpus", "paraphrase", "contrastive")}
+        with self.assertRaisesRegex(PromotionError, "heldout"):
+            self.assessment(without)
+
+    def test_assessment_rejects_a_heldout_journey_seen_in_training(self):
+        self.write_heldout([record(step="leak", journey="authenticated")])
+        with self.assertRaisesRegex(PromotionError, "authenticated"):
+            self.assessment()
+
+    def test_assessment_rejects_a_heldout_row_without_a_journey(self):
+        row = record(step="anonymous", journey="documents")
+        del row["journey"]
+        self.write_heldout([row])
+        with self.assertRaisesRegex(PromotionError, "journey"):
+            self.assessment()
+
+    def test_assessment_binds_the_heldout_file(self):
+        assessment = self.assessment()
+        self.assertEqual(assessment["heldout"]["sha256"], sha256_file(self.heldout))
+        self.assertEqual(assessment["heldout"]["records"], 3)
+        self.assertEqual(assessment["heldout"]["journeys"], ["documents"])
+        self.assertEqual(
+            assessment["suites"]["heldout"]["floors"]["element_accuracy"], 0.98
+        )
+
+    def test_heldout_abstention_is_reported_without_a_floor(self):
+        suites = copy.deepcopy(self.suites)
+        suites["heldout"]["metrics"]["abstain_recall"] = 0.1
+        assessment = self.assessment(suites)
+        self.assertEqual(assessment["verdict"], "passed")
+        self.assertEqual(assessment["suites"]["heldout"]["metrics"]["abstain_recall"], 0.1)
+
+    def test_heldout_element_accuracy_below_floor_fails(self):
+        suites = copy.deepcopy(self.suites)
+        suites["heldout"]["metrics"]["element_accuracy"] = 0.9
+        with self.assertRaisesRegex(PromotionError, "heldout.element_accuracy"):
+            self.assessment(suites)
+
+    def test_promotion_rejects_a_changed_heldout_file(self):
+        report = self.root / "assessment.json"
+        report.write_text(json.dumps(self.assessment()))
+        self.write_heldout(
+            [record(step=f"heldout-{i}", journey="documents") for i in range(4)]
+        )
+        with self.assertRaisesRegex(PromotionError, "held-out digest"):
+            promote_adapter(
+                self.adapter,
+                self.corpus,
+                report,
+                self.root / "promoted",
+                "v1",
+                heldout_path=self.heldout,
+            )
+
+    def test_promotion_rejects_an_assessment_without_the_heldout_block(self):
+        stripped = self.assessment()
+        del stripped["heldout"]
+        report = self.root / "assessment.json"
+        report.write_text(json.dumps(stripped))
+        with self.assertRaisesRegex(PromotionError, "held-out"):
+            promote_adapter(
+                self.adapter,
+                self.corpus,
+                report,
+                self.root / "promoted",
+                "v1",
+                heldout_path=self.heldout,
+            )
 
     def test_promotes_verified_adapter_with_content_bound_manifest(self):
         assessment = self.assessment()
@@ -123,6 +212,7 @@ class ModelPromotionTests(unittest.TestCase):
             assessment_path=report,
             store_dir=self.root / "promoted",
             version="v1.0.0",
+            heldout_path=self.heldout,
         )
 
         manifest = json.loads((release / "promotion.json").read_text())
@@ -147,6 +237,7 @@ class ModelPromotionTests(unittest.TestCase):
                 report,
                 self.root / "promoted",
                 "v1",
+                heldout_path=self.heldout,
             )
 
         self.corpus.write_text(self.corpus.read_text().rsplit("\n", 2)[0] + "\n")
@@ -159,6 +250,7 @@ class ModelPromotionTests(unittest.TestCase):
                 report,
                 self.root / "promoted",
                 "v1",
+                heldout_path=self.heldout,
             )
 
     def test_rejects_failed_floor_unsafe_corpus_and_version_collision(self):
@@ -171,6 +263,7 @@ class ModelPromotionTests(unittest.TestCase):
                 "local/base",
                 "v1",
                 failed,
+                self.heldout,
             )
         with self.assertRaisesRegex(PromotionError, "missing required suites"):
             build_assessment(
@@ -179,6 +272,7 @@ class ModelPromotionTests(unittest.TestCase):
                 "local/base",
                 "v1",
                 {"corpus": self.suites["corpus"]},
+                self.heldout,
             )
 
         report = self.root / "assessment.json"
@@ -189,6 +283,7 @@ class ModelPromotionTests(unittest.TestCase):
             report,
             self.root / "promoted",
             "v1",
+            heldout_path=self.heldout,
         )
         (self.root / "promoted" / "releases" / "v2").mkdir()
         with self.assertRaisesRegex(PromotionError, "already exists"):
@@ -198,6 +293,7 @@ class ModelPromotionTests(unittest.TestCase):
                 report,
                 self.root / "promoted",
                 "v2",
+                heldout_path=self.heldout,
             )
 
         unsafe = json.loads(self.corpus.read_text().splitlines()[0])
@@ -210,6 +306,7 @@ class ModelPromotionTests(unittest.TestCase):
                 "local/base",
                 "v1",
                 self.suites,
+                self.heldout,
             )
 
     def test_rejects_private_paths_and_invalid_versions(self):
@@ -220,6 +317,7 @@ class ModelPromotionTests(unittest.TestCase):
                 str(self.root / "private-model"),
                 "v1",
                 self.suites,
+                self.heldout,
             )
 
         report = self.root / "assessment.json"
@@ -231,6 +329,7 @@ class ModelPromotionTests(unittest.TestCase):
                 report,
                 self.root / "promoted",
                 "../escape",
+                heldout_path=self.heldout,
             )
 
         forged = self.assessment()
@@ -244,6 +343,7 @@ class ModelPromotionTests(unittest.TestCase):
                 report,
                 self.root / "promoted",
                 "v1",
+                heldout_path=self.heldout,
             )
 
     def test_freshness_results_write_a_promotion_assessment(self):
@@ -261,11 +361,17 @@ class ModelPromotionTests(unittest.TestCase):
                 "abstain_recall": 1.0,
                 "abstain_precision": 1.0,
             },
+            "heldout": {
+                "element_accuracy": 1.0,
+                "abstain_recall": 0.5,
+                "abstain_precision": 1.0,
+            },
         }
 
         assessment = write_promotion_assessment(
             adapter_dir=self.adapter,
             corpus_path=self.corpus,
+            heldout_path=self.heldout,
             base_model="local/base",
             schema="v1",
             metrics_by_suite=metrics,
@@ -320,12 +426,16 @@ class ModelPromotionTests(unittest.TestCase):
         report = self.root / "assessment.json"
         report.write_text(json.dumps(self.assessment()))
         store = self.root / "promoted"
-        first = promote_adapter(self.adapter, self.corpus, report, store, "v1")
+        first = promote_adapter(
+            self.adapter, self.corpus, report, store, "v1", heldout_path=self.heldout
+        )
         activate_release(store, "v1")
 
         (self.adapter / "adapters.safetensors").write_bytes(b"adapter-v2")
         report.write_text(json.dumps(self.assessment()))
-        promote_adapter(self.adapter, self.corpus, report, store, "v2")
+        promote_adapter(
+            self.adapter, self.corpus, report, store, "v2", heldout_path=self.heldout
+        )
         activate_release(store, "v2")
 
         current = activate_release(store, "v1")

@@ -14,10 +14,10 @@ from corpus_lint import lint
 from mlx_finetune import normalize_corpus_example
 
 
-ASSESSMENT_SCHEMA_VERSION = 1
+ASSESSMENT_SCHEMA_VERSION = 2
 PROMOTION_SCHEMA_VERSION = 1
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-REQUIRED_SUITES = frozenset({"corpus", "paraphrase", "contrastive"})
+REQUIRED_SUITES = frozenset({"corpus", "paraphrase", "contrastive", "heldout"})
 PROMOTION_FLOORS = {
     "corpus": {
         "element_accuracy": 0.98,
@@ -31,6 +31,8 @@ PROMOTION_FLOORS = {
         "abstain_recall": 0.66,
         "abstain_precision": 1.0,
     },
+    # Held-out abstention is reported, not gated.
+    "heldout": {"element_accuracy": 0.98},
 }
 
 
@@ -74,7 +76,7 @@ def adapter_digest(adapter_dir) -> str:
     return digest.hexdigest()
 
 
-def _load_corpus(corpus_path: Path) -> list[dict]:
+def _load_corpus(corpus_path: Path, label: str = "corpus") -> list[dict]:
     rows = []
     try:
         with corpus_path.open() as source:
@@ -85,16 +87,33 @@ def _load_corpus(corpus_path: Path) -> list[dict]:
                     rows.append(normalize_corpus_example(json.loads(line)))
                 except (json.JSONDecodeError, ValueError) as error:
                     raise PromotionError(
-                        f"invalid corpus record at line {line_number}: {error}"
+                        f"invalid {label} record at line {line_number}: {error}"
                     ) from error
     except OSError as error:
-        raise PromotionError(f"cannot read corpus: {error}") from error
+        raise PromotionError(f"cannot read {label}: {error}") from error
     if not rows:
-        raise PromotionError("corpus is empty")
+        raise PromotionError(f"{label} is empty")
     errors, _ = lint(rows)
     if errors:
-        raise PromotionError("unsafe corpus: " + "; ".join(errors))
+        raise PromotionError(f"unsafe {label}: " + "; ".join(errors))
     return rows
+
+
+def _load_heldout(heldout_path: Path, corpus_rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Load the held-out file; its journeys must be named and absent from the corpus."""
+    rows = _load_corpus(heldout_path, "held-out file")
+    journeys = set()
+    for line_number, row in enumerate(rows, start=1):
+        journey = row.get("journey")
+        if not isinstance(journey, str) or not journey:
+            raise PromotionError(f"held-out row {line_number} does not name its journey")
+        journeys.add(journey)
+    seen = journeys.intersection(row.get("journey") for row in corpus_rows)
+    if seen:
+        raise PromotionError(
+            "held-out journeys appear in the training corpus: " + ", ".join(sorted(seen))
+        )
+    return rows, sorted(journeys)
 
 
 def _validated_suites(suites: dict) -> dict:
@@ -151,11 +170,13 @@ def _validate_model_identity(base_model: str, schema: str):
         raise PromotionError("promotion requires candidate or v1 schema")
 
 
-def build_assessment(adapter_dir, corpus_path, base_model, schema, suites) -> dict:
+def build_assessment(adapter_dir, corpus_path, base_model, schema, suites, heldout_path) -> dict:
     adapter_dir = Path(adapter_dir)
     corpus_path = Path(corpus_path)
+    heldout_path = Path(heldout_path)
     _validate_model_identity(base_model, schema)
     rows = _load_corpus(corpus_path)
+    heldout_rows, heldout_journeys = _load_heldout(heldout_path, rows)
     metadata = _load_adapter_metadata(adapter_dir)
     if metadata.get("base_model") != base_model:
         raise PromotionError("base model does not match adapter metadata")
@@ -173,6 +194,11 @@ def build_assessment(adapter_dir, corpus_path, base_model, schema, suites) -> di
             "sha256": sha256_file(corpus_path),
             "records": len(rows),
         },
+        "heldout": {
+            "sha256": sha256_file(heldout_path),
+            "records": len(heldout_rows),
+            "journeys": heldout_journeys,
+        },
         "suites": _validated_suites(suites),
     }
 
@@ -187,6 +213,13 @@ def _read_assessment(path: Path) -> dict:
     if assessment.get("verdict") != "passed":
         raise PromotionError("assessment verdict is not passed")
     _validated_suites(assessment.get("suites"))
+    claim = assessment.get("heldout")
+    if (
+        not isinstance(claim, dict)
+        or not isinstance(claim.get("sha256"), str)
+        or not isinstance(claim.get("records"), int)
+    ):
+        raise PromotionError("assessment has no held-out file binding")
     return assessment
 
 
@@ -215,9 +248,11 @@ def promote_adapter(
     assessment_path,
     store_dir,
     version,
+    heldout_path,
 ) -> Path:
     adapter_dir = Path(adapter_dir)
     corpus_path = Path(corpus_path)
+    heldout_path = Path(heldout_path)
     assessment_path = Path(assessment_path)
     store_dir = Path(store_dir)
     if not VERSION_PATTERN.fullmatch(version):
@@ -230,6 +265,12 @@ def promote_adapter(
         raise PromotionError("corpus digest does not match assessment")
     if assessment.get("corpus", {}).get("records") != len(rows):
         raise PromotionError("corpus record count does not match assessment")
+    heldout_rows, _ = _load_heldout(heldout_path, rows)
+    heldout_claim = assessment["heldout"]
+    if heldout_claim["sha256"] != sha256_file(heldout_path):
+        raise PromotionError("held-out digest does not match assessment")
+    if heldout_claim["records"] != len(heldout_rows):
+        raise PromotionError("held-out record count does not match assessment")
 
     actual_adapter_digest = adapter_digest(adapter_dir)
     adapter_claim = assessment.get("adapter", {})
@@ -256,6 +297,7 @@ def promote_adapter(
         "version": version,
         "adapter": adapter_claim,
         "corpus": assessment["corpus"],
+        "heldout": heldout_claim,
         "assessmentSha256": assessment_digest,
         "suites": assessment["suites"],
     }
@@ -310,6 +352,7 @@ def main():
     promote = commands.add_parser("promote", help="create an immutable release")
     promote.add_argument("--adapter", required=True, help="adapter directory")
     promote.add_argument("--corpus", required=True, help="sanitized corpus JSONL")
+    promote.add_argument("--heldout", required=True, help="held-out journey JSONL")
     promote.add_argument("--assessment", required=True, help="passing assessment JSON")
     promote.add_argument("--store", required=True, help="local promotion store")
     promote.add_argument("--version", required=True, help="immutable release version")
@@ -325,6 +368,7 @@ def main():
                 args.assessment,
                 args.store,
                 args.version,
+                args.heldout,
             )
         else:
             result = activate_release(args.store, args.version)
