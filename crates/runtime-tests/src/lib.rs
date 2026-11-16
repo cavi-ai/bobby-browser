@@ -1003,19 +1003,9 @@ fn proof_state_dir() -> PathBuf {
         .join("target/firefox-companion-proof")
 }
 
-/// Ensure the test profile `user.js` has fingerprint-related prefs.
+/// Ensure the test profile `user.js` has the page prefs a managed profile gets.
 /// Appends missing lines; does not rewrite existing prefs.
 pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandError> {
-    const PREFS: &[(&str, &str)] = &[
-        (
-            "privacy.resistFingerprinting",
-            "user_pref(\"privacy.resistFingerprinting\", false);",
-        ),
-        (
-            "ui.systemUsesDarkTheme",
-            "user_pref(\"ui.systemUsesDarkTheme\", 1);",
-        ),
-    ];
     let path = profile.join("user.js");
     let existing = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -1023,14 +1013,14 @@ pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandErr
         Err(error) => return Err(io_error(error)),
     };
     let mut additions = String::new();
-    for (key, line) in PREFS {
-        if existing.contains(key) {
+    for &(name, value) in cli::FIREFOX_PAGE_PREFS {
+        if existing.contains(&format!("user_pref(\"{name}\"")) {
             continue;
         }
         if !additions.is_empty() {
             additions.push('\n');
         }
-        additions.push_str(line);
+        additions.push_str(&format!("user_pref(\"{name}\", {value});"));
     }
     if additions.is_empty() {
         return Ok(());

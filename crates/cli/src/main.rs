@@ -40,6 +40,7 @@ use firefox_companion::selection::{
     enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
     NativeHostDescriptor,
 };
+pub use onboarding::FIREFOX_PAGE_PREFS;
 use std::{
     future::Future,
     io::IsTerminal,
