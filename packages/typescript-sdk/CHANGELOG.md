@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.0
+
+- `runtimeInfoForEngine(engine)` returns one engine's runtime info, and `RuntimeInfo` carries `engineScope`.
+- Node 24 or later is required.
+- Align the client package with the Bobby Browser 0.25.0 runtime release.
+
 ## 0.24.0
 
 - `ExecutionPolicy.engine` runs a session on `chromium` or `firefox`.
