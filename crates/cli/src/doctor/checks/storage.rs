@@ -18,7 +18,11 @@ pub(super) fn storage(context: &mut DoctorContext, report: &mut DoctorReport) ->
                 );
             }
         }
-        record_command_journal(report, &config.storage.journal_path);
+        record_command_journal(
+            report,
+            &config.storage.journal_path,
+            config.storage.journal_key_path.as_deref(),
+        );
         record_scheduler_journal(report, &config.storage.scheduler_journal_path);
         record_idempotency_ledgers(report, config);
         #[cfg(unix)]
@@ -176,9 +180,25 @@ pub(in crate::doctor) fn record_jsonl_health(
     );
 }
 
-pub(in crate::doctor) fn record_command_journal(report: &mut DoctorReport, path: &Path) {
+/// Inspects with the journal key when the file exists; never creates one.
+pub(in crate::doctor) async fn inspect_command_journal(
+    path: PathBuf,
+    key_path: Option<PathBuf>,
+) -> Result<workflow_journal::JournalHealth, workflow_journal::JournalError> {
+    match key_path.map(|key_path| workflow_journal::JournalKey::load(&key_path)) {
+        Some(Ok(key)) => workflow_journal::JsonlJournal::inspect_sealed(path, &key).await,
+        _ => workflow_journal::JsonlJournal::inspect(path).await,
+    }
+}
+
+pub(in crate::doctor) fn record_command_journal(
+    report: &mut DoctorReport,
+    path: &Path,
+    key_path: Option<&Path>,
+) {
     let path_buf = path.to_path_buf();
-    match block_on_inspect(async move { workflow_journal::JsonlJournal::inspect(path_buf).await }) {
+    let key_path = key_path.map(Path::to_path_buf);
+    match block_on_inspect(async move { inspect_command_journal(path_buf, key_path).await }) {
         Ok(health) => record_jsonl_health(
             report,
             "command-journal",

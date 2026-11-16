@@ -359,9 +359,18 @@ impl RuntimeService {
             config.vision.health_failure_threshold,
         );
         let journal = Arc::new(
-            JsonlJournal::open(&config.storage.journal_path)
-                .await
-                .map_err(|error| RuntimeError::Internal(error.to_string()))?,
+            match &config.storage.journal_key_path {
+                Some(key_path) => {
+                    JsonlJournal::open_sealed(
+                        &config.storage.journal_path,
+                        workflow_journal::JournalKey::load_or_create(key_path)
+                            .map_err(|error| RuntimeError::Internal(error.to_string()))?,
+                    )
+                    .await
+                }
+                None => JsonlJournal::open(&config.storage.journal_path).await,
+            }
+            .map_err(|error| RuntimeError::Internal(error.to_string()))?,
         );
         let command_journal = journal.clone();
         let command_idempotency = interface_core::IdempotencyStore::open_durable(

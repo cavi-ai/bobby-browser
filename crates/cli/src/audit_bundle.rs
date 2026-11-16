@@ -3,7 +3,8 @@
 //! install's Ed25519 key.
 //!
 //! Export only reads the runtime's files, so it runs next to a live runtime.
-//! Journal lines are copied byte for byte; nothing is re-serialized.
+//! Journal lines are copied byte for byte; nothing is re-serialized. Sealed
+//! lines are opened first, so the bundle holds record JSON.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Read, Write};
@@ -61,6 +62,8 @@ pub struct BundleSources {
     pub journal: PathBuf,
     pub checkpoints_dir: PathBuf,
     pub artifacts_dir: PathBuf,
+    /// Key that opens sealed journal lines; they are bundled as plain records.
+    pub journal_key: Option<PathBuf>,
 }
 
 impl BundleSources {
@@ -69,6 +72,7 @@ impl BundleSources {
             journal: config.storage.journal_path.clone(),
             checkpoints_dir: config.storage.checkpoints_dir.clone(),
             artifacts_dir: config.browser.artifacts_dir.clone(),
+            journal_key: config.storage.journal_key_path.clone(),
         }
     }
 }
@@ -186,10 +190,19 @@ pub fn export(
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(&journal[..0], |end| &journal[..=end]);
-    let parsed: Vec<(&[u8], JournalRecord)> = complete
+    let journal_key = match &sources.journal_key {
+        Some(path) => match workflow_journal::JournalKey::load(path) {
+            Ok(key) => Some(key),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        },
+        None => None,
+    };
+    let parsed: Vec<(std::borrow::Cow<[u8]>, JournalRecord)> = complete
         .split_inclusive(|byte| *byte == b'\n')
         .filter_map(|line| {
-            serde_json::from_slice::<JournalRecord>(line)
+            let line = workflow_journal::plain_line(line, journal_key.as_ref())?;
+            serde_json::from_slice::<JournalRecord>(&line)
                 .ok()
                 .map(|record| (line, record))
         })
@@ -514,6 +527,7 @@ mod tests {
             journal: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             artifacts_dir: root.path().join("artifacts"),
+            journal_key: None,
         };
         let workflow = WorkflowId::new();
         let session = SessionId::new();
@@ -664,6 +678,59 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("not the pinned key"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn export_from_a_sealed_journal_bundles_plain_records() {
+        let root = tempfile::tempdir().unwrap();
+        let key_path = root.path().join("journal.key");
+        let sources = BundleSources {
+            journal: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            artifacts_dir: root.path().join("artifacts"),
+            journal_key: Some(key_path.clone()),
+        };
+        let workflow = WorkflowId::new();
+        let command = CommandId::new();
+        let journal = JsonlJournal::open_sealed(
+            &sources.journal,
+            workflow_journal::JournalKey::load_or_create(&key_path).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut sealed = envelope(&workflow, &SessionId::new(), &command);
+        sealed.command = RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
+            url: "https://shop.test/typed-marker-1f3a".into(),
+            wait_until: WaitUntil::DomContentLoaded,
+            timeout_ms: 10_000,
+        }));
+        journal
+            .append(record(
+                &command,
+                CommandPhase::Executing,
+                Some(sealed),
+                None,
+            ))
+            .await
+            .unwrap();
+        let marker = b"typed-marker-1f3a";
+        assert!(!std::fs::read(&sources.journal)
+            .unwrap()
+            .windows(marker.len())
+            .any(|window| window == marker));
+
+        let key = load_or_create_key(&root.path().join("key.pk8")).unwrap();
+        let out = root.path().join("bundle.tar");
+        let summary = export(&sources, &workflow, &key, &out).unwrap();
+        assert_eq!(summary.journal_lines, 1);
+        verify(&out, None).unwrap();
+        let bundle = entries(&out);
+        let text = String::from_utf8(bundle[2].1.clone()).unwrap();
+        assert_eq!(bundle[2].0, "journal.jsonl");
+        assert!(text.contains("typed-marker-1f3a"), "{text}");
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text:?}");
+        assert!(text.lines().all(|line| !line.is_empty()), "{text:?}");
+        assert!(serde_json::from_str::<JournalRecord>(text.trim_end()).is_ok());
     }
 
     #[tokio::test]

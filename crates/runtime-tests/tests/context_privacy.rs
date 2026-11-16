@@ -130,6 +130,7 @@ async fn typed_values_never_reach_the_context_store() {
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
             scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

@@ -1030,7 +1030,7 @@ use checks::storage::record_idempotency_ledgers;
 
 use checks::storage::configured_storage_dirs;
 
-use checks::storage::block_on_inspect;
+use checks::storage::{block_on_inspect, inspect_command_journal};
 
 use checks::firefox_endpoints::inspect_enrolled_firefox;
 

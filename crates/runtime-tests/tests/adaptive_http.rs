@@ -177,6 +177,7 @@ async fn adaptive_http() {
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
             scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
         },
         http: HttpConfig {
             allow_loopback: true,

@@ -71,6 +71,7 @@ Before starting that Firefox workflow, require `firefox-background-attachment` i
 | `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Job journal |
 | `checkpoints_dir` | `./data/storage/checkpoints` | Checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority records |
+| `journal_key_path` | `journal.key` beside the loaded config file | Key that seals command journal records; created owner-only on first use. Records written before a key was set stay readable. |
 
 ## `[context]`
 

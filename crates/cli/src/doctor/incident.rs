@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::{block_on_inspect, idempotency_ledgers, AppConfig};
+use super::{block_on_inspect, idempotency_ledgers, inspect_command_journal, AppConfig};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,9 +23,9 @@ struct StoreObservation {
     sha256: Option<String>,
 }
 
-#[derive(Clone, Copy)]
 enum Kind {
-    Commands,
+    /// Carries the journal key path, when one is configured.
+    Commands(Option<PathBuf>),
     Jobs,
     Idempotency,
 }
@@ -35,7 +35,7 @@ fn locations(config: &AppConfig) -> Vec<(&'static str, PathBuf, Kind)> {
         (
             "command-journal",
             config.storage.journal_path.clone(),
-            Kind::Commands,
+            Kind::Commands(config.storage.journal_key_path.clone()),
         ),
         (
             "scheduler-journal",
@@ -156,8 +156,8 @@ fn inspect(path: PathBuf, kind: Kind) -> Result<(bool, Value)> {
                     json!({"exists": health.exists, "format": health.format, "entries": health.entries, "integrityIssue": health.integrity_issue}),
                 ))
             }
-            Kind::Commands => {
-                let h = workflow_journal::JsonlJournal::inspect(path).await?;
+            Kind::Commands(key_path) => {
+                let h = inspect_command_journal(path, key_path).await?;
                 Ok((
                     !h.torn_tail && h.incompatible_records == 0,
                     json!({"exists":h.exists,"records":h.records,"bytes":h.bytes,"tornTail":h.torn_tail,"incompatibleRecords":h.incompatible_records}),

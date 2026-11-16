@@ -466,6 +466,10 @@ impl AppConfig {
         let path = std::path::absolute(path).map_err(ConfigLoadError::Io)?;
         if let Some(base) = path.parent() {
             config.anchor_relative_paths(base);
+            config
+                .storage
+                .journal_key_path
+                .get_or_insert_with(|| base.join("journal.key"));
         }
         Ok(config)
     }
@@ -484,6 +488,9 @@ impl AppConfig {
         anchor(&mut self.storage.checkpoints_dir);
         anchor(&mut self.storage.authority_path);
         anchor(&mut self.storage.scheduler_journal_path);
+        if let Some(path) = self.storage.journal_key_path.as_mut() {
+            anchor(path);
+        }
         anchor(&mut self.interface.token_records_path);
         self.mcp.workflow_dirs.iter_mut().for_each(anchor);
         if let Some(dir) = self.context.dir.as_mut() {
@@ -589,6 +596,10 @@ pub struct StorageConfig {
     /// Append-only JSONL journal for the in-process task scheduler.
     #[serde(default = "default_scheduler_journal_path")]
     pub scheduler_journal_path: PathBuf,
+    /// Key file that seals command journal records. `AppConfig::load` defaults
+    /// it to `journal.key` beside the config file; unset leaves records plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_key_path: Option<PathBuf>,
 }
 
 fn default_scheduler_journal_path() -> PathBuf {
@@ -602,6 +613,7 @@ impl Default for StorageConfig {
             checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
             authority_path: PathBuf::from("./data/storage/authority.json"),
             scheduler_journal_path: default_scheduler_journal_path(),
+            journal_key_path: None,
         }
     }
 }
@@ -1137,6 +1149,30 @@ scheduler_journal_path = "s"
         );
         assert_eq!(config.browser.upload_roots, vec![dir.path().join("up")]);
         assert_eq!(config.context.dir, Some(dir.path().join("memory")));
+    }
+
+    #[test]
+    fn loaded_config_defaults_the_journal_key_beside_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config.storage.journal_key_path,
+            Some(dir.path().join("journal.key"))
+        );
+        assert_eq!(AppConfig::default().storage.journal_key_path, None);
+
+        std::fs::write(
+            &path,
+            "[storage]\njournal_path = \"j\"\ncheckpoints_dir = \"c\"\nauthority_path = \"a\"\njournal_key_path = \"keys/j.key\"\n",
+        )
+        .unwrap();
+        let explicit = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            explicit.storage.journal_key_path,
+            Some(dir.path().join("keys/j.key"))
+        );
     }
 
     #[test]
