@@ -49,6 +49,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 
+      - name: Dependency advisories, licenses and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   rust:
     name: rust · test
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
