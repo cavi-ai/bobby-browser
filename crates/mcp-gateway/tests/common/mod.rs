@@ -470,6 +470,41 @@ impl worker_pool::InputEngine for LiveWorker {
             text: Some(command.value.clone()),
         }])
     }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &types::ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let types::ControlAction::SetText { value, .. } = &command.action else {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "control action is not supported by this test worker".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        };
+        self.reject_if_closed(page_id)?;
+        *self.probe.last_typed_text.lock().expect("last typed text") = Some(value.clone());
+        Ok(vec![Evidence::ControlAction {
+            action: types::ControlActionEvidence {
+                operation: types::FormControlOperation::SetText,
+                target: command.target.clone(),
+                state: types::FormControlState::Text {
+                    value: value.clone(),
+                },
+                validity: types::FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
+        }])
+    }
 }
 
 #[async_trait::async_trait]

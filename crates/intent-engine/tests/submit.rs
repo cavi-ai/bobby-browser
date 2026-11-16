@@ -20,6 +20,8 @@ struct CallLog {
     post_settlement_calls: Vec<&'static str>,
     /// The page's candidates once a click has landed, when it changes.
     candidates_after_click: Option<Vec<Candidate>>,
+    /// A response replaces the rejected form while the network settles.
+    clear_form_on_network_quiet: bool,
 }
 
 struct FakeBrowser {
@@ -91,6 +93,31 @@ impl IntentBrowser for FakeBrowser {
         _page_id: &PageId,
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let settling = self
+            .calls
+            .lock()
+            .expect("call log")
+            .clear_form_on_network_quiet;
+        if settling {
+            match &command.condition {
+                WaitCondition::Element { .. } => {
+                    tokio::time::sleep(std::time::Duration::from_millis(command.timeout_ms)).await;
+                    return Err(unsupported("submit control still visible"));
+                }
+                WaitCondition::NetworkQuiet { .. } => {
+                    self.calls.lock().expect("call log").form_snapshot =
+                        Some(types::FormSnapshot {
+                            schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
+                            page_id: PageId::new(),
+                            forms: Vec::new(),
+                            unowned_controls: Vec::new(),
+                            truncated: false,
+                        });
+                    return Ok(Vec::new());
+                }
+                _ => {}
+            }
+        }
         self.calls
             .lock()
             .expect("call log")
@@ -540,6 +567,48 @@ fn email_snapshot(valid: bool) -> types::FormSnapshot {
         unowned_controls: Vec::new(),
         truncated: false,
     }
+}
+
+#[tokio::test]
+async fn implicit_submit_reads_validation_after_the_response_settles() {
+    let calls = Arc::new(Mutex::new(CallLog {
+        form_snapshot: Some(email_snapshot(false)),
+        clear_form_on_network_quiet: true,
+        ..CallLog::default()
+    }));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+            purpose: "Submit".into(),
+            hints: IntentHints {
+                role: Some("button".into()),
+                ..IntentHints::default()
+            },
+            expected_state: None,
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the response replaced the invalid form: {outcome:?}");
+    };
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::IntentExecution { record } if record.verification == "formChanged"
+        )),
+        "the pre-response invalid form must not reject the submit: {evidence:?}"
+    );
+    assert_eq!(calls.lock().expect("call log").clicks.len(), 1);
 }
 
 async fn settle_network_quiet(snapshot: Option<types::FormSnapshot>) -> IntentOutcome {

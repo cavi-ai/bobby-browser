@@ -82,6 +82,11 @@ pub(super) async fn await_change(
                 });
             }
         }
+        // Read validation after the response has settled. Reusing a snapshot
+        // taken before this wait can reject a form the response just replaced.
+        let check_rejection = started.elapsed() >= REJECTION_AFTER
+            && (tokio::time::Instant::now() >= deadline
+                || network_quiet(page_id, browser, CONTROL_POLL_MS * 2).await);
         let mut settlement = read_settlement(page_id, browser, before).await;
         if changed_fields(page_id, browser, &settlement)
             .await
@@ -106,9 +111,7 @@ pub(super) async fn await_change(
         }
         let now = tokio::time::Instant::now();
         let last = now >= deadline;
-        if now.duration_since(started) >= REJECTION_AFTER
-            && (last || network_quiet(page_id, browser, CONTROL_POLL_MS * 2).await)
-        {
+        if check_rejection {
             if let submit_settlement::Observation::Looked(issues) = settlement.issues {
                 if !issues.is_empty() {
                     return Ok(PageChange::Rejected { issues });

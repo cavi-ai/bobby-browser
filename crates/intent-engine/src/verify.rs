@@ -160,10 +160,12 @@ pub fn is_file_input(candidate: &Candidate) -> bool {
 /// proof that a reactive application accepted or retained the value.
 pub fn verify_fill(value: &ControlAction, evidence: &[Evidence]) -> Result<(), String> {
     match value {
-        ControlAction::SetText { value, .. } => verify_typed_value(value, evidence),
+        ControlAction::SetText { value, clear_first } => {
+            verify_typed_value(value, *clear_first, evidence)
+        }
         ControlAction::SelectOne { value } => verify_selected_value(value, evidence),
         ControlAction::SetChecked { checked } => verify_checked_state(*checked, evidence),
-        ControlAction::SetFiles { paths } => verify_upload_paths(paths, evidence),
+        ControlAction::SetFiles { paths } => verify_uploaded_files(paths, evidence),
         ControlAction::SelectMany { values } => verify_selected_values(values, evidence),
         ControlAction::Clear => verify_cleared(evidence),
         ControlAction::PasswordManagerFill => verify_password_manager_filled(evidence),
@@ -368,7 +370,14 @@ pub fn same_phone_number(typed: &str, read: &str) -> bool {
     }
 }
 
-fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), String> {
+fn verify_typed_value(
+    expected: &str,
+    clear_first: bool,
+    evidence: &[Evidence],
+) -> Result<(), String> {
+    if let Some(action) = control_evidence(evidence, FormControlOperation::SetText) {
+        return verify_control_text(expected, clear_first, action);
+    }
     let control_valid = evidence.iter().find_map(|item| match item {
         Evidence::Configuration { name, value } if name == "formControlValid" => {
             Some(value == "true")
@@ -416,6 +425,80 @@ fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), Strin
             "typed value mismatch: expected {expected:?}, observed {observed:?}"
         ))
     }
+}
+
+fn control_evidence(
+    evidence: &[Evidence],
+    operation: FormControlOperation,
+) -> Option<&types::ControlActionEvidence> {
+    evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action } if action.operation == operation => Some(action),
+        _ => None,
+    })
+}
+
+fn verify_control_text(
+    expected: &str,
+    clear_first: bool,
+    action: &types::ControlActionEvidence,
+) -> Result<(), String> {
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the form control".into()));
+    }
+    match &action.state {
+        FormControlState::Text { value }
+            if value == expected
+                || value.contains(expected)
+                || (!clear_first && value.ends_with(expected))
+                || same_phone_number(expected, value) =>
+        {
+            Ok(())
+        }
+        FormControlState::Empty if expected.is_empty() => Ok(()),
+        FormControlState::Redacted { present } if *present != expected.is_empty() => Ok(()),
+        FormControlState::Text { value } => Err(format!(
+            "typed value mismatch: expected {expected:?}, observed {value:?}"
+        )),
+        state => Err(format!(
+            "typed value evidence had incompatible state: {state:?}"
+        )),
+    }
+}
+
+fn verify_uploaded_files(expected: &[String], evidence: &[Evidence]) -> Result<(), String> {
+    let Some(action) = control_evidence(evidence, FormControlOperation::SetFiles) else {
+        return verify_upload_paths(expected, evidence);
+    };
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the upload".into()));
+    }
+    match &action.state {
+        FormControlState::Files { count, names }
+            if *count == expected.len() || (*count == 0 && file_names_match(expected, names)) =>
+        {
+            Ok(())
+        }
+        FormControlState::Files { .. } => {
+            Err("upload evidence does not match requested sources".into())
+        }
+        _ => Err("typed file evidence had incompatible state".into()),
+    }
+}
+
+fn file_names_match(expected: &[String], names: &[String]) -> bool {
+    let wanted: BTreeSet<&str> = expected
+        .iter()
+        .filter_map(|path| Path::new(path).file_name()?.to_str())
+        .collect();
+    !wanted.is_empty() && wanted == names.iter().map(String::as_str).collect()
 }
 
 fn verify_upload_paths(expected: &[String], evidence: &[Evidence]) -> Result<(), String> {
@@ -475,7 +558,10 @@ mod typed_value_tests {
                 value: "true".into(),
             },
         ];
-        assert_eq!(verify_typed_value("ada@example.com", &evidence), Ok(()));
+        assert_eq!(
+            verify_typed_value("ada@example.com", true, &evidence),
+            Ok(())
+        );
     }
 
     #[test]
@@ -484,7 +570,7 @@ mod typed_value_tests {
             selector: String::new(),
             text: Some("[redacted]".into()),
         }];
-        assert!(verify_typed_value("ada@example.com", &evidence).is_err());
+        assert!(verify_typed_value("ada@example.com", true, &evidence).is_err());
     }
 }
 

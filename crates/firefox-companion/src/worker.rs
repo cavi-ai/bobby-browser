@@ -5069,242 +5069,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let snapshot = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
-            .await?
-            .into_iter()
-            .find_map(|item| match item {
-                Evidence::FormSnapshot { snapshot } => Some(snapshot),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "missing form snapshot",
-                    false,
-                )
-            })?;
-        // The control is the element the target resolves to, read with the
-        // snapshot's projection; snapshot names can differ from resolver names.
-        let top_context = self.context(page_id).await?;
-        let (context, selector) = self
-            .resolve_input_target(page_id, &top_context, "", Some(&target))
-            .await?;
-        let control = self
-            .describe_control(&context, &selector, &command.target)
-            .await?
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::TargetNotFound,
-                    "form control target was not found",
-                    false,
-                )
-            })?;
-        worker_pool::validate_control_action(&control, &command.action)?;
-        let mut committed: Option<Vec<String>> = None;
-        match &command.action {
-            ControlAction::SetText { value, clear_first } => {
-                worker_pool::InputEngine::type_text(
-                    self,
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        value: value.clone(),
-                        clear_first: *clear_first,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SelectOne { value } => {
-                committed = Some(vec![
-                    self.select_option_committed(page_id, &target, value)
-                        .await?,
-                ]);
-            }
-            ControlAction::SetChecked { checked } => {
-                worker_pool::InputEngine::type_text(
-                    self,
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        value: checked.to_string(),
-                        clear_first: false,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SetFiles { paths } => {
-                worker_pool::InputEngine::upload_files(
-                    self,
-                    page_id,
-                    &UploadFilesCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        paths: paths.clone(),
-                    },
-                )
-                .await?;
-            }
-            ControlAction::Activate => {
-                worker_pool::InputEngine::click(
-                    self,
-                    page_id,
-                    &ClickCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        boundary: false,
-                        expected_url: None,
-                        modifiers: Vec::new(),
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SelectMany { values } => {
-                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
-            }
-            // Rich-text editors that own their DOM revert direct edits but
-            // accept select-all and Backspace, which typing with clearFirst sends.
-            ControlAction::Clear
-                if control.control_kind == types::FormControlKind::ContentEditable =>
-            {
-                worker_pool::InputEngine::type_text(
-                    self,
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        value: String::new(),
-                        clear_first: true,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            }
-            ControlAction::Clear => {
-                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio'))el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
-            }
-            ControlAction::Credential { name } => {
-                let origin = self.context_origin(&context).await?;
-                let credential =
-                    worker_pool::credentials::select(&self.credentials, name, &origin)?;
-                let secret = worker_pool::credentials::resolve(credential).await?;
-                // The command can wait on an unlock; the page may have moved on.
-                if self.context_origin(&context).await? != origin {
-                    return Err(driver_error(
-                        ErrorCode::PolicyDenied,
-                        "the field's page changed origin while its credential was read",
-                        false,
-                    ));
-                }
-                self.evaluate_control_script(page_id, &target, &secret.fill_script())
-                    .await?;
-            }
-            // Only watches: the field is never clicked, focused or typed into,
-            // which would raise the browser's own credential dialogs.
-            ControlAction::PasswordManagerFill => {
-                let deadline =
-                    tokio::time::Instant::now() + worker_pool::PASSWORD_MANAGER_FILL_WAIT;
-                while tokio::time::Instant::now() < deadline {
-                    match self
-                        .describe_control(&context, &selector, &command.target)
-                        .await
-                    {
-                        Ok(Some(control))
-                            if !worker_pool::password_manager_filled(&control.state) =>
-                        {
-                            tokio::time::sleep(worker_pool::PASSWORD_MANAGER_FILL_POLL).await;
-                        }
-                        _ => break,
-                    }
-                }
-            }
-        }
-        // An activate is complete once dispatched: its click may remove the
-        // control or navigate away, so what is read after it is best effort.
-        let activated = matches!(command.action, ControlAction::Activate);
-        let after = match worker_pool::ObservationEngine::form_snapshot(self, page_id, None).await {
-            Ok(evidence) => evidence.into_iter().find_map(|item| match item {
-                Evidence::FormSnapshot { snapshot } => Some(snapshot),
-                _ => None,
-            }),
-            Err(_) if activated => None,
-            Err(error) => return Err(error),
-        };
-        if after.is_none() && !activated {
-            return Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "missing post-action form snapshot",
-                true,
-            ));
-        }
-        let replaced = async || -> Result<Option<FormControl>, CommandError> {
-            let (context, selector) = self
-                .resolve_input_target(page_id, &top_context, "", Some(&target))
-                .await?;
-            self.describe_control(&context, &selector, &command.target)
-                .await
-        };
-        let after_control = match self
-            .describe_control(&context, &selector, &command.target)
-            .await
-        {
-            Ok(Some(control)) => Some(control),
-            _ => replaced().await.ok().flatten(),
-        };
-        let node_replaced = after_control.is_none();
-        let control = match after_control {
-            Some(control) => control,
-            None if activated => control,
-            None => {
-                return Err(driver_error(
-                    ErrorCode::TargetDetached,
-                    "form control was replaced after dispatch",
-                    true,
-                ))
-            }
-        };
-        let mut action_evidence = worker_pool::control_action_evidence(
-            &control,
-            &command.action,
-            node_replaced,
-            committed.as_deref(),
-        )?;
-        // Conditional fields: controls that exist only after this action,
-        // surfaced so the agent need not re-snapshot to discover them.
-        let before_targets: Vec<&types::FormControlTarget> = snapshot
-            .forms
-            .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(snapshot.unowned_controls.iter())
-            .filter_map(|control| control.target.as_ref())
-            .collect();
-        action_evidence.revealed_controls = after
-            .iter()
-            .flat_map(|after| after.forms.iter().flat_map(|form| form.controls.iter()))
-            .chain(after.iter().flat_map(|after| after.unowned_controls.iter()))
-            .filter(|control| {
-                control.target.as_ref().is_some_and(|target| {
-                    !before_targets
-                        .iter()
-                        .any(|before| worker_pool::target_specs_equivalent(before, target))
-                })
-            })
-            .take(8)
-            .map(|control| types::RevealedControl {
-                control_kind: control.control_kind,
-                accessible_name: control.accessible_name.clone(),
-                target: control.target.clone(),
-            })
-            .collect();
-        Ok(vec![
-            Evidence::ControlAction {
-                action: action_evidence,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ])
+        worker_pool::control_action_fill::run(self, page_id, command).await
     }
 
     async fn verify_framed_typed_value(
@@ -5768,6 +5533,256 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             Err(error) => return Err(error),
         }
         Ok(self.with_redaction_diagnostics(evidence))
+    }
+}
+
+pub struct FirefoxPreparedControl {
+    context: String,
+    selector: String,
+    spec: TargetSpec,
+}
+
+#[async_trait]
+impl worker_pool::control_action_fill::ControlActionAdapter for FirefoxCompanionWorker {
+    type Prepared = FirefoxPreparedControl;
+
+    fn detached(&self) -> CommandError {
+        driver_error(
+            ErrorCode::TargetDetached,
+            "form control was replaced after dispatch",
+            true,
+        )
+    }
+
+    async fn read_snapshot(
+        &self,
+        page_id: &PageId,
+        after: bool,
+    ) -> Result<types::FormSnapshot, CommandError> {
+        let evidence = worker_pool::ObservationEngine::form_snapshot(self, page_id, None).await?;
+        evidence
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    if after {
+                        "missing post-action form snapshot"
+                    } else {
+                        "missing form snapshot"
+                    },
+                    after,
+                )
+            })
+    }
+
+    async fn resolve(
+        &self,
+        page_id: &PageId,
+        target: &FormControlTarget,
+        _require_visible: bool,
+    ) -> Result<FirefoxPreparedControl, CommandError> {
+        let spec = form_control_target_spec(target);
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(&spec))
+            .await?;
+        Ok(FirefoxPreparedControl {
+            context,
+            selector,
+            spec,
+        })
+    }
+
+    async fn describe(
+        &self,
+        prepared: &FirefoxPreparedControl,
+        target: &FormControlTarget,
+    ) -> Result<Option<FormControl>, CommandError> {
+        self.describe_control(&prepared.context, &prepared.selector, target)
+            .await
+    }
+
+    async fn recover(
+        &self,
+        page_id: &PageId,
+        target: &FormControlTarget,
+        require_visible: bool,
+        _activated: bool,
+    ) -> Result<Option<FormControl>, CommandError> {
+        match self.resolve(page_id, target, require_visible).await {
+            Ok(prepared) => Ok(self.describe(&prepared, target).await.ok().flatten()),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        value: &str,
+        clear_first: bool,
+    ) -> Result<(), CommandError> {
+        worker_pool::InputEngine::type_text(
+            self,
+            page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(prepared.spec.clone()),
+                value: value.to_owned(),
+                clear_first,
+                expected_url: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn set_checked(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        checked: bool,
+    ) -> Result<(), CommandError> {
+        // Firefox checks a box by typing the bool. That is this adapter's
+        // primitive, not a Chromium call.
+        worker_pool::InputEngine::type_text(
+            self,
+            page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(prepared.spec.clone()),
+                value: checked.to_string(),
+                clear_first: false,
+                expected_url: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn select_one(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        value: &str,
+        _kind: types::FormControlKind,
+    ) -> Result<String, CommandError> {
+        self.select_option_committed(page_id, &prepared.spec, value)
+            .await
+    }
+
+    async fn select_many(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        values: &[String],
+        _kind: types::FormControlKind,
+    ) -> Result<Option<Vec<String>>, CommandError> {
+        self.evaluate_control_script(page_id, &prepared.spec, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
+        Ok(None)
+    }
+
+    async fn set_files(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        _before: &FormControl,
+        paths: &[String],
+    ) -> Result<(), CommandError> {
+        worker_pool::InputEngine::upload_files(
+            self,
+            page_id,
+            &UploadFilesCommand {
+                selector: String::new(),
+                target: Some(prepared.spec.clone()),
+                paths: paths.to_vec(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn clear(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        kind: types::FormControlKind,
+    ) -> Result<(), CommandError> {
+        if kind == types::FormControlKind::ContentEditable {
+            worker_pool::InputEngine::type_text(
+                self,
+                page_id,
+                &TypeTextCommand {
+                    selector: String::new(),
+                    target: Some(prepared.spec.clone()),
+                    value: String::new(),
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        self.evaluate_control_script(page_id, &prepared.spec, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio'))el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+        Ok(())
+    }
+
+    async fn activate(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+    ) -> Result<(), CommandError> {
+        worker_pool::InputEngine::click(
+            self,
+            page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(prepared.spec.clone()),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn fill_credential(
+        &self,
+        page_id: &PageId,
+        prepared: &FirefoxPreparedControl,
+        _target: &FormControlTarget,
+        name: &str,
+    ) -> Result<(), CommandError> {
+        let origin = self.context_origin(&prepared.context).await?;
+        let credential = worker_pool::credentials::select(&self.credentials, name, &origin)?;
+        let secret = worker_pool::credentials::resolve(credential).await?;
+        if self.context_origin(&prepared.context).await? != origin {
+            return Err(driver_error(
+                ErrorCode::PolicyDenied,
+                "the field's page changed origin while its credential was read",
+                false,
+            ));
+        }
+        self.evaluate_control_script(page_id, &prepared.spec, &secret.fill_script())
+            .await?;
+        Ok(())
+    }
+
+    fn decorate(&self, mut evidence: Vec<Evidence>) -> Vec<Evidence> {
+        evidence.push(self.evidence(InteractionPath::EngineNative));
+        evidence
     }
 }
 

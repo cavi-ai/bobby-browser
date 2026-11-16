@@ -53,7 +53,7 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
     )
     .await;
     assert!(matches!(outcome, IntentOutcome::Completed { .. }));
-    assert_eq!(calls.lock().unwrap().type_text.len(), 2);
+    assert_eq!(calls.lock().unwrap().control_action.len(), 2);
 }
 
 async fn complete_phone_field(typed: &str, read_back: &str) -> IntentOutcome {
@@ -210,7 +210,7 @@ async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name
     .await;
 
     assert!(matches!(outcome, IntentOutcome::Completed { .. }));
-    assert_eq!(calls.lock().unwrap().type_text.len(), 1);
+    assert_eq!(calls.lock().unwrap().control_action.len(), 1);
 }
 
 #[tokio::test]
@@ -338,42 +338,105 @@ impl IntentBrowser for FakeBrowser {
             .expect("call log")
             .control_action
             .push(command.clone());
-        let (operation, state) = match &command.action {
-            ControlAction::SelectOne { value } => (
+        let recorded = |operation, state, valid, message| {
+            Ok(vec![Evidence::ControlAction {
+                action: ControlActionEvidence {
+                    operation,
+                    target: command.target.clone(),
+                    state,
+                    validity: FormControlValidity {
+                        will_validate: true,
+                        valid,
+                        flags: Vec::new(),
+                        message,
+                        described_by: Vec::new(),
+                    },
+                    node_replaced: false,
+                    revealed_controls: Vec::new(),
+                },
+            }])
+        };
+        match &command.action {
+            ControlAction::SetText { .. } => {
+                if self.type_text_evidence.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let observed = self.type_text_evidence.iter().find_map(|item| match item {
+                    Evidence::Element { text, .. } => text.clone(),
+                    _ => None,
+                });
+                let valid = self
+                    .type_text_evidence
+                    .iter()
+                    .find_map(|item| match item {
+                        Evidence::Configuration { name, value } if name == "formControlValid" => {
+                            Some(value == "true")
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(true);
+                let message = self.type_text_evidence.iter().find_map(|item| match item {
+                    Evidence::Configuration { name, value }
+                        if name == "formControlValidationMessage" && !value.is_empty() =>
+                    {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                });
+                let Some(text) = observed else {
+                    return Ok(Vec::new());
+                };
+                let state = if text.is_empty() {
+                    FormControlState::Empty
+                } else {
+                    FormControlState::Text { value: text }
+                };
+                recorded(FormControlOperation::SetText, state, valid, message)
+            }
+            ControlAction::SetFiles { paths } => {
+                if self.upload_evidence.is_empty() {
+                    return Ok(Vec::new());
+                }
+                recorded(
+                    FormControlOperation::SetFiles,
+                    FormControlState::Files {
+                        count: paths.len(),
+                        names: Vec::new(),
+                    },
+                    true,
+                    None,
+                )
+            }
+            ControlAction::SelectOne { value } => recorded(
                 FormControlOperation::SelectOne,
                 FormControlState::Selection {
                     values: vec![value.clone()],
                 },
+                true,
+                None,
             ),
-            ControlAction::SetChecked { checked } => (
+            ControlAction::SetChecked { checked } => recorded(
                 FormControlOperation::SetChecked,
                 FormControlState::Checked { checked: *checked },
+                true,
+                None,
             ),
-            ControlAction::SelectMany { values } => (
+            ControlAction::SelectMany { values } => recorded(
                 FormControlOperation::SelectMany,
                 FormControlState::Selection {
                     values: values.clone(),
                 },
+                true,
+                None,
             ),
-            ControlAction::Clear => (FormControlOperation::Clear, FormControlState::Empty),
-            _ => return Err(unsupported("control_action")),
-        };
-        Ok(vec![Evidence::ControlAction {
-            action: ControlActionEvidence {
-                operation,
-                target: command.target.clone(),
-                state,
-                validity: FormControlValidity {
-                    will_validate: true,
-                    valid: true,
-                    flags: Vec::new(),
-                    message: None,
-                    described_by: Vec::new(),
-                },
-                node_replaced: false,
-                revealed_controls: Vec::new(),
-            },
-        }])
+            ControlAction::Clear => recorded(
+                FormControlOperation::Clear,
+                FormControlState::Empty,
+                true,
+                None,
+            ),
+            _ => Err(unsupported("control_action")),
+        }
     }
 
     async fn wait_for(
@@ -683,10 +746,18 @@ async fn fill_text_types_and_verifies() {
     };
     {
         let log = calls.lock().expect("call log");
-        assert_eq!(log.type_text.len(), 1);
-        assert_eq!(log.type_text[0].value, "Ada");
-        assert!(log.type_text[0].clear_first);
+        assert!(log.type_text.is_empty());
         assert!(log.upload_files.is_empty());
+        assert!(matches!(
+            log.control_action.as_slice(),
+            [ControlActionCommand {
+                action: ControlAction::SetText {
+                    value,
+                    clear_first: true,
+                },
+                ..
+            }] if value == "Ada"
+        ));
     }
     let record = evidence.iter().find_map(|item| match item {
         Evidence::IntentExecution { record } => Some(record),
@@ -855,8 +926,10 @@ async fn fill_rejects_browser_invalid_control_even_when_value_matches() {
                 && error.message.contains("Please match the requested format")
                 && evidence.iter().any(|item| matches!(
                     item,
-                    Evidence::Configuration { name, value }
-                        if name == "formControlValid" && value == "false"
+                    Evidence::ControlAction { action }
+                        if !action.validity.valid
+                            && action.validity.message.as_deref()
+                                == Some("Please match the requested format.")
                 ))
     ));
 }
@@ -894,12 +967,15 @@ async fn fill_files_uploads_and_verifies() {
     };
     {
         let log = calls.lock().expect("call log");
-        assert_eq!(log.upload_files.len(), 1);
-        assert_eq!(
-            log.upload_files[0].paths,
-            vec!["/tmp/resume.txt".to_owned()]
-        );
         assert!(log.type_text.is_empty());
+        assert!(log.upload_files.is_empty());
+        assert!(matches!(
+            log.control_action.as_slice(),
+            [ControlActionCommand {
+                action: ControlAction::SetFiles { paths },
+                ..
+            }] if paths == &["/tmp/resume.txt".to_owned()]
+        ));
     }
     assert!(evidence.iter().any(|item| matches!(
         item,
@@ -1354,6 +1430,38 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
         }])
     }
 
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let text = match &command.action {
+            ControlAction::SetText { value, .. } => value.clone(),
+            _ => return Err(unsupported("control_action")),
+        };
+        self.calls
+            .lock()
+            .expect("call log")
+            .control_action
+            .push(command.clone());
+        Ok(vec![Evidence::ControlAction {
+            action: ControlActionEvidence {
+                operation: FormControlOperation::SetText,
+                target: command.target.clone(),
+                state: FormControlState::Text { value: text },
+                validity: FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
+        }])
+    }
+
     async fn upload_files(
         &self,
         _page_id: &PageId,
@@ -1446,5 +1554,5 @@ async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
         "{outcome:?}"
     );
     let log = calls.lock().expect("call log");
-    assert_eq!(log.type_text.len(), 2, "{:?}", log.type_text);
+    assert_eq!(log.control_action.len(), 2, "{:?}", log.control_action);
 }

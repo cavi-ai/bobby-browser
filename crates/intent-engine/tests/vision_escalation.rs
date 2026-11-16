@@ -139,6 +139,36 @@ impl IntentBrowser for FakeBrowser {
             });
         }
         let (operation, state) = match &command.action {
+            ControlAction::SetText { value, .. } => {
+                if self.type_text_evidence.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let observed = self.type_text_evidence.iter().find_map(|item| match item {
+                    Evidence::Element { text, .. } => text.clone(),
+                    _ => None,
+                });
+                (
+                    FormControlOperation::SetText,
+                    FormControlState::Text {
+                        value: observed.unwrap_or_else(|| value.clone()),
+                    },
+                )
+            }
+            ControlAction::SetFiles { paths } => {
+                if let Some(error) = &self.upload_files_error {
+                    return Err(error.clone());
+                }
+                if self.upload_files_evidence.is_empty() {
+                    return Ok(Vec::new());
+                }
+                (
+                    FormControlOperation::SetFiles,
+                    FormControlState::Files {
+                        count: paths.len(),
+                        names: Vec::new(),
+                    },
+                )
+            }
             ControlAction::SelectOne { value } => (
                 FormControlOperation::SelectOne,
                 FormControlState::Selection {
