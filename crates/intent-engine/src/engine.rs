@@ -1738,7 +1738,8 @@ async fn execute_fill(
 const PASSWORD_MANAGER_PROMPT: &str = "the browser password manager's own prompt that signs in \
     with or fills the saved login; never a field or button of the page";
 
-/// Page controls a password-manager click must never land on.
+/// Roles that count as a page control: a password-manager click must never
+/// land on one, and a vision click near one snaps onto it.
 const PAGE_CONTROL_ROLES: &[&str] = &[
     "textbox",
     "searchbox",
@@ -5217,7 +5218,60 @@ async fn escalate_with_vision(
 
     // The model indexes into the exact list the prompt carried; resolve
     // against that same view.
-    let action = viewport_action(page_id, browser, frame_width, &proposal.action).await;
+    let mut action = viewport_action(page_id, browser, frame_width, &proposal.action).await;
+    if let VisionAction::Click { x, y } = action {
+        match ground_click(page_id, browser, x, y).await {
+            Grounded::Unchanged => {}
+            Grounded::Snapped { x, y } => action = VisionAction::Click { x, y },
+            Grounded::Ambiguous => {
+                let message = "vision pointed between controls".to_string();
+                record_context_ranked_vision_metric(
+                    metric_context.as_ref(),
+                    context_ranked,
+                    provider_latency_ms,
+                    Some(proposal.confidence),
+                    VisionProposalOutcome::Rejected,
+                    Some(VerificationMetricResult::OtherRejected),
+                );
+                record_escalation(
+                    &corpus,
+                    corpus_inputs.as_ref(),
+                    &purpose,
+                    intent_kind,
+                    kind,
+                    &proposal,
+                    false,
+                    "visionPointAmbiguous",
+                    Some(message.clone()),
+                    None,
+                );
+                let mut evidence = base_evidence;
+                evidence.append(&mut screenshot_evidence);
+                evidence.push(intent_evidence(execution_record_with_path(
+                    intent_kind,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    None,
+                    format!("visionPointAmbiguous:{verification}"),
+                    ResolutionDetails {
+                        path: IntentResolutionPath::VisionFallback,
+                        vision_proposal_sha256: Some(proposal_hash),
+                        artifact_ids: artifact_ids_from(&screenshot_evidence),
+                    },
+                )));
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message,
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                };
+            }
+        }
+    }
     let mut act_evidence = match execute_vision_action(
         page_id,
         browser,
@@ -5325,6 +5379,60 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// CSS-pixel radii probed around a click that lands on no control.
+const GROUNDING_RADII: [f64; 2] = [4.0, 8.0];
+/// Unit offsets of the probe directions.
+const GROUNDING_DIRECTIONS: [(f64, f64); 8] = [
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (DIAGONAL, DIAGONAL),
+    (-DIAGONAL, DIAGONAL),
+    (DIAGONAL, -DIAGONAL),
+    (-DIAGONAL, -DIAGONAL),
+];
+const DIAGONAL: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+enum Grounded {
+    Unchanged,
+    Snapped { x: f64, y: f64 },
+    Ambiguous,
+}
+
+/// A click on no control snaps to the only control within a few pixels and is
+/// declined when several are; lookup errors leave the click unchanged.
+async fn ground_click(page_id: &PageId, browser: &dyn IntentBrowser, x: f64, y: f64) -> Grounded {
+    let is_control = |hit: &Option<(String, String)>| {
+        hit.as_ref()
+            .is_some_and(|(role, _)| PAGE_CONTROL_ROLES.contains(&role.as_str()))
+    };
+    match browser.element_at_point(page_id, x, y).await {
+        Ok(hit) if !is_control(&hit) => {}
+        _ => return Grounded::Unchanged,
+    }
+    let mut found: Vec<((String, String), (f64, f64))> = Vec::new();
+    for radius in GROUNDING_RADII {
+        for (dx, dy) in GROUNDING_DIRECTIONS {
+            let (px, py) = (x + dx * radius, y + dy * radius);
+            let hit = match browser.element_at_point(page_id, px, py).await {
+                Ok(hit) => hit,
+                Err(_) => return Grounded::Unchanged,
+            };
+            if let (true, Some(pair)) = (is_control(&hit), hit) {
+                if !found.iter().any(|(seen, _)| *seen == pair) {
+                    found.push((pair, (px, py)));
+                }
+            }
+        }
+    }
+    match found.as_slice() {
+        [] => Grounded::Unchanged,
+        [(_, (x, y))] => Grounded::Snapped { x: *x, y: *y },
+        _ => Grounded::Ambiguous,
+    }
 }
 
 /// Intents whose vision answer clicks the picked candidate; `locate` only
