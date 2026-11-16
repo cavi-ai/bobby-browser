@@ -9,8 +9,10 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 durable-file.workspace = true
+ring.workspace = true
 same-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +21,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

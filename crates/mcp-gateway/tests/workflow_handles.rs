@@ -2363,6 +2363,7 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
             scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

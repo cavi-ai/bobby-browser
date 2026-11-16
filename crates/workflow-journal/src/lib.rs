@@ -17,10 +17,12 @@ use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase,
 pub const DEFAULT_MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 mod health;
+mod seal;
 pub use health::{
     scan_jsonl, scan_jsonl_prefetched, LedgerDecoder, LedgerHealth, LedgerIssue, LedgerIssueKind,
     PreparedRecord, RecordObservation, ScanControl, ScanOptions, SequenceRule, SequenceVerdict,
 };
+pub use seal::{plain_line, JournalKey};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +159,7 @@ pub struct JsonlJournal {
     path: Arc<PathBuf>,
     writer: Arc<Mutex<WriterState>>,
     max_record_bytes: usize,
+    key: Option<Arc<JournalKey>>,
 }
 
 struct WriterState {
@@ -201,6 +204,7 @@ async fn read_indexed_records(
     file: &File,
     entries: &[IndexedRecord],
     id: &CommandId,
+    key: Option<&JournalKey>,
 ) -> Result<Option<Vec<JournalRecord>>, JournalError> {
     let mut reader = BufReader::new(file.try_clone().await?);
     let mut records = Vec::with_capacity(entries.len());
@@ -223,7 +227,10 @@ async fn read_indexed_records(
         if !line.ends_with(b"\n") || digest != entry.digest {
             return Ok(None);
         }
-        let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) else {
+        let Some(plain) = plain_line(&line, key) else {
+            return Ok(None);
+        };
+        let Ok(record) = serde_json::from_slice::<JournalRecord>(&plain) else {
             return Ok(None);
         };
         if &record.command_id != id {
@@ -274,19 +281,37 @@ impl JsonlJournal {
         path: impl AsRef<Path>,
         max_record_bytes: usize,
     ) -> Result<Self, JournalError> {
+        Self::open_inner(path.as_ref(), max_record_bytes, None).await
+    }
+
+    /// Open a journal whose new records are sealed with `key`. Existing
+    /// plaintext records stay readable.
+    pub async fn open_sealed(
+        path: impl AsRef<Path>,
+        key: JournalKey,
+    ) -> Result<Self, JournalError> {
+        Self::open_inner(path.as_ref(), DEFAULT_MAX_RECORD_BYTES, Some(Arc::new(key))).await
+    }
+
+    async fn open_inner(
+        path: &Path,
+        max_record_bytes: usize,
+        key: Option<Arc<JournalKey>>,
+    ) -> Result<Self, JournalError> {
         validate_record_limit(max_record_bytes)?;
-        let path = path.as_ref().to_path_buf();
+        let path = path.to_path_buf();
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let writer = open_writer(&path, max_record_bytes).await?;
+        let writer = open_writer(&path, max_record_bytes, key.as_deref()).await?;
         Ok(Self {
             path: Arc::new(path),
             writer: Arc::new(Mutex::new(writer)),
             max_record_bytes,
+            key,
         })
     }
 
@@ -310,8 +335,23 @@ impl JsonlJournal {
         path: impl AsRef<Path>,
         max_record_bytes: usize,
     ) -> Result<JournalHealth, JournalError> {
+        Self::inspect_inner(path.as_ref(), max_record_bytes, None).await
+    }
+
+    /// Inspect a journal that may hold records sealed with `key`.
+    pub async fn inspect_sealed(
+        path: impl AsRef<Path>,
+        key: &JournalKey,
+    ) -> Result<JournalHealth, JournalError> {
+        Self::inspect_inner(path.as_ref(), DEFAULT_MAX_RECORD_BYTES, Some(key)).await
+    }
+
+    async fn inspect_inner(
+        path: &Path,
+        max_record_bytes: usize,
+        key: Option<&JournalKey>,
+    ) -> Result<JournalHealth, JournalError> {
         validate_record_limit(max_record_bytes)?;
-        let path = path.as_ref();
         let file = match open_regular_read(path).await {
             Ok(Some(file)) => file,
             Ok(None) => {
@@ -327,7 +367,7 @@ impl JsonlJournal {
             Err(error) => return Err(error.into()),
         };
         let metadata = file.metadata().await?;
-        let Scan { scan, records, .. } = scan_file(file, None, max_record_bytes).await?;
+        let Scan { scan, records, .. } = scan_file(file, None, max_record_bytes, key).await?;
         Ok(JournalHealth {
             exists: true,
             bytes: metadata.len(),
@@ -356,7 +396,7 @@ impl JsonlJournal {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        *writer = open_writer(&self.path, self.max_record_bytes).await?;
+        *writer = open_writer(&self.path, self.max_record_bytes, self.key.as_deref()).await?;
         Ok(())
     }
 }
@@ -404,7 +444,11 @@ async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
     Ok(file)
 }
 
-async fn open_writer(path: &Path, max_record_bytes: usize) -> Result<WriterState, JournalError> {
+async fn open_writer(
+    path: &Path,
+    max_record_bytes: usize,
+    key: Option<&JournalKey>,
+) -> Result<WriterState, JournalError> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata)
             if !metadata.is_file()
@@ -432,6 +476,7 @@ async fn open_writer(path: &Path, max_record_bytes: usize) -> Result<WriterState
         file.try_clone().await?,
         Some(&mut offsets),
         max_record_bytes,
+        key,
     )
     .await?;
     let next_sequence = if scan.scan.torn_tail
@@ -497,15 +542,21 @@ async fn open_writer(path: &Path, max_record_bytes: usize) -> Result<WriterState
                 archived_torn_tail = true;
             }
             if !line.iter().all(u8::is_ascii_whitespace) {
-                let id = match serde_json::from_slice::<JournalRecord>(&line) {
-                    Ok(record) => Some(record.command_id),
-                    Err(_) => {
+                let plain = plain_line(&line, key);
+                let id = match plain
+                    .as_deref()
+                    .map(serde_json::from_slice::<JournalRecord>)
+                {
+                    Some(Ok(record)) => Some(record.command_id),
+                    _ => {
                         archived_incompatible_records += 1;
                         // Incompatible records still reserve their command ID.
                         // Preserve the permissive recovery probe for old schemas.
-                        serde_json::from_slice::<ArchiveRecordProbe>(&line)
-                            .ok()
-                            .and_then(|probe| probe.command_id)
+                        serde_json::from_slice::<ArchiveRecordProbe>(
+                            plain.as_deref().unwrap_or(&line),
+                        )
+                        .ok()
+                        .and_then(|probe| probe.command_id)
                     }
                 };
                 if let Some(id) = id {
@@ -556,7 +607,17 @@ impl CommandJournal for JsonlJournal {
             let mut buffer = durable_file::BoundedBuffer::new(journal.max_record_bytes);
             serde_json::to_writer(&mut buffer, &record)?;
             std::io::Write::write_all(&mut buffer, b"\n")?;
-            let bytes = buffer.into_inner();
+            let mut bytes = buffer.into_inner();
+            if let Some(key) = journal.key.as_deref() {
+                bytes = key.seal_line(&bytes)?;
+                if bytes.len() > journal.max_record_bytes {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "serialized data exceeds byte limit",
+                    )
+                    .into());
+                }
+            }
             durable_file::require_sole_hard_link(&writer.file.metadata().await?, "journal entry")?;
             writer.file.write_all(&bytes).await?;
             writer.file.flush().await?;
@@ -588,7 +649,9 @@ impl CommandJournal for JsonlJournal {
             {
                 // Read the same file that owns the offsets, even if an external
                 // replacement occurs after refresh. The next operation refreshes it.
-                if let Some(records) = read_indexed_records(&writer.file, offsets, &id).await? {
+                if let Some(records) =
+                    read_indexed_records(&writer.file, offsets, &id, journal.key.as_deref()).await?
+                {
                     return Ok(JournalScan {
                         records,
                         ..JournalScan::default()
@@ -597,7 +660,12 @@ impl CommandJournal for JsonlJournal {
                 // In-place damage can leave identity, size and mtime unchanged.
                 // Preserve it even when changed bytes still decode as valid JSON.
                 archive_damaged_journal(&journal.path).await?;
-                *writer = open_writer(&journal.path, journal.max_record_bytes).await?;
+                *writer = open_writer(
+                    &journal.path,
+                    journal.max_record_bytes,
+                    journal.key.as_deref(),
+                )
+                .await?;
             }
             let mut scan = JournalScan {
                 torn_tail: writer.archived_torn_tail,
@@ -626,7 +694,11 @@ impl CommandJournal for JsonlJournal {
                         if !line.ends_with(b"\n") {
                             scan.torn_tail = true;
                         }
-                        if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
+                        let plain = plain_line(&line, journal.key.as_deref());
+                        if let Some(Ok(record)) = plain
+                            .as_deref()
+                            .map(serde_json::from_slice::<JournalRecord>)
+                        {
                             if record.command_id == id {
                                 scan.records.push(record);
                             } else {
@@ -772,6 +844,7 @@ where
 
 struct CommandDecoder<'a> {
     index: Option<&'a mut HashMap<CommandId, Vec<IndexedRecord>>>,
+    key: Option<&'a JournalKey>,
 }
 
 impl LedgerDecoder for CommandDecoder<'_> {
@@ -784,16 +857,18 @@ impl LedgerDecoder for CommandDecoder<'_> {
                 record: None,
             });
         }
-        Ok(match serde_json::from_slice::<JournalRecord>(line.bytes) {
-            Ok(record) => PreparedRecord {
+        let plain = plain_line(line.bytes, self.key);
+        let bytes = plain.as_deref().unwrap_or(line.bytes);
+        Ok(match serde_json::from_slice::<JournalRecord>(bytes) {
+            Ok(record) if plain.is_some() => PreparedRecord {
                 observation: RecordObservation::Accepted {
                     sequence: Some(record.sequence),
                 },
                 record: Some(record),
             },
-            Err(_) => PreparedRecord {
+            _ => PreparedRecord {
                 observation: RecordObservation::Rejected {
-                    sequence_hint: serde_json::from_slice::<RecordProbe>(line.bytes)
+                    sequence_hint: serde_json::from_slice::<RecordProbe>(bytes)
                         .ok()
                         .and_then(|probe| probe.sequence),
                     kind: LedgerIssueKind::Decode,
@@ -824,6 +899,7 @@ async fn scan_file(
     file: File,
     index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
     max_record_bytes: usize,
+    key: Option<&JournalKey>,
 ) -> Result<Scan, JournalError> {
     let health = scan_jsonl(
         &mut BufReader::new(file),
@@ -831,7 +907,7 @@ async fn scan_file(
             max_line_bytes: max_record_bytes as u64,
             sequence_rule: SequenceRule::Increasing,
         },
-        &mut CommandDecoder { index },
+        &mut CommandDecoder { index, key },
     )
     .await?;
     Ok(Scan {

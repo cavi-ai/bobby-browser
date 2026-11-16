@@ -90,6 +90,7 @@ fn config(root: &std::path::Path, context_dir: &std::path::Path) -> config::AppC
             checkpoints_dir: root.join("checkpoints"),
             authority_path: root.join("authority.json"),
             scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

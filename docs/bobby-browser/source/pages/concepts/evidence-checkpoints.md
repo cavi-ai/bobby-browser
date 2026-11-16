@@ -41,7 +41,7 @@ Pass `autoCheckpoint: false` to author `invariants` or `replayableInputs` yourse
 
 | File | Contents |
 |---|---|
-| `journal.jsonl` | The workflow's command journal lines, byte for byte |
+| `journal.jsonl` | The workflow's command journal record lines, byte for byte; decrypted when the journal is sealed |
 | `checkpoint.json` | The workflow's checkpoint, if any |
 | `artifacts/<id>/...` | Artifacts the journal names that are still on disk. Missing ones are listed as `missingArtifacts` |
 | `manifest.json` | SHA-256 and size of every file |

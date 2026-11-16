@@ -283,6 +283,7 @@ mod tests {
             journal: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             artifacts_dir: root.path().join("artifacts"),
+            journal_key: None,
         };
         let workflow = WorkflowId::new();
         let session = SessionId::new();

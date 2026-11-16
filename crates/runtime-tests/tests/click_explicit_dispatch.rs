@@ -76,6 +76,7 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
             scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

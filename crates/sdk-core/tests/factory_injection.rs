@@ -180,6 +180,37 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
 }
 
 #[tokio::test]
+async fn configured_journal_key_is_created_and_reused_by_the_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    config.storage.journal_key_path = Some(root.path().join("journal.key"));
+    let runtime = RuntimeService::build_with_worker_factory(
+        &config,
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)), false)),
+    )
+    .await
+    .unwrap();
+    drop(runtime);
+
+    assert_eq!(
+        std::fs::read(root.path().join("journal.key"))
+            .unwrap()
+            .len(),
+        32
+    );
+    // The journal reopens with the key the runtime created.
+    RuntimeService::build_with_worker_factory(
+        &config,
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)), false)),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn injected_vision_assist_counts_as_a_configured_provider() {
     let root = tempfile::tempdir().unwrap();
     let mut config = config::AppConfig::default();
