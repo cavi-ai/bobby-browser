@@ -93,12 +93,13 @@ python training/mlx_finetune.py --schema v1 \
   --input data/vision-corpus.jsonl --output models
 ```
 
-Evaluate every required suite and write the content-bound assessment:
+Evaluate every required suite and write the content-bound assessment. `--heldout` is a file of journeys that are absent from the training corpus (`training/oos_split.py` writes one); an assessment is refused when a held-out journey also appears in the corpus:
 
 ```bash
 python training/adapter_freshness.py \
   --adapter models/mlx-lora-bobby-v1 \
   --corpus data/vision-corpus.jsonl \
+  --heldout data/oos_test.jsonl \
   --report data/adapter-assessment.json
 ```
 
@@ -108,6 +109,7 @@ Create an immutable local release after the assessment passes:
 python training/model_promotion.py promote \
   --adapter models/mlx-lora-bobby-v1 \
   --corpus data/vision-corpus.jsonl \
+  --heldout data/oos_test.jsonl \
   --assessment data/adapter-assessment.json \
   --store promoted --version v1
 ```

@@ -8,6 +8,8 @@ fails when any metric drops below its floor:
   paraphrase probe     unambiguous-task robustness (holds the accept band)
   contrastive probe    boundary abstention: ambiguous rows must abstain,
                        disambiguated rows must resolve
+  heldout (--heldout)  journeys absent from the training corpus; required
+                       for a promotion assessment
 
 Floors default to the current best adapter's measured cells; tighten
 them only with a measured improvement, never to make a run pass.
@@ -73,6 +75,15 @@ SUITES = {
             "abstain_precision": 1.00,
         },
     },
+    "heldout": {
+        # input supplied via --heldout: journeys absent from the training
+        # corpus. Abstention is reported, not gated.
+        "floors": {
+            "element_accuracy": 0.98,
+            "abstain_recall": None,
+            "abstain_precision": None,
+        },
+    },
 }
 
 for _suite_name, _promotion_floors in PROMOTION_FLOORS.items():
@@ -127,6 +138,7 @@ def write_promotion_assessment(
     schema,
     metrics_by_suite,
     output_path,
+    heldout_path,
 ):
     suites = {
         name: {
@@ -141,6 +153,7 @@ def write_promotion_assessment(
         base_model,
         schema,
         suites,
+        heldout_path,
     )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +168,10 @@ def main():
     parser.add_argument("--model", default="mlx-community/Qwen2.5-7B-Instruct-4bit")
     parser.add_argument("--corpus", default="data/vision-corpus-v7.jsonl")
     parser.add_argument(
+        "--heldout",
+        help="held-out journey JSONL; its journeys must be absent from the training corpus",
+    )
+    parser.add_argument(
         "--report",
         help="write a content-bound promotion assessment after all selected suites pass",
     )
@@ -162,17 +179,22 @@ def main():
         "--suites",
         nargs="*",
         choices=list(SUITES),
-        default=list(SUITES),
-        help="subset of suites to run",
+        help="subset of suites to run (default: all; heldout needs --heldout)",
     )
     args = parser.parse_args()
+    if args.suites is None:
+        args.suites = [name for name in SUITES if name != "heldout" or args.heldout]
+    if "heldout" in args.suites and not args.heldout:
+        parser.error("the heldout suite requires --heldout")
+    if args.report and not args.heldout:
+        parser.error("--report requires --heldout")
 
     workdir = Path.cwd()
     all_failures = {}
     metrics_by_suite = {}
     for name in args.suites:
         suite = SUITES[name]
-        input_path = args.corpus if name == "corpus" else suite["input"]
+        input_path = {"corpus": args.corpus, "heldout": args.heldout}.get(name) or suite["input"]
         print(f"[{name}] evaluating {input_path} ...", flush=True)
         metrics = run_suite(args.model, args.adapter, input_path, workdir)
         metrics_by_suite[name] = metrics
@@ -200,6 +222,7 @@ def main():
             "v1",
             metrics_by_suite,
             args.report,
+            args.heldout,
         )
         print(f"promotion assessment: {args.report}")
     print("\nfreshness gate: all suites pass")
