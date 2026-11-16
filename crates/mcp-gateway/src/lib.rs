@@ -10,6 +10,7 @@
 
 #![recursion_limit = "256"]
 
+mod argument_contracts;
 mod catalog;
 mod jobs;
 /// Server-to-client MCP notifications (runtime events, tool-list changes).
@@ -90,6 +91,8 @@ pub const TOOLS_LIST_BYTE_BUDGET: usize = 128 * 1024;
 /// No single tool may approach the whole type system on its own.
 pub const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
 
+#[doc(hidden)]
+pub use argument_contracts::INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE;
 pub use jobs::{InProcessJobPort, JobPort, JobPortError, JobPriorityWire, JobSubmission};
 pub use notify::{NotificationSink, NotificationStream};
 pub use resources::{ArtifactCatalogFull, ArtifactResources};

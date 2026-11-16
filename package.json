@@ -14,7 +14,7 @@
   },
   "packageManager": "pnpm@10.15.1",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "docs:build": "node scripts/docs/build-bobby-browser.mjs",

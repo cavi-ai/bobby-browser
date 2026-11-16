@@ -85,7 +85,8 @@ calls. Rules that govern every call:
 ## Choosing the tool
 
 - Link or control with a result to verify: Use one `intent_follow` with
-  `expectedState`; do not split it into `click` plus `wait_for` or another
+  exactly one of `expectedState` or `expectedDestination` (both spellings are accepted; both or neither is rejected);
+  do not split it into `click` plus `wait_for` or another
   observation. After a search or result link, inspect the returned `postState`
   for the result heading and targets, including ordinals for duplicate titles.
 - Form with multiple fields: one `intent_complete_form` (fields resolve

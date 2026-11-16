@@ -372,16 +372,16 @@ pub(crate) fn intent_fill_schema() -> (Value, Vec<&'static str>) {
 }
 
 pub(crate) fn intent_follow_schema() -> (Value, Vec<&'static str>) {
-    (
-        intent_properties(json!({
-            "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
-            "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+    let mut extra = crate::argument_contracts::follow_wait_properties();
+    merge_properties(
+        &mut extra,
+        json!({
             "evidenceDetail":{"type":"string","enum":["compact","full"]},
             "boundary":{"type":"boolean"},
             "autoCheckpoint":{"type":"boolean"}
-        })),
-        intent_required(&["purpose"]),
-    )
+        }),
+    );
+    (intent_properties(extra), intent_required(&["purpose"]))
 }
 
 pub(crate) fn intent_locate_schema() -> (Value, Vec<&'static str>) {
@@ -539,6 +539,13 @@ pub(crate) fn recovery_status_schema() -> (Value, Vec<&'static str>) {
 }
 
 pub(crate) fn runtime_info_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"engine":{"type":"string","enum":["chromium","firefox","webKit"]}}),
+        vec![],
+    )
+}
+
+pub(crate) fn empty_schema() -> (Value, Vec<&'static str>) {
     (json!({}), vec![])
 }
 
@@ -748,10 +755,7 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
         schema["not"] = json!({"properties":absent});
     }
     if name == "intent_follow" {
-        schema["not"] = json!({"oneOf":[
-            {"required":["expectedState","expectedDestination"]},
-            {"properties":{"expectedState":false,"expectedDestination":false}}
-        ]});
+        schema["not"] = crate::argument_contracts::follow_exactly_one_not();
     }
     let seed = json!({"properties": schema["properties"], "required": schema["required"]});
     let defs = reachable_definitions_from(&seed, patched);
@@ -796,6 +800,7 @@ fn describe_parameters(name: &str, schema: &mut Value) {
 
 fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
     Some(match (tool, property) {
+        ("runtime_info", "engine") => "Engine to inspect; default if omitted.",
         ("download_url", "url") => "URL to download.",
         ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
         ("download_url", "saveAs") => "Absolute path to save the file to.",
@@ -815,7 +820,9 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("type_text", "value") => "Text.",
         ("control_action", "action") => "Native control action, including its kind and value fields.",
         ("intent_follow", "purpose") => "Control label; hints.accessibleName is exact.",
-        ("intent_follow", "expectedState" | "expectedDestination") => "One wait. Example: {\"condition\":{\"kind\":\"networkQuiet\",\"idleMs\":200,\"maxInFlight\":0},\"timeoutMs\":10000}",
+        ("intent_follow", "expectedState" | "expectedDestination") => {
+            crate::argument_contracts::FOLLOW_WAIT_DESCRIPTION
+        },
         ("dialog", "action") => "accept or dismiss.",
         ("cookie_delete", "names") => "Cookie names to delete; all when omitted.",
         ("cookie_delete" | "cookie_get", "urls") => "URLs whose cookies apply.",
@@ -1020,6 +1027,14 @@ fn compact_advertised_node(schema: &mut Value) {
                 if !INSTANCE_KEYWORDS.contains(&key.as_str()) {
                     compact_advertised_node(value);
                 }
+            }
+            if fields.get("type") == Some(&json!("string"))
+                && fields
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+            {
+                fields.remove("type");
             }
             if let Some(folded) = folded_nullable(fields) {
                 *schema = folded;
@@ -1276,6 +1291,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "runtime_info" => object(
             json!({
                 "version":string(0, 256),
+                "engineScope":{"type":"string","enum":["chromium","firefox","webKit"]},
                 "capabilities":array(string(0, 64), 32),
                 "active_sessions":{"type":"integer","minimum":0},
                 "queued_jobs":{"type":"integer","minimum":0},
@@ -2087,6 +2103,10 @@ fn definitions() -> Value {
             "framePath":array(any_value(),8),
             "shadowPath":array(any_value(),8)
         }), &["role","accessibleName"]),
+        "CredentialFill": crate::argument_contracts::credential_fill_schema(string(
+            crate::argument_contracts::CREDENTIAL_NAME_MIN,
+            crate::argument_contracts::CREDENTIAL_NAME_MAX,
+        )),
         "ControlActionKind": {"oneOf":[
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
@@ -2096,7 +2116,7 @@ fn definitions() -> Value {
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"credential"},"name":string(1,128)},"required":["kind","name"]}
+            crate::argument_contracts::credential_fill_ref()
         ]},
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
@@ -2300,13 +2320,12 @@ fn intent_commands() -> Vec<Value> {
         tagged_input(
             "follow",
             object(
-                json!({
-                    "purpose":string(1, 256),
-                    "hints":{"$ref":"#/$defs/IntentHints"},
-                    "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
-                    "boundary":{"type":"boolean"}
-                }),
-                &["purpose", "expectedDestination"],
+                crate::argument_contracts::follow_wire_properties(
+                    string(1, 256),
+                    json!({"$ref":"#/$defs/IntentHints"}),
+                    json!({"type":"boolean"}),
+                ),
+                crate::argument_contracts::FOLLOW_WIRE_REQUIRED,
             ),
         ),
         tagged_input(
@@ -2484,7 +2503,7 @@ fn fill_values() -> Vec<Value> {
         ),
         tagged_fields("clear", json!({}), &[]),
         tagged_fields("passwordManagerFill", json!({}), &[]),
-        tagged_fields("credential", json!({"name":string(1, 128)}), &["name"]),
+        crate::argument_contracts::credential_fill_ref(),
     ]
 }
 
@@ -2635,30 +2654,30 @@ fn primitive_commands() -> Vec<Value> {
             "controlAction",
             object(
                 json!({
-                        "target": {
-                            "type":"object",
-                            "additionalProperties":false,
-                            "properties":{
-                                "role":string(1,128),
-                                "accessibleName":string(1,2048),
-                                "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
-                                "framePath":array(any_value(),8),
-                                "shadowPath":array(any_value(),8)
-                            },
-                            "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                    "target": {
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "role":string(1,128),
+                            "accessibleName":string(1,2048),
+                            "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                            "framePath":array(any_value(),8),
+                            "shadowPath":array(any_value(),8)
                         },
-                        "action": {"oneOf":[
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
-                            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]},
-                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"credential"},"name":string(1,128)},"required":["kind","name"]}
-                        ]}
-                    }),
+                        "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                    },
+                    "action": {"oneOf":[
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]},
+                        crate::argument_contracts::credential_fill_ref()
+                    ]}
+                }),
                 &["target", "action"],
             ),
         ),
@@ -3658,8 +3677,97 @@ mod tests {
         aliased["expectedState"] = wait.clone();
         validate_tool_arguments("intent_follow", &aliased)
             .expect("expectedState is accepted for action verification");
-        assert!(tool_schema("intent_follow")["properties"]["expectedDestination"].is_object());
-        assert!(tool_schema("intent_follow")["properties"]["evidenceDetail"].is_object());
+        let properties = &tool_schema("intent_follow")["properties"];
+        let waits = crate::argument_contracts::follow_wait_properties();
+        for (field, schema) in waits.as_object().expect("wait properties") {
+            assert_eq!(&properties[field], schema, "{field}");
+        }
+        assert!(properties["evidenceDetail"].is_object());
+    }
+
+    #[test]
+    fn follow_wire_command_reads_the_contract() {
+        let follow = intent_input(&definitions(), "follow");
+        assert_eq!(
+            &follow["properties"][crate::argument_contracts::EXPECTED_DESTINATION],
+            &crate::argument_contracts::follow_wait_property()
+        );
+        let required: Vec<&str> = follow["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap())
+            .collect();
+        assert_eq!(required, crate::argument_contracts::FOLLOW_WIRE_REQUIRED);
+    }
+
+    #[test]
+    fn credential_fill_sites_reference_the_contract() {
+        let defs = definitions();
+        let canonical = crate::argument_contracts::credential_fill_schema(string(
+            crate::argument_contracts::CREDENTIAL_NAME_MIN,
+            crate::argument_contracts::CREDENTIAL_NAME_MAX,
+        ));
+        assert_eq!(defs["CredentialFill"], canonical);
+        let reference = crate::argument_contracts::credential_fill_ref();
+        assert_eq!(credential_branch(&defs["ControlActionKind"]), &reference);
+        assert_eq!(credential_branch(&defs["FillValue"]), &reference);
+        let input = control_action_input(&defs);
+        assert_eq!(
+            credential_branch(&input["properties"]["action"]),
+            &reference
+        );
+        assert_credential_shapes(&defs, &canonical);
+    }
+
+    fn intent_input(defs: &Value, kind: &str) -> Value {
+        command_input(defs, "IntentCommand", kind)
+    }
+
+    fn control_action_input(defs: &Value) -> Value {
+        command_input(defs, "PrimitiveCommand", "controlAction")
+    }
+
+    fn command_input(defs: &Value, union: &str, kind: &str) -> Value {
+        defs[union]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["properties"]["kind"]["const"] == kind)
+            .unwrap_or_else(|| panic!("{union} missing {kind}"))["properties"]["input"]
+            .clone()
+    }
+
+    fn credential_branch(schema: &Value) -> &Value {
+        schema["oneOf"]
+            .as_array()
+            .expect("credential union")
+            .iter()
+            .find(|branch| {
+                branch["$ref"] == crate::argument_contracts::CREDENTIAL_FILL_REF
+                    || branch["properties"]["kind"]["const"]
+                        == crate::argument_contracts::CREDENTIAL_KIND
+            })
+            .expect("credential branch")
+    }
+
+    fn assert_credential_shapes(value: &Value, canonical: &Value) {
+        if value["properties"]["kind"]["const"] == crate::argument_contracts::CREDENTIAL_KIND {
+            assert_eq!(value, canonical, "inlined credential shape drifted");
+        }
+        match value {
+            Value::Object(fields) => {
+                for field in fields.values() {
+                    assert_credential_shapes(field, canonical);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_credential_shapes(item, canonical);
+                }
+            }
+            _ => {}
+        }
     }
 
     #[test]
@@ -3756,6 +3864,18 @@ mod tests {
         let mut follow = handle;
         follow["purpose"] = json!("Generate report");
         let schema = advertised_tool_schema("intent_follow");
+        assert_eq!(
+            schema["not"],
+            crate::argument_contracts::follow_exactly_one_not()
+        );
+        assert_eq!(
+            schema["properties"]["expectedState"]["description"],
+            json!(crate::argument_contracts::FOLLOW_WAIT_DESCRIPTION)
+        );
+        assert_eq!(
+            schema["properties"]["expectedDestination"]["description"],
+            json!(crate::argument_contracts::FOLLOW_WAIT_DESCRIPTION)
+        );
         assert!(
             !accepts(&schema, &follow),
             "follow needs a verification condition"
@@ -3963,7 +4083,10 @@ mod tests {
             properties["nullFirst"],
             json!({"type":["integer","null"],"minimum":1})
         );
-        assert_eq!(properties["choice"], original["properties"]["choice"]);
+        assert_eq!(
+            properties["choice"],
+            json!({"oneOf":[{"enum":["a"]},{"type":"null"}]})
+        );
         assert_eq!(properties["pinned"], original["properties"]["pinned"]);
         assert_eq!(properties["described"], original["properties"]["described"]);
         assert_eq!(schema["examples"], original["examples"]);
@@ -3976,6 +4099,57 @@ mod tests {
             json!({"choice":null}),
             json!({"choice":"b"}),
             json!({"pinned":"b"}),
+        ] {
+            assert_eq!(
+                accepts(&schema, &instance),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_removes_only_redundant_string_enum_types() {
+        let mut schema = json!({
+            "type":"object",
+            "properties":{
+                "choice":{"type":"string","enum":["a","long"],"maxLength":3},
+                "mixed":{"type":"string","enum":["a",1]},
+                "empty":{"type":"string","enum":[]}
+            },
+            "examples":[{"type":"string","enum":["a"]}],
+            "default":{"type":"string","enum":["a"]}
+        });
+        let original = schema.clone();
+        compact_advertised_node(&mut schema);
+        assert_eq!(
+            schema["properties"]["choice"],
+            json!({"enum":["a","long"],"maxLength":3})
+        );
+        assert_eq!(
+            schema["properties"]["mixed"],
+            original["properties"]["mixed"]
+        );
+        assert_eq!(
+            schema["properties"]["empty"],
+            original["properties"]["empty"]
+        );
+        for key in ["examples", "default"] {
+            assert_eq!(schema[key], original[key]);
+        }
+        let mut instance_data =
+            json!({"const":{"type":"string","enum":["a"]},"enum":[{"type":"string","enum":["a"]}]});
+        let original_data = instance_data.clone();
+        compact_advertised_node(&mut instance_data);
+        assert_eq!(instance_data, original_data);
+        for instance in [
+            json!({}),
+            json!({"choice":"a"}),
+            json!({"choice":"b"}),
+            json!({"choice":"long"}),
+            json!({"choice":1}),
+            json!({"mixed":1}),
+            json!({"mixed":"a"}),
         ] {
             assert_eq!(
                 accepts(&schema, &instance),

@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, CapabilityHandle};
-use mcp_gateway::Server;
+use mcp_gateway::{Server, INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE};
 use serde_json::{json, Value};
 use types::{Capability, CommandId, CommandPhase, PrincipalId};
 use uuid::uuid;
@@ -2981,10 +2981,7 @@ async fn intent_follow_without_expected_state_names_the_fix() {
         "{response}"
     );
     assert_eq!(
-        response["error"]["message"],
-        "intent_follow needs exactly one of expectedState or expectedDestination \
-         (a WaitForCommand: {condition, timeoutMs}); e.g. expectedState: \
-         {\"condition\":{\"kind\":\"url\",\"matcher\":{\"kind\":\"contains\",\"value\":\"/next\"}},\"timeoutMs\":10000}",
+        response["error"]["message"], INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE,
         "{response}"
     );
 }
@@ -3221,19 +3218,9 @@ async fn intent_follow_without_wait_appends_a_valid_example() {
         json!({"purpose":"Follow the next link","hints":{"role":"link","accessibleName":"Next"}}),
     )
     .await;
-    let message = message_of(&response);
-    assert!(
-        message.starts_with(
-            "intent_follow needs exactly one of expectedState or expectedDestination \
-             (a WaitForCommand: {condition, timeoutMs})"
-        ),
-        "{message}"
-    );
-    assert!(
-        message.contains(
-            r#"e.g. expectedState: {"condition":{"kind":"url","matcher":{"kind":"contains","value":"/next"}},"timeoutMs":10000}"#
-        ),
-        "{message}"
+    assert_eq!(
+        message_of(&response),
+        INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE
     );
 }
 

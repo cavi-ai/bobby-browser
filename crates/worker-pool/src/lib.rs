@@ -20,6 +20,7 @@ pub mod policy;
 pub mod process_registry;
 pub mod secret_material;
 mod selection;
+mod session_engine;
 mod skill_adapter;
 mod targeting;
 pub mod typed_focus;
@@ -69,6 +70,7 @@ pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_LEASE_LAUNCH_TIMEOUT, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
 };
+pub use session_engine::{choose_session_engine, ChosenSessionEngine, SessionEngineError};
 pub use skill_adapter::{
     skill_engine, ChromiumSkillAdapter, FirefoxSkillAdapter,
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
@@ -268,6 +270,13 @@ fn unsupported_error() -> CommandError {
 
 #[async_trait]
 pub trait WorkerFactory: Send + Sync {
+    /// Guarantees and features for all loaded candidates for an explicit engine.
+    fn for_engine_info(
+        &self,
+        _engine: types::SkillBrowserEngine,
+    ) -> Option<(bool, bool, Vec<EngineFeatureSupport>)> {
+        None
+    }
     /// Configured implementation features. Unknown factories report none;
     /// these declarations never grant authority or change dispatch behavior.
     fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
@@ -665,6 +674,13 @@ impl WorkerPool {
 
     pub fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
         self.inner.factory.engine_feature_support()
+    }
+
+    pub fn for_engine_info(
+        &self,
+        engine: types::SkillBrowserEngine,
+    ) -> Option<(bool, bool, Vec<EngineFeatureSupport>)> {
+        self.inner.factory.for_engine_info(engine)
     }
 
     pub fn enforces_headless_chromium(&self) -> bool {

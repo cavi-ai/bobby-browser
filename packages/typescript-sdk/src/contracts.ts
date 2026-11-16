@@ -15,7 +15,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type ProviderHealthStatus = "healthy" | "degraded" | "unhealthy";
 export interface ProviderHealthSnapshot { providerMode: string; status: ProviderHealthStatus; successes: number; failures: number; consecutiveFailures: number; budgetViolations: number; lastLatencyMs?: number; latencyBudgetMs?: number; failureThreshold: number; }
 export interface StorageIntegrityIssue { store: "commandIdempotency" | "lifecycleIdempotency" | "jobIdempotency" | "jobJournal"; reason: "unreadableLedger" | "duplicateLedgerKey" | "ledgerCapacityExceeded" | "unreadableJobHistory"; }
-export interface RuntimeInfo { storageIntegrity?: StorageIntegrityIssue[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
+export interface RuntimeInfo { engineScope?: "chromium" | "firefox" | "webKit"; storageIntegrity?: StorageIntegrityIssue[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; passwordManager: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
@@ -340,7 +340,9 @@ export interface CompleteFormIntent { purpose: string; fields: CompleteFormField
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState?: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /**
- * Follow a control and wait for the expected destination.
+ * Follow a control and wait for the destination.
+ * MCP `intent_follow` accepts exactly one of `expectedState` or `expectedDestination` (both spellings are accepted; both or neither is rejected).
+ * This wire command records that wait as `expectedDestination`.
  * Set `boundary` when activation may mutate state or trigger a side effect
  * (same meaning as {@link ClickCommand.boundary}).
  */

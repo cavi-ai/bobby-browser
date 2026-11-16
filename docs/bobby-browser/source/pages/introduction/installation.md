@@ -33,7 +33,7 @@ brew install cavi-ai/tap/bobby-browser
 
 **Release archive.** Download `bobby-browser-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows) from the GitHub Releases page, with `<os>` one of `linux`, `macos`, `windows` and `<arch>` one of `x64`, `arm64`. Each archive holds `bobby`, `mcp-gateway` and `acp-gateway`. Put them on your `PATH`.
 
-**Source.** Requires the Rust toolchain pinned in `rust-toolchain.toml`, plus Node 22 and pnpm for the Firefox companion.
+**Source.** Requires the Rust toolchain pinned in `rust-toolchain.toml`, plus Node 24 and pnpm for the Firefox companion.
 
 ```bash
 git clone https://github.com/cavi-ai/bobby-browser.git

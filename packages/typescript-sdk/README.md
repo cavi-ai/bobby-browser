@@ -9,7 +9,7 @@ correlation id, and authentication fails closed.
 npm install @cavi-ai/bobby-browser
 ```
 
-Requires Node 22+ and a running runtime (`bobby serve`).
+Requires Node 24+ and a running runtime (`bobby serve`).
 
 ## Quick start
 

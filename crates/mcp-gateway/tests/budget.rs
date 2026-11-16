@@ -135,12 +135,31 @@ async fn click_schema_advertises_native_modifier_keys() {
             "maxItems": 4,
             "uniqueItems": true,
             "items": {
-                "type": "string",
                 "enum": ["shift", "ctrl", "alt", "meta"]
             },
             "description": "Held keys."
         })
     );
+    let schema = &click["inputSchema"]["properties"]["modifiers"];
+    let validator = jsonschema::validator_for(schema).expect("modifier schema compiles");
+    for value in [
+        json!([]),
+        json!(["shift"]),
+        json!(["ctrl"]),
+        json!(["alt"]),
+        json!(["meta"]),
+        json!(["shift", "ctrl", "alt", "meta"]),
+    ] {
+        assert!(validator.is_valid(&value), "{value}");
+    }
+    for value in [
+        json!([1]),
+        json!([null]),
+        json!(["unknown"]),
+        json!(["shift", "shift"]),
+    ] {
+        assert!(!validator.is_valid(&value), "{value}");
+    }
 }
 
 #[tokio::test]

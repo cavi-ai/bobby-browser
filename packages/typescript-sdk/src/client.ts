@@ -107,6 +107,7 @@ export class BrowserRuntimeClient {
 
   /** `GET /v1/runtime` — version, capabilities, and load counters. */
   async runtimeInfo(options?: RequestOptions): Promise<RuntimeInfo> { return this.#json("GET", "/v1/runtime", undefined, options, isRuntimeInfo); }
+  async runtimeInfoForEngine(engine: "chromium" | "firefox" | "webKit", options?: RequestOptions): Promise<RuntimeInfo> { return this.#json("GET", `/v1/runtime?engine=${engine}`, undefined, options, isRuntimeInfo); }
   /** `POST /v1/sessions` — create a browser session. */
   async createSession(input: CreateSessionRequest, options?: RequestOptions): Promise<SessionState> { return this.#json("POST", "/v1/sessions", input, options, isSessionState); }
   /** `GET /v1/sessions` — list active sessions. */

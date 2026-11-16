@@ -6,7 +6,7 @@ still change before 1.0.
 ## Development setup
 
 - Rust toolchain from `rust-toolchain.toml`
-- Node.js 22+ and pnpm for TypeScript packages
+- Node.js 24+ and pnpm for TypeScript packages
 
 ```bash
 cargo build -p bobby-browser

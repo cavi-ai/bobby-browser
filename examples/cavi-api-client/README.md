@@ -7,7 +7,7 @@ does not need a model provider or a new dependency.
 
 ## Run
 
-Requires Node 22+, pnpm, a running `bobby serve`, and access to a model provider.
+Requires Node 24+, pnpm, a running `bobby serve`, and access to a model provider.
 Run these commands from the repository root:
 
 ```bash
