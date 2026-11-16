@@ -9,10 +9,23 @@ use base64::Engine;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305, NONCE_LEN};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 const KEY_BYTES: usize = 32;
-const DOMAIN: &[u8] = b"bobby-browser/workflow-journal/record/v1";
+const DOMAIN: &[u8] = b"bobby-browser/workflow-journal/record/v2";
+/// SHA-256 of the empty input: the previous digest of a file's first line.
+pub(crate) const GENESIS: [u8; 32] = [
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+];
+
+/// Binds a sealed line to the exact bytes of the line before it.
+fn associated_data(previous: &[u8; 32]) -> Vec<u8> {
+    let mut data = DOMAIN.to_vec();
+    data.extend_from_slice(previous);
+    data
+}
 
 /// Symmetric key for sealed journal records. Zeroized on drop.
 pub struct JournalKey([u8; KEY_BYTES]);
@@ -92,9 +105,9 @@ impl JournalKey {
         LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &self.0).expect("32-byte key"))
     }
 
-    /// Seals one record (its trailing newline is not sealed), returning the
-    /// on-disk line including its own newline.
-    pub(crate) fn seal_line(&self, record: &[u8]) -> std::io::Result<Vec<u8>> {
+    /// Seals one record (its trailing newline is not sealed) after the line
+    /// whose digest is `previous`, returning the on-disk line with its newline.
+    pub(crate) fn seal_line(&self, record: &[u8], previous: &[u8; 32]) -> std::io::Result<Vec<u8>> {
         let record = record.strip_suffix(b"\n").unwrap_or(record);
         let mut nonce_bytes = [0u8; NONCE_LEN];
         SystemRandom::new()
@@ -104,7 +117,7 @@ impl JournalKey {
         self.cipher()
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce_bytes),
-                Aad::from(DOMAIN),
+                Aad::from(associated_data(previous)),
                 &mut ciphertext,
             )
             .map_err(|_| std::io::Error::other("could not seal a journal record"))?;
@@ -117,14 +130,14 @@ impl JournalKey {
         Ok(line)
     }
 
-    fn open_line(&self, sealed: &SealedLine) -> Option<Vec<u8>> {
+    fn open_line(&self, sealed: &SealedLine, previous: &[u8; 32]) -> Option<Vec<u8>> {
         let nonce: [u8; NONCE_LEN] = STANDARD.decode(&sealed.nonce).ok()?.try_into().ok()?;
         let mut data = STANDARD.decode(&sealed.ct).ok()?;
         let len = self
             .cipher()
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce),
-                Aad::from(DOMAIN),
+                Aad::from(associated_data(previous)),
                 &mut data,
             )
             .ok()?
@@ -135,17 +148,67 @@ impl JournalKey {
     }
 }
 
-/// A sealed line yields its decrypted record ending in a newline, or `None`
-/// when no key is given or it does not open. Any other line is returned as is.
-pub fn plain_line<'a>(line: &'a [u8], key: Option<&JournalKey>) -> Option<Cow<'a, [u8]>> {
+fn parse_sealed(line: &[u8]) -> Option<SealedLine> {
     if !line.starts_with(br#"{"sealed":"#) {
-        return Some(Cow::Borrowed(line));
+        return None;
     }
-    let Ok(sealed) = serde_json::from_slice::<SealedLine>(line) else {
-        return Some(Cow::Borrowed(line));
-    };
-    if sealed.sealed != 1 {
-        return Some(Cow::Borrowed(line));
+    serde_json::from_slice::<SealedLine>(line)
+        .ok()
+        .filter(|sealed| sealed.sealed == 1)
+}
+
+pub(crate) fn digest(line: &[u8]) -> [u8; 32] {
+    Sha256::digest(line).into()
+}
+
+/// Opens one line known to follow the line with digest `previous`. A sealed
+/// line needs the key; a plain line is returned only when `plain_allowed`.
+pub(crate) fn open_at<'a>(
+    line: &'a [u8],
+    key: Option<&JournalKey>,
+    previous: &[u8; 32],
+    plain_allowed: bool,
+) -> Option<Cow<'a, [u8]>> {
+    match parse_sealed(line) {
+        Some(sealed) => key?.open_line(&sealed, previous).map(Cow::Owned),
+        None => plain_allowed.then_some(Cow::Borrowed(line)),
     }
-    key?.open_line(&sealed).map(Cow::Owned)
+}
+
+/// Opens the lines of one journal file in order. Each sealed line must follow
+/// the exact bytes of the line before it, and plain lines are accepted only
+/// before the first sealed line.
+pub struct LineOpener<'k> {
+    key: Option<&'k JournalKey>,
+    previous: [u8; 32],
+    sealed_seen: bool,
+}
+
+impl<'k> LineOpener<'k> {
+    pub fn new(key: Option<&'k JournalKey>) -> Self {
+        Self {
+            key,
+            previous: GENESIS,
+            sealed_seen: false,
+        }
+    }
+
+    /// Feed every complete line of the file, in order, whether or not it opens.
+    /// Returns the record bytes ending in a newline, or `None` when the line is
+    /// not trusted at this position.
+    pub fn open<'a>(&mut self, line: &'a [u8]) -> Option<Cow<'a, [u8]>> {
+        let opened = open_at(line, self.key, &self.previous, !self.sealed_seen);
+        self.sealed_seen |= parse_sealed(line).is_some();
+        self.previous = digest(line);
+        opened
+    }
+
+    /// Digest of the last line fed, or the genesis digest before any.
+    pub(crate) fn previous(&self) -> [u8; 32] {
+        self.previous
+    }
+
+    pub(crate) fn sealed_seen(&self) -> bool {
+        self.sealed_seen
+    }
 }

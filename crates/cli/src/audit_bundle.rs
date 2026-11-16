@@ -198,10 +198,12 @@ pub fn export(
         },
         None => None,
     };
+    // Every complete line feeds the opener so the chain covers the whole file.
+    let mut opener = workflow_journal::LineOpener::new(journal_key.as_ref());
     let parsed: Vec<(std::borrow::Cow<[u8]>, JournalRecord)> = complete
         .split_inclusive(|byte| *byte == b'\n')
         .filter_map(|line| {
-            let line = workflow_journal::plain_line(line, journal_key.as_ref())?;
+            let line = opener.open(line)?;
             serde_json::from_slice::<JournalRecord>(&line)
                 .ok()
                 .map(|record| (line, record))
@@ -713,6 +715,10 @@ mod tests {
             ))
             .await
             .unwrap();
+        journal
+            .append(record(&command, CommandPhase::Accepted, None, None))
+            .await
+            .unwrap();
         let marker = b"typed-marker-1f3a";
         assert!(!std::fs::read(&sources.journal)
             .unwrap()
@@ -722,7 +728,7 @@ mod tests {
         let key = load_or_create_key(&root.path().join("key.pk8")).unwrap();
         let out = root.path().join("bundle.tar");
         let summary = export(&sources, &workflow, &key, &out).unwrap();
-        assert_eq!(summary.journal_lines, 1);
+        assert_eq!(summary.journal_lines, 2);
         verify(&out, None).unwrap();
         let bundle = entries(&out);
         let text = String::from_utf8(bundle[2].1.clone()).unwrap();
@@ -730,7 +736,10 @@ mod tests {
         assert!(text.contains("typed-marker-1f3a"), "{text}");
         assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text:?}");
         assert!(text.lines().all(|line| !line.is_empty()), "{text:?}");
-        assert!(serde_json::from_str::<JournalRecord>(text.trim_end()).is_ok());
+        assert_eq!(text.lines().count(), 2);
+        assert!(text
+            .lines()
+            .all(|line| serde_json::from_str::<JournalRecord>(line).is_ok()));
     }
 
     #[tokio::test]
