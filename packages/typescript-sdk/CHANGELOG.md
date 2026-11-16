@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.26.0
+
+- Align the client package with the Bobby Browser 0.26.0 runtime release.
+
 ## 0.25.0
 
 - `runtimeInfoForEngine(engine)` returns one engine's runtime info, and `RuntimeInfo` carries `engineScope`.
