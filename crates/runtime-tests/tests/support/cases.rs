@@ -5679,7 +5679,7 @@ pub async fn a_submit_landing_on_a_code_field_asks_for_the_code(rig: &Rig) {
     let entry = code_entry(&submitted);
     assert_eq!(
         entry["fields"],
-        json!([{"role":"textbox","accessibleName":"Verification code"}]),
+        json!([{"role":"textbox","accessibleName":"Verification code","attributes":{"data-bobby-control":"1"}}]),
         "{submitted}"
     );
     assert_eq!(entry["codeLength"], 6, "{submitted}");
@@ -6191,7 +6191,7 @@ pub async fn a_wrong_code_fails_without_echoing_it(rig: &Rig) {
     );
     assert_eq!(
         code_entry(&wrong)["fields"],
-        json!([{"role":"textbox","accessibleName":"Verification code"}]),
+        json!([{"role":"textbox","accessibleName":"Verification code","attributes":{"data-bobby-control":"1"}}]),
         "the failed result does not name the field to retry: {wrong}"
     );
 
