@@ -178,18 +178,17 @@ pub fn export(
     key: &Ed25519KeyPair,
     out: &Path,
 ) -> Result<ExportSummary> {
-    let journal = match std::fs::read(&sources.journal) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", sources.journal.display()))
+    let files = workflow_journal::journal_files(&sources.journal)
+        .with_context(|| format!("list {}", sources.journal.display()))?;
+    // Closed segments first, the active file last; a file may be absent.
+    let mut contents: Vec<(Vec<u8>, bool)> = Vec::new();
+    for (position, file) in files.iter().enumerate() {
+        match std::fs::read(file) {
+            Ok(bytes) => contents.push((bytes, position + 1 == files.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
         }
-    };
-    // Only complete lines: a torn tail is a write in progress.
-    let complete = journal
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&journal[..0], |end| &journal[..=end]);
+    }
     let journal_key = match &sources.journal_key {
         Some(path) => match workflow_journal::JournalKey::load(path) {
             Ok(key) => Some(key),
@@ -198,17 +197,29 @@ pub fn export(
         },
         None => None,
     };
-    // Every complete line feeds the opener so the chain covers the whole file.
+    // Every complete line of every file feeds one opener so the chain covers
+    // the whole journal.
     let mut opener = workflow_journal::LineOpener::new(journal_key.as_ref());
-    let parsed: Vec<(std::borrow::Cow<[u8]>, JournalRecord)> = complete
-        .split_inclusive(|byte| *byte == b'\n')
-        .filter_map(|line| {
-            let line = opener.open(line)?;
-            serde_json::from_slice::<JournalRecord>(&line)
-                .ok()
-                .map(|record| (line, record))
-        })
-        .collect();
+    let mut parsed: Vec<(std::borrow::Cow<[u8]>, JournalRecord)> = Vec::new();
+    // Only the active file may end in a write in progress.
+    for (bytes, is_active) in &contents {
+        let complete = if *is_active {
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(&bytes[..0], |end| &bytes[..=end])
+        } else {
+            &bytes[..]
+        };
+        for line in complete.split_inclusive(|byte| *byte == b'\n') {
+            let Some(line) = opener.open(line) else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
+                parsed.push((line, record));
+            }
+        }
+    }
     let mut commands = HashSet::new();
     // Keyed by the id's text so the manifest lists sessions in a stable order.
     let mut sessions: BTreeMap<String, SessionId> = BTreeMap::new();
@@ -740,6 +751,63 @@ mod tests {
         assert!(text
             .lines()
             .all(|line| serde_json::from_str::<JournalRecord>(line).is_ok()));
+    }
+
+    #[tokio::test]
+    async fn export_from_a_segmented_sealed_journal_bundles_every_record_of_the_workflow() {
+        let root = tempfile::tempdir().unwrap();
+        let key_path = root.path().join("journal.key");
+        let sources = BundleSources {
+            journal: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            artifacts_dir: root.path().join("artifacts"),
+            journal_key: Some(key_path.clone()),
+        };
+        let workflow = WorkflowId::new();
+        let session = SessionId::new();
+        let ours = CommandId::new();
+        let other = CommandId::new();
+        let journal = JsonlJournal::open_with(
+            &sources.journal,
+            workflow_journal::JournalOptions {
+                segment_bytes: 1,
+                key: Some(workflow_journal::JournalKey::load_or_create(&key_path).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let first = envelope(&workflow, &session, &ours);
+        let unrelated = envelope(&WorkflowId::new(), &session, &other);
+        for (id, phase, envelope) in [
+            (&ours, CommandPhase::Executing, Some(first)),
+            (&other, CommandPhase::Executing, Some(unrelated)),
+            (&ours, CommandPhase::Accepted, None),
+        ] {
+            journal
+                .append(record(id, phase, envelope, None))
+                .await
+                .unwrap();
+        }
+        let closed = workflow_journal::journal_files(&sources.journal).unwrap();
+        assert!(closed.len() > 1, "{closed:?}");
+        assert!(closed[0].exists());
+
+        let key = load_or_create_key(&root.path().join("key.pk8")).unwrap();
+        let out = root.path().join("bundle.tar");
+        let summary = export(&sources, &workflow, &key, &out).unwrap();
+        assert_eq!(summary.journal_lines, 2);
+        verify(&out, None).unwrap();
+        let bundle = entries(&out);
+        let text = String::from_utf8(bundle[2].1.clone()).unwrap();
+        assert_eq!(bundle[2].0, "journal.jsonl");
+        let records: Vec<JournalRecord> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.command_id == ours));
+        assert!(records[0].sequence < records[1].sequence);
     }
 
     #[tokio::test]

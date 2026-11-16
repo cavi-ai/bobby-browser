@@ -169,10 +169,15 @@ pub(in crate::doctor) fn record_jsonl_health(
         );
         return;
     }
+    let segments = if name == "command-journal" {
+        format!(" · {} segments", health.segments)
+    } else {
+        String::new()
+    };
     report.ok(
         name,
         format!(
-            "{} · {} records · {} bytes",
+            "{} · {} records · {} bytes{segments}",
             path.display(),
             health.records,
             health.bytes
@@ -210,6 +215,7 @@ pub(in crate::doctor) fn record_command_journal(
                 torn_tail: health.torn_tail,
                 incompatible_records: health.incompatible_records,
                 corrupt_line: None,
+                segments: health.segments,
             },
         ),
         Err(error) => report.fail("command-journal", format!("{error:#}")),
@@ -231,6 +237,7 @@ pub(in crate::doctor) fn record_scheduler_journal(report: &mut DoctorReport, pat
                 torn_tail: health.torn_tail,
                 incompatible_records: health.incompatible_records,
                 corrupt_line: None,
+                segments: 0,
             },
         ),
         Err(error) => report.fail("scheduler-journal", format!("{error:#}")),
@@ -250,6 +257,7 @@ pub(in crate::doctor) fn record_vision_corpus(report: &mut DoctorReport, path: &
                 torn_tail: health.torn_tail,
                 incompatible_records: 0,
                 corrupt_line: health.corrupt_line,
+                segments: 0,
             },
         ),
         Err(error) => report.fail("vision-corpus", format!("{error}")),
@@ -515,6 +523,8 @@ pub(in crate::doctor) struct JsonlHealth {
     torn_tail: bool,
     incompatible_records: usize,
     corrupt_line: Option<usize>,
+    /// Closed segment files; only the command journal has any.
+    segments: usize,
 }
 
 #[cfg(test)]
@@ -537,6 +547,7 @@ mod slo_tests {
                         torn_tail,
                         incompatible_records,
                         corrupt_line: None,
+                        segments: 0,
                     },
                 );
                 let check = report.check(name).unwrap();
