@@ -186,3 +186,8 @@ incremental = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+
+# Shipped binaries: whole-program inlining across crates. Unwinding stays on.
+[profile.release]
+lto = "thin"
+codegen-units = 1
