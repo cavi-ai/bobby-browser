@@ -3,12 +3,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-const ADAPTERS: [&str; 5] = [
+const ADAPTERS: [&str; 8] = [
     "rust-direct",
     "typescript-http",
     "mcp-stdio",
     "playwright-cdp",
     "puppeteer-cdp",
+    "mcp-http",
+    "acp-stdio",
+    "mcp-intent",
 ];
 
 fn median_iqr(mut samples: Vec<Duration>) -> (Duration, Duration) {
@@ -44,7 +47,7 @@ fn benchmark_statistics_require_seven_warmed_equivalent_samples() {
 
 #[tokio::test]
 #[ignore = "requires installed Chromium, built conformance package, and loopback"]
-async fn five_adapters_measure_the_same_installed_chromium_fixture() {
+async fn adapters_measure_the_same_installed_chromium_fixture() {
     let node = std::env::var_os("NODE").unwrap_or_else(|| "node".into());
     let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/interface-conformance");
@@ -53,6 +56,6 @@ async fn five_adapters_measure_the_same_installed_chromium_fixture() {
         .current_dir(package)
         .status()
         .await
-        .expect("launch actual five-adapter performance matrix");
-    assert!(status.success(), "five-adapter performance matrix failed");
+        .expect("launch the adapter performance matrix");
+    assert!(status.success(), "adapter performance matrix failed");
 }

@@ -11,7 +11,7 @@ import {
   withPerformanceChildCleanup,
 } from "./performance-support.js";
 
-const adapters = ["rust-sdk", "typescript-sdk", "mcp", "playwright", "puppeteer"] as const;
+const adapters = ["rust-sdk", "typescript-sdk", "mcp", "playwright", "puppeteer", "mcp-http", "acp", "mcp-intent"] as const;
 const selectedAdapters = process.env.CONFORMANCE_PERFORMANCE_ADAPTERS
   ? adapters.filter(adapter => process.env.CONFORMANCE_PERFORMANCE_ADAPTERS!.split(",").includes(adapter))
   : adapters;
@@ -102,7 +102,7 @@ async function waitForEvent(path: string, child: ReturnType<typeof spawn>, outpu
   child.kill("SIGTERM"); assert.fail(`timed out waiting for ${path}: ${output()}`);
 }
 
-test("five actual adapters use one warmed persistent fixture for seven paired samples", { timeout: 1_800_000 }, async () => {
+test("every adapter uses one warmed persistent fixture for seven paired samples", { timeout: 1_800_000 }, async () => {
   assert(selectedAdapters.length > 0, "no recognized performance adapters selected");
   for (const adapter of selectedAdapters) {
     const result = await runPersistentAdapter(adapter);
