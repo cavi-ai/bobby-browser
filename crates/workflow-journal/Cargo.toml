@@ -24,6 +24,7 @@ types.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

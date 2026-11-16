@@ -5,6 +5,7 @@
 ### Changed
 
 - The command journal rolls into segments at 64 MiB and startup scans only the active file.
+- Concurrent command journal appends share one write and one sync.
 
 ### Security
 
