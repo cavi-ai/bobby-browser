@@ -11,6 +11,10 @@
 
 - Command journal records are sealed and chained on disk with a key from `storage.journal_key_path`, which defaults to `journal.key` beside the loaded config file.
 
+### Fixed
+
+- A vision click that lands just outside a control clicks that control, and one that lands between two controls is declined.
+
 ## 0.25.0 - 2026-11-16
 
 ### Added
