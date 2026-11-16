@@ -2,6 +2,13 @@
 [advisories]
 version = 2
 yanked = "deny"
+# zip 8 is reachable only through the vendored Chromium crate's optional `fetcher` feature, which no workspace crate enables.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "optional fetcher feature is not enabled" },
+    { id = "RUSTSEC-2026-0368", reason = "optional fetcher feature is not enabled" },
+    { id = "RUSTSEC-2026-0369", reason = "optional fetcher feature is not enabled" },
+    { id = "RUSTSEC-2026-0429", reason = "optional fetcher feature is not enabled" },
+]
 
 # Fails on licenses outside the allow list.
 [licenses]
