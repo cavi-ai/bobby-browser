@@ -26,7 +26,7 @@ use types::{
     WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
-use workflow_journal::JsonlJournal;
+use workflow_journal::{CommandJournal, JsonlJournal};
 
 struct CapacityFactory {
     active: Arc<AtomicUsize>,
@@ -164,10 +164,20 @@ async fn submit_capacity(
     page: PageId,
     url: &str,
 ) -> CommandOutcome {
+    submit_capacity_as(runtime, session, page, url, CommandId::new()).await
+}
+
+async fn submit_capacity_as(
+    runtime: RuntimeService,
+    session: SessionId,
+    page: PageId,
+    url: &str,
+    command_id: CommandId,
+) -> CommandOutcome {
     runtime
         .submit(CommandEnvelope {
             schema_version: CommandEnvelope::SCHEMA_VERSION,
-            command_id: CommandId::new(),
+            command_id,
             workflow_id: WorkflowId::new(),
             attempt_id: AttemptId::new(),
             session_id: session,
@@ -423,16 +433,14 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
             started: started.clone(),
         }),
     ));
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("commands.jsonl"))
+            .await
+            .unwrap(),
+    );
     let runtime = RuntimeService::new(
         SessionManager::new(workers.clone()),
-        PageRuntime::new(
-            Arc::new(
-                JsonlJournal::open(root.path().join("commands.jsonl"))
-                    .await
-                    .unwrap(),
-            ),
-            workers,
-        ),
+        PageRuntime::new(journal.clone(), workers),
     );
     let mut targets = Vec::new();
     for index in 0..32 {
@@ -475,9 +483,35 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
     .unwrap();
     let (session, page) = targets[8].clone();
     let runtime_clone = runtime.clone();
+    let interactive = CommandId::new();
+    let interactive_id = interactive.clone();
     workflows.push(tokio::spawn(async move {
-        submit_capacity(runtime_clone, session, page, "https://interactive.test/").await
+        submit_capacity_as(
+            runtime_clone,
+            session,
+            page,
+            "https://interactive.test/",
+            interactive_id,
+        )
+        .await
     }));
+    // A command queues for a worker only after its `Executing` record is
+    // durable, so the queue order under test starts there.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let history = journal.history(interactive.clone()).await.unwrap();
+            if history
+                .records
+                .iter()
+                .any(|record| record.phase == types::CommandPhase::Executing)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("interactive request reached the worker queue");
     tokio::time::sleep(Duration::from_millis(25)).await;
     for (session, page) in targets.iter().skip(9).take(8).cloned() {
         let runtime = runtime.clone();
@@ -500,11 +534,20 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
             CommandOutcome::Completed { .. }
         ));
     }
-    assert_eq!(
-        started.lock().await[8],
-        "https://interactive.test/",
-        "FIFO worker admission starved the interactive request"
+    // Eight workers free up for nine queued requests. FIFO admission gives the
+    // interactive request, queued first, one of them; the request left to wait
+    // is a bulk one. Requests admitted together have no order among themselves.
+    let started = started.lock().await;
+    let position = started
+        .iter()
+        .position(|url| url == "https://interactive.test/")
+        .expect("interactive request started");
+    assert!(
+        (8..16).contains(&position),
+        "FIFO worker admission starved the interactive request: started at {position}"
     );
+    assert_eq!(started[16], "https://bulk-queued.test/");
+    drop(started);
     assert_eq!(active.load(Ordering::SeqCst), 0);
 }
 
