@@ -31,6 +31,20 @@ For a recurring job, have the agent turn the observed steps into a [named workfl
 
 For forms, ask the agent to fill the fields and show their state before submitting. Submission is a separate step: check the confirmation the actual site returns. See [intent commands](docs/bobby-browser/source/pages/guides/intents.md).
 
+## Benchmark
+
+Bobby against other agent browser tools on five sign-in-gated journeys (cookie banner, sign-in and authenticator code, then the task), with Claude Sonnet 5 driving each tool, 5 runs per tool. All four tools completed every journey.
+
+| Bobby vs | Speed | Tokens | Ease of use (1–5) |
+| --- | --- | --- | --- |
+| Microsoft Playwright MCP | Same | 44% fewer | 4.8 vs 2.2 |
+| Google Chrome DevTools MCP | 12% faster | 58% fewer | 4.8 vs 1.5 |
+| Vercel agent-browser | 46% faster | 52% fewer | 4.8 vs 2.2 |
+
+The agent driving each tool rated Bobby easiest to use: 4.8 of 5, against 1.5 to 2.2 for the others.
+
+Measured with Bobby's competitor benchmark at commit `1dc7b2a` against `@playwright/mcp@0.0.79`, `chrome-devtools-mcp@1.7.0` and `agent-browser@0.37.1`. Tokens are uncached input plus output; ease is the driving model's 1–5 rating for navigate, click, fill and extract.
+
 ## Get started
 
 Install the runtime with Homebrew:
