@@ -3711,6 +3711,10 @@ async fn a_page_stays_visible_and_focused_when_another_page_opens() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn humanized_input_reaches_the_page_with_synthesized_timing() {
+    // A loopback document also works when managed browsers disallow data: URLs.
+    let fixture = test_site::FixtureSite::spawn(vec![("/", test_site::Route::Html(
+        "<title>Humanize</title><input id='name'><button id='go'>Go</button><script>window.keydowns=0;window.repeats=0;window.lastkey='';window.clicks=0;window.hist={};document.addEventListener('keydown',(e)=>{window.keydowns++;if(e.repeat)window.repeats++;window.lastkey=e.key;if(!window.t0)window.t0=e.timeStamp;window.t1=e.timeStamp;const b=Math.floor(e.timeStamp/50)*50;window.hist[b]=(window.hist[b]||0)+1;});document.getElementById('go').addEventListener('click',()=>window.clicks++);</script>".into(),
+    ))]).await;
     let profiles = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
         executable: Some(chrome_executable()),
@@ -3733,10 +3737,11 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
         .unwrap();
     // The probe counts keydowns and clicks: synthesized input that never
     // reaches the page fails here, not in a Rust-side assertion.
-    worker_pool::navigation_or_default(worker.navigation()).navigate(
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<title>Humanize</title><input id='name'><button id='go'>Go</button><script>window.keydowns=0;window.repeats=0;window.lastkey='';window.clicks=0;document.addEventListener('keydown',(e)=>{window.keydowns++;if(e.repeat)window.repeats++;window.lastkey=e.key;if(!window.t0)window.t0=e.timeStamp;window.t1=e.timeStamp;const b=Math.floor(e.timeStamp/50)*50;window.hist[b]=(window.hist[b]||0)+1;});document.getElementById('go').addEventListener('click',()=>window.clicks++);</script>".into(),
+                url: fixture.url("/"),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 30_000,
             },
@@ -3815,6 +3820,49 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     );
     assert_eq!(probe["clicks"].as_u64().unwrap_or(0), 1, "probe: {probe}");
     assert_eq!(probe["value"].as_str().unwrap_or_default(), "Ada");
+
+    // Intent fills now use control_action too; that route must honor the
+    // session's input policy just as type_text does.
+    let snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
+    let target = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => snapshot
+                .unowned_controls
+                .iter()
+                .find(|control| control.control_kind == types::FormControlKind::Text)
+                .and_then(|control| control.target.clone()),
+            _ => None,
+        })
+        .expect("text control target");
+    let started = std::time::Instant::now();
+    let filled = worker_pool::input_or_default(worker.input())
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target,
+                action: ControlAction::SetText {
+                    value: "Eve".into(),
+                    clear_first: true,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed().as_millis() >= 300,
+        "control action skipped humanization"
+    );
+    assert!(
+        filled.iter().any(|item| matches!(item,
+            Evidence::ControlAction { action }
+                if action.state == (types::FormControlState::Text { value: "Eve".into() })
+        )),
+        "{filled:?}"
+    );
 
     // Off means off: no Humanization evidence and direct input speed.
     worker_pool::session_settings_or_default(worker.session_settings())

@@ -164,7 +164,10 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
     if let Err(message) = command.action.validate() {
         return Err(adapter.invalid_action(message));
     }
-    let require_visible = command.target.attributes.get("type").map(String::as_str) != Some("file");
+    // Intent targets can identify a file input by its stamp or name alone.
+    // Uploads must still reach inputs hidden behind a visible upload button.
+    let require_visible = !matches!(command.action, ControlAction::SetFiles { .. })
+        && command.target.attributes.get("type").map(String::as_str) != Some("file");
     let prepared = adapter
         .resolve(page_id, &command.target, require_visible)
         .await?;
@@ -511,9 +514,13 @@ mod tests {
             &self,
             _page_id: &PageId,
             _target: &FormControlTarget,
-            _require_visible: bool,
+            require_visible: bool,
         ) -> Result<(), CommandError> {
-            self.calls.lock().expect("calls").push("resolve");
+            self.calls.lock().expect("calls").push(if require_visible {
+                "resolve"
+            } else {
+                "resolve-hidden"
+            });
             Ok(())
         }
 
@@ -698,6 +705,35 @@ mod tests {
             &action,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_fill_reaches_hidden_inputs_without_a_type_attribute_on_the_target() {
+        let mut adapter = FakeAdapter::text("", "");
+        adapter.kind = FormControlKind::File;
+        adapter.operations = vec![FormControlOperation::SetFiles];
+        adapter.before = FormControlState::Files {
+            count: 0,
+            names: Vec::new(),
+        };
+        adapter.after = FormControlState::Files {
+            count: 1,
+            names: vec!["resume.pdf".into()],
+        };
+        let evidence = run(
+            &adapter,
+            &PageId::new(),
+            &command(ControlAction::SetFiles {
+                paths: vec!["/uploads/resume.pdf".into()],
+            }),
+        )
+        .await
+        .expect("hidden file fill");
+        assert_eq!(
+            adapter.calls.lock().expect("calls").as_slice(),
+            ["resolve-hidden", "upload"]
+        );
+        assert_eq!(evidence_of(evidence).state, adapter.after);
     }
 
     #[tokio::test]
