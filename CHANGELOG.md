@@ -4,7 +4,7 @@
 
 ### Security
 
-- Command journal records are sealed on disk with a key from `storage.journal_key_path`, which defaults to `journal.key` beside the loaded config file.
+- Command journal records are sealed and chained on disk with a key from `storage.journal_key_path`, which defaults to `journal.key` beside the loaded config file.
 
 ## 0.25.0 - 2026-11-16
 

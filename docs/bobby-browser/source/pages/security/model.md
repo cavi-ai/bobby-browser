@@ -14,7 +14,7 @@ bobby drives real browsers on behalf of authenticated callers, so it denies by d
 - **No secrets in URLs, logs or committed configuration.** Credentials travel in the `Authorization` header only.
 - **Opt-in JavaScript and vision.** Each needs a capability, a session `executionPolicy` flag, and for vision a configured provider. Vision tokens live in environment variables named by `token_env`.
 - **Opt-in password manager fill.** `passwordManagerFill` needs the session's `executionPolicy.passwordManager`. The filled value is never returned.
-- **Sealed command journal.** Journal records are encrypted at rest with ChaCha20-Poly1305 under the key at `storage.journal_key_path`, so values typed through commands do not sit on disk in plaintext.
+- **Sealed command journal.** Journal records are encrypted at rest with ChaCha20-Poly1305 under the key at `storage.journal_key_path`, so values typed through commands do not sit on disk in plaintext. Records are chained, so a removed, foreign or forged line is detected when the journal opens.
 - **Per-principal isolation.** Sessions, pages, idempotency keys and quotas belong to one principal. Request, frame and result sizes are bounded.
 - **Egress control.** Outbound requests from the runtime deny private and loopback addresses unless `[http]` allows them.
 

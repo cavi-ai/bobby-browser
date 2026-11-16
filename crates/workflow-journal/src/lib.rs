@@ -22,7 +22,7 @@ pub use health::{
     scan_jsonl, scan_jsonl_prefetched, LedgerDecoder, LedgerHealth, LedgerIssue, LedgerIssueKind,
     PreparedRecord, RecordObservation, ScanControl, ScanOptions, SequenceRule, SequenceVerdict,
 };
-pub use seal::{plain_line, JournalKey};
+pub use seal::{JournalKey, LineOpener};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +142,8 @@ struct Scan {
     records: usize,
     /// Highest sequence in the file, including skipped lines, so appends stay monotonic.
     max_sequence: Option<u64>,
+    /// Digest of the last complete line, for chaining the next append.
+    last_digest: [u8; 32],
 }
 
 #[derive(Debug, Error)]
@@ -167,6 +169,8 @@ struct WriterState {
     identity: same_file::Handle,
     next_sequence: u64,
     file_len: u64,
+    /// Digest of the last complete line in the active file.
+    last_digest: [u8; 32],
     modified: Option<std::time::SystemTime>,
     offsets: HashMap<CommandId, Vec<IndexedRecord>>,
     archives: Vec<Arc<PathBuf>>,
@@ -180,6 +184,10 @@ struct ArchivedRecordLocation {
     path: Arc<PathBuf>,
     offset: u64,
     len: u64,
+    /// Digest of the line before this one in its file.
+    previous: [u8; 32],
+    /// Whether a plain line was acceptable at this position.
+    plain_allowed: bool,
 }
 
 /// Rebuildable checks against the bytes validated at open or durably appended.
@@ -188,14 +196,17 @@ struct IndexedRecord {
     offset: u64,
     len: usize,
     digest: [u8; 32],
+    /// Digest of the line before this one in its file.
+    previous: [u8; 32],
 }
 
 impl IndexedRecord {
-    fn new(offset: u64, bytes: &[u8]) -> Self {
+    fn new(offset: u64, bytes: &[u8], previous: [u8; 32]) -> Self {
         Self {
             offset,
             len: bytes.len(),
             digest: Sha256::digest(bytes).into(),
+            previous,
         }
     }
 }
@@ -227,7 +238,8 @@ async fn read_indexed_records(
         if !line.ends_with(b"\n") || digest != entry.digest {
             return Ok(None);
         }
-        let Some(plain) = plain_line(&line, key) else {
+        // The digest above proves these are the bytes accepted when indexed.
+        let Some(plain) = seal::open_at(&line, key, &entry.previous, true) else {
             return Ok(None);
         };
         let Ok(record) = serde_json::from_slice::<JournalRecord>(&plain) else {
@@ -479,6 +491,7 @@ async fn open_writer(
         key,
     )
     .await?;
+    let mut last_digest = scan.last_digest;
     let next_sequence = if scan.scan.torn_tail
         || scan.scan.incompatible_records > 0
         || scan.max_sequence == Some(u64::MAX)
@@ -488,6 +501,7 @@ async fn open_writer(
         file = options.open(path).await?;
         durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
         durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
+        last_digest = seal::GENESIS;
         0
     } else {
         scan.max_sequence.map_or(0, |sequence| sequence + 1)
@@ -519,6 +533,7 @@ async fn open_writer(
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut offset = 0;
+        let mut opener = LineOpener::new(key);
         loop {
             let read = (&mut reader)
                 .take((max_record_bytes as u64).saturating_add(1))
@@ -541,8 +556,14 @@ async fn open_writer(
             if !line.ends_with(b"\n") {
                 archived_torn_tail = true;
             }
+            let previous = opener.previous();
+            let plain_allowed = !opener.sealed_seen();
+            let plain = if line.ends_with(b"\n") {
+                opener.open(&line)
+            } else {
+                seal::open_at(&line, key, &previous, plain_allowed)
+            };
             if !line.iter().all(u8::is_ascii_whitespace) {
-                let plain = plain_line(&line, key);
                 let id = match plain
                     .as_deref()
                     .map(serde_json::from_slice::<JournalRecord>)
@@ -567,6 +588,8 @@ async fn open_writer(
                             path: Arc::clone(&archive),
                             offset,
                             len: line.len() as u64,
+                            previous,
+                            plain_allowed,
                         });
                 }
             }
@@ -580,6 +603,7 @@ async fn open_writer(
         identity,
         next_sequence,
         file_len: metadata.len(),
+        last_digest,
         modified: metadata.modified().ok(),
         offsets,
         archives,
@@ -609,7 +633,7 @@ impl CommandJournal for JsonlJournal {
             std::io::Write::write_all(&mut buffer, b"\n")?;
             let mut bytes = buffer.into_inner();
             if let Some(key) = journal.key.as_deref() {
-                bytes = key.seal_line(&bytes)?;
+                bytes = key.seal_line(&bytes, &writer.last_digest)?;
                 if bytes.len() > journal.max_record_bytes {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -623,11 +647,13 @@ impl CommandJournal for JsonlJournal {
             writer.file.flush().await?;
             writer.file.sync_data().await?;
             let offset = writer.file_len;
+            let previous = writer.last_digest;
             writer
                 .offsets
                 .entry(record.command_id)
                 .or_default()
-                .push(IndexedRecord::new(offset, &bytes));
+                .push(IndexedRecord::new(offset, &bytes, previous));
+            writer.last_digest = Sha256::digest(&bytes).into();
             writer.file_len += bytes.len() as u64;
             writer.modified = writer.file.metadata().await?.modified().ok();
             writer.next_sequence = next;
@@ -694,7 +720,12 @@ impl CommandJournal for JsonlJournal {
                         if !line.ends_with(b"\n") {
                             scan.torn_tail = true;
                         }
-                        let plain = plain_line(&line, journal.key.as_deref());
+                        let plain = seal::open_at(
+                            &line,
+                            journal.key.as_deref(),
+                            &entry.previous,
+                            entry.plain_allowed,
+                        );
                         if let Some(Ok(record)) = plain
                             .as_deref()
                             .map(serde_json::from_slice::<JournalRecord>)
@@ -844,20 +875,24 @@ where
 
 struct CommandDecoder<'a> {
     index: Option<&'a mut HashMap<CommandId, Vec<IndexedRecord>>>,
-    key: Option<&'a JournalKey>,
+    opener: LineOpener<'a>,
+    /// Digest of the line before the one being decoded.
+    line_previous: [u8; 32],
 }
 
 impl LedgerDecoder for CommandDecoder<'_> {
     type Record = JournalRecord;
 
     fn decode(&mut self, line: &JsonlLine<'_>) -> std::io::Result<PreparedRecord<JournalRecord>> {
+        // Every stored line advances the chain, including skipped ones.
+        self.line_previous = self.opener.previous();
+        let plain = self.opener.open(line.bytes);
         if line.bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(PreparedRecord {
                 observation: RecordObservation::Skip,
                 record: None,
             });
         }
-        let plain = plain_line(line.bytes, self.key);
         let bytes = plain.as_deref().unwrap_or(line.bytes);
         Ok(match serde_json::from_slice::<JournalRecord>(bytes) {
             Ok(record) if plain.is_some() => PreparedRecord {
@@ -889,7 +924,11 @@ impl LedgerDecoder for CommandDecoder<'_> {
             index
                 .entry(record.command_id)
                 .or_default()
-                .push(IndexedRecord::new(line.offset, line.bytes));
+                .push(IndexedRecord::new(
+                    line.offset,
+                    line.bytes,
+                    self.line_previous,
+                ));
         }
         Ok(ScanControl::Continue)
     }
@@ -901,13 +940,18 @@ async fn scan_file(
     max_record_bytes: usize,
     key: Option<&JournalKey>,
 ) -> Result<Scan, JournalError> {
+    let mut decoder = CommandDecoder {
+        index,
+        opener: LineOpener::new(key),
+        line_previous: seal::GENESIS,
+    };
     let health = scan_jsonl(
         &mut BufReader::new(file),
         ScanOptions {
             max_line_bytes: max_record_bytes as u64,
             sequence_rule: SequenceRule::Increasing,
         },
-        &mut CommandDecoder { index, key },
+        &mut decoder,
     )
     .await?;
     Ok(Scan {
@@ -919,5 +963,6 @@ async fn scan_file(
         },
         records: health.decoded_records,
         max_sequence: health.max_observed_sequence,
+        last_digest: decoder.opener.previous(),
     })
 }

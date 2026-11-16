@@ -3,7 +3,7 @@ use types::{
     AttemptId, CommandEnvelope, CommandId, CommandPhase, PrimitiveCommand, RuntimeCommand,
     SessionId, TypeTextCommand, WorkflowId,
 };
-use workflow_journal::{plain_line, CommandJournal, JournalKey, JournalRecord, JsonlJournal};
+use workflow_journal::{CommandJournal, JournalKey, JournalRecord, JsonlJournal, LineOpener};
 
 fn typed_record(command_id: &CommandId, value: &str) -> JournalRecord {
     JournalRecord {
@@ -88,7 +88,10 @@ async fn sealed_line_opens_to_the_bytes_a_keyless_journal_writes() {
 
     let plain_bytes = std::fs::read(&plain_path).unwrap();
     let sealed_bytes = std::fs::read(&sealed_path).unwrap();
-    let opened = plain_line(&sealed_bytes, Some(&key(1))).unwrap();
+    let sealed_key = key(1);
+    let opened = LineOpener::new(Some(&sealed_key))
+        .open(&sealed_bytes)
+        .unwrap();
     assert_eq!(opened.as_ref(), plain_bytes.as_slice());
 }
 
@@ -211,4 +214,102 @@ async fn sealed_journal_is_not_trusted_under_a_different_key() {
     let scan = reopened.history(id).await.unwrap();
     assert!(scan.incompatible_records > 0);
     assert!(scan.records.is_empty());
+}
+
+fn lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+#[tokio::test]
+async fn sealed_journal_archives_when_a_middle_line_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let ids = [CommandId::new(), CommandId::new(), CommandId::new()];
+    let journal = JsonlJournal::open_sealed(&path, key(1)).await.unwrap();
+    for (index, id) in ids.iter().enumerate() {
+        journal
+            .append(typed_record(id, &format!("chained-value-{index}")))
+            .await
+            .unwrap();
+    }
+    drop(journal);
+
+    let mut kept = lines(&std::fs::read(&path).unwrap());
+    assert_eq!(kept.len(), 3);
+    kept.remove(1);
+    std::fs::write(&path, kept.concat()).unwrap();
+
+    let reopened = JsonlJournal::open_sealed(&path, key(1)).await.unwrap();
+    assert_eq!(reopened.archives().await.len(), 1);
+    let scan = reopened.history(ids[2].clone()).await.unwrap();
+    assert!(scan.records.is_empty());
+    assert!(scan.incompatible_records > 0);
+}
+
+#[tokio::test]
+async fn sealed_journal_archives_a_forged_plaintext_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let genuine = CommandId::new();
+    let forged = CommandId::new();
+    let journal = JsonlJournal::open_sealed(&path, key(1)).await.unwrap();
+    journal
+        .append(typed_record(&genuine, "genuine-value"))
+        .await
+        .unwrap();
+    drop(journal);
+
+    let mut record = typed_record(&forged, "forged-value");
+    record.sequence = 1;
+    let mut line = serde_json::to_vec(&record).unwrap();
+    line.push(b'\n');
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(&line);
+    std::fs::write(&path, bytes).unwrap();
+
+    let reopened = JsonlJournal::open_sealed(&path, key(1)).await.unwrap();
+    assert_eq!(reopened.archives().await.len(), 1);
+    let scan = reopened.history(forged).await.unwrap();
+    assert!(scan.records.is_empty());
+    assert!(scan.incompatible_records > 0);
+}
+
+#[tokio::test]
+async fn sealed_journal_archives_a_line_copied_from_another_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_a = dir.path().join("a.jsonl");
+    let path_b = dir.path().join("b.jsonl");
+    let id_a = CommandId::new();
+    let first_b = CommandId::new();
+    let foreign = CommandId::new();
+    let journal_a = JsonlJournal::open_sealed(&path_a, key(1)).await.unwrap();
+    journal_a
+        .append(typed_record(&id_a, "journal-a-value"))
+        .await
+        .unwrap();
+    drop(journal_a);
+    let journal_b = JsonlJournal::open_sealed(&path_b, key(1)).await.unwrap();
+    journal_b
+        .append(typed_record(&first_b, "journal-b-first"))
+        .await
+        .unwrap();
+    journal_b
+        .append(typed_record(&foreign, "journal-b-second"))
+        .await
+        .unwrap();
+    drop(journal_b);
+
+    let copied = lines(&std::fs::read(&path_b).unwrap()).remove(1);
+    let mut bytes = std::fs::read(&path_a).unwrap();
+    bytes.extend_from_slice(&copied);
+    std::fs::write(&path_a, bytes).unwrap();
+
+    let reopened = JsonlJournal::open_sealed(&path_a, key(1)).await.unwrap();
+    assert_eq!(reopened.archives().await.len(), 1);
+    let scan = reopened.history(foreign).await.unwrap();
+    assert!(scan.records.is_empty());
+    assert!(scan.incompatible_records > 0);
 }
