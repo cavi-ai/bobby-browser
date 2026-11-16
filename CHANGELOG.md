@@ -15,6 +15,7 @@
 ### Fixed
 
 - A vision click that lands just outside a control clicks that control, and one that lands between two controls is declined.
+- The CDP gateway accepts `playwright-core` 1.65.
 
 ## 0.25.0 - 2026-11-16
 
