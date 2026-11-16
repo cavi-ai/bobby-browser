@@ -2,9 +2,18 @@
 
 ## Unreleased
 
+## 0.25.0 - 2026-11-16
+
+### Added
+
+- `runtime_info` takes `engine` and returns that engine's capabilities with `engineScope`, as do `GET /v1/runtime?engine=`, the Rust client's `runtime_info_for_engine` and the TypeScript client's `runtimeInfoForEngine`.
+
 ### Changed
 
 - The TypeScript SDK and the source build require Node 24 or later.
+- `intent_follow` takes exactly one of `expectedState` or `expectedDestination` and rejects both or neither.
+- Intent fills set text and file controls through `control_action` on Chromium and Firefox.
+- Updated `agent-client-protocol` to 5.
 
 ### Security
 
@@ -21,6 +30,7 @@
 - A file a widget removed no longer blocks the next upload, and `clear` empties a file control on Chromium.
 - Headed Chromium opens a session's pages as tabs of one window.
 - `bobby doctor` probes the BiDi port Firefox published in its profile and fails an attachment-only Firefox that is down or started before its companion install; `--fix`, or yes at the terminal prompt, restarts it.
+- `intent_submit_and_verify` reads the form and its validation from one snapshot taken after the response settles, so a form the response replaced no longer rejects the submit.
 
 ## 0.24.0 - 2026-11-08
 
