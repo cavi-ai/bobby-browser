@@ -55,6 +55,7 @@ To allow Chromium as well, use `{"preference":{"mode":"prefer","engines":["firef
 ## Operating it
 
 - Keep the paired Firefox running while you automate.
+- Pages open as background tabs. `bobby install --companion` writes `user.js` prefs that turn off background timer throttling, so page timers run at foreground speed after the next Firefox start. `requestAnimationFrame` and page visibility remain those of a hidden tab.
 - Completed commands carry `browserExecution` evidence with `engine: "firefox"` and `interactionPath: "engineNative"`.
 - After you rebuild or reinstall the extension, the next session start compares the running build with the installed one. A build that reports an ID is asked to reload. An older build is handled by restarting the enrolled Firefox. One attempt is made per installed build. If the old build still runs, the session fails with a non-retryable error naming both IDs.
 - All runtime sessions on a profile share one BiDi connection, because Firefox accepts one BiDi session per browser. Page attachments stay per session and renew before they expire.

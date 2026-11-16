@@ -2824,7 +2824,7 @@ mod install_tests {
                 .join(COMPANION_GECKO_ID)
         );
         let user_js = std::fs::read_to_string(install.profile_dir.join("user.js")).unwrap();
-        for &(name, _) in FIREFOX_PROFILE_PREFS {
+        for &(name, _) in FIREFOX_PROFILE_PREFS.iter().chain(FIREFOX_PAGE_PREFS) {
             assert!(
                 user_js.contains(&format!("user_pref(\"{name}\"")),
                 "missing pref {name} in user.js:\n{user_js}"
@@ -2944,7 +2944,7 @@ mod install_tests {
         assert!(!stale_xpi.exists());
         let preserved = std::fs::read_to_string(second.profile_dir.join("user.js")).unwrap();
         assert!(preserved.contains("user_pref(\"bobby.test.custom\", true);"));
-        for &(name, _) in FIREFOX_PROFILE_PREFS {
+        for &(name, _) in FIREFOX_PROFILE_PREFS.iter().chain(FIREFOX_PAGE_PREFS) {
             assert!(preserved.contains(&format!("user_pref(\"{name}\"")));
         }
     }
@@ -3139,8 +3139,19 @@ const FIREFOX_PROFILE_PREFS: &[(&str, &str)] = &[
     // Reconcile profile add-ons at startup, before they run, so a companion
     // replaced on disk starts once per Firefox start.
     ("extensions.startupScanScopes", "1"),
+];
+
+/// Prefs that make a page in a managed profile behave as in a foreground tab.
+/// Pages open as background tabs, so background timer throttling is off.
+pub const FIREFOX_PAGE_PREFS: &[(&str, &str)] = &[
     ("privacy.resistFingerprinting", "false"),
     ("ui.systemUsesDarkTheme", "1"),
+    ("dom.min_background_timeout_value", "4"),
+    (
+        "dom.min_background_timeout_value_without_budget_throttling",
+        "4",
+    ),
+    ("dom.timeout.enable_budget_timer_throttling", "false"),
 ];
 
 fn bobby_config_dir() -> Result<PathBuf> {
@@ -3280,7 +3291,7 @@ fn ensure_firefox_profile_user_js(profile_dir: &Path) -> Result<()> {
         String::new()
     };
     let mut additions = String::new();
-    for &(name, value) in FIREFOX_PROFILE_PREFS {
+    for &(name, value) in FIREFOX_PROFILE_PREFS.iter().chain(FIREFOX_PAGE_PREFS) {
         let marker = format!("user_pref(\"{name}\"");
         if !existing.contains(&marker) {
             additions.push_str(&format!("user_pref(\"{name}\", {value});\n"));
