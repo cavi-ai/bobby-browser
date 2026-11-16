@@ -27,6 +27,10 @@ const PLAYWRIGHT_1_64_INJECTED: (usize, &str) = (
     328_715,
     "18c70fd11170c6caaf9c94326796557baf86300d7c77c968756a55ae94a99f80",
 );
+const PLAYWRIGHT_1_65_INJECTED: (usize, &str) = (
+    330_312,
+    "4ebfad2396f8ff9cf50ed2c275149d67e6bfb28ce3b2f9339f0143baae702180",
+);
 const PLAYWRIGHT_1_61_UTILITY: (usize, &str) = (
     10_652,
     "3fc2ec24a4359c88a30f650d4daf23c0554eda935fb19bf1fe81f687f65d8dcd",
@@ -39,13 +43,18 @@ const PLAYWRIGHT_1_64_UTILITY: (usize, &str) = (
     12_997,
     "7547c0afc262936d8a948e35e443267d3e02cc49cc51edfe999a450c3d0da2eb",
 );
+const PLAYWRIGHT_1_65_UTILITY: (usize, &str) = (
+    12_977,
+    "89b21e9280b568c5a0dedba3aded1e3e367074977033ed743c0589e0d5abdf51",
+);
 
-const INJECTED_BOOTSTRAPS: [(usize, &str); 5] = [
+const INJECTED_BOOTSTRAPS: [(usize, &str); 6] = [
     PLAYWRIGHT_1_61_INJECTED,
     PLAYWRIGHT_1_62_0_INJECTED,
     PLAYWRIGHT_1_62_1_INJECTED,
     PLAYWRIGHT_1_63_INJECTED,
     PLAYWRIGHT_1_64_INJECTED,
+    PLAYWRIGHT_1_65_INJECTED,
 ];
 
 fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
@@ -54,6 +63,7 @@ fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
             PLAYWRIGHT_1_61_UTILITY,
             PLAYWRIGHT_1_62_UTILITY,
             PLAYWRIGHT_1_64_UTILITY,
+            PLAYWRIGHT_1_65_UTILITY,
         ]
         .contains(&(len, digest))
 }
@@ -220,6 +230,22 @@ mod tests {
         assert!(is_pinned_bootstrap_identity(
             12_997,
             "7547c0afc262936d8a948e35e443267d3e02cc49cc51edfe999a450c3d0da2eb"
+        ));
+    }
+
+    #[test]
+    fn accepts_playwright_1_65_injected_bootstrap_identity() {
+        assert!(is_pinned_bootstrap_identity(
+            330_312,
+            "4ebfad2396f8ff9cf50ed2c275149d67e6bfb28ce3b2f9339f0143baae702180"
+        ));
+    }
+
+    #[test]
+    fn accepts_playwright_1_65_utility_bootstrap_identity() {
+        assert!(is_pinned_bootstrap_identity(
+            12_977,
+            "89b21e9280b568c5a0dedba3aded1e3e367074977033ed743c0589e0d5abdf51"
         ));
     }
 
