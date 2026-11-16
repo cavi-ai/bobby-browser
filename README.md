@@ -1,143 +1,104 @@
 # bobby-browser
 
-A browser automation runtime for AI agents and applications. It drives Firefox or Chromium and exposes the browser through MCP tools, an HTTP API, ACP, authenticated CDP, and SDKs for TypeScript, Python and Rust.
+[![Release](https://img.shields.io/github/v/release/cavi-ai/bobby-browser)](https://github.com/cavi-ai/bobby-browser/releases/latest)
+[![Release asset downloads](https://img.shields.io/github/downloads/cavi-ai/bobby-browser/total?label=release%20asset%20downloads)](https://github.com/cavi-ai/bobby-browser/releases)
+[![License: MIT](https://img.shields.io/github/license/cavi-ai/bobby-browser)](LICENSE)
 
-Every call is authenticated, limited by capabilities, journaled with evidence, and recoverable after a crash. Credentials are never accepted in URLs.
+![Bobby Browser: a cartoon bee takes on a stack of browser tasks.](assets/bobby-browser-hero.png)
 
-> **Alpha.** Interfaces are stable enough to build against but can change before 1.0. See [SECURITY.md](SECURITY.md).
+Give your agents the browser work.
 
-## Fill the form. Check the result.
+Bobby automates Firefox and Chromium for AI agents and applications. Turn recurring web tasks into reusable workflows, retain useful site structure and continue interrupted work from recorded progress.
 
-Use Bobby to fill a form you control, inspect the returned field evidence,
-then submit with an expected result. Completing the form does not submit it.
+## Browser work you can build on
 
-[Watch the 58-second screenshot walkthrough](assets/form-walkthrough.mp4)
-— an edited sequence from a **synthetic local form**, not a continuous recording.
+- **Remember the site.** With a durable browser profile, Bobby remembers control names, roles and verified targets across visits. Agents can ask for a relevant control before requesting a full page snapshot.
+- **Reuse the workflow.** Combine browser steps into a named workflow with inputs and outputs. Run it with new inputs; inspect the step results when something needs attention.
+- **Recover your progress.** Command records and evidence-backed checkpoints help you inspect interrupted work and decide where to continue. Check an uncertain submission on the destination before sending it again.
 
-| Task | Action | Observed result |
-| :-- | :-- | :-- |
-| Reveal team fields and save a sample request | Reveal the fields, inspect required-field failures, correct the remaining values, then submit separately with a saved-receipt check | The corrected email returned exact-value and validity evidence. The separate submit produced `DEMO-001`, with matching data saved by the local demo server. |
+Use MCP, HTTP, ACP, authenticated CDP, or the TypeScript, Python and Rust SDKs. These interfaces share the same runtime and command pipeline.
 
-One synthetic form does not establish reliability on other websites. Field
-validity does not prove server acceptance.
+## Start with a useful task
 
-[Install below](#install), then [try a controlled form](#try-a-controlled-form).
+After setup, give your agent the pages and the result you want:
 
-## Install
+> Compare these three product pages. Make a table with the model name, listed price, availability and source URL. Leave missing information blank and keep the original currency.
 
-Pick one.
+For a recurring job, have the agent turn the observed steps into a [named workflow](docs/bobby-browser/source/pages/guides/workflows.md). You supply the inputs and desired result; the agent operates the browser.
+
+For forms, ask the agent to fill the fields and show their state before submitting. Submission is a separate step: check the confirmation the actual site returns. See [intent commands](docs/bobby-browser/source/pages/guides/intents.md).
+
+## Get started
+
+Install the runtime with Homebrew:
 
 ```bash
-# Homebrew
 brew tap cavi-ai/tap
 brew install cavi-ai/tap/bobby-browser
-
-# Install script (Linux and macOS)
-curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
-
-# From source (needs the Rust toolchain, Node and pnpm)
-git clone https://github.com/cavi-ai/bobby-browser.git
-cd bobby-browser
-make install
-```
-
-Homebrew and the install script put `bobby`, `mcp-gateway` and `acp-gateway` on your `PATH`. `make install` builds those three binaries in release mode and builds the Firefox companion extension. It then runs `bobby install`, which puts the binaries on `PATH`, installs the companion, wires your agent host and creates a credential if none exists. It shows the checklist in a terminal and runs unattended without one. `make cli` installs only the binaries. Windows and release archives are covered in [Installation](docs/bobby-browser/source/pages/introduction/installation.md).
-
-## First session
-
-Wire up your agent host and check the setup:
-
-```bash
 bobby install
 bobby doctor
 ```
 
-`bobby install` creates a credential and writes the MCP entry for Claude Code, VS Code, Zed, an ACP host or OpenShell. Add `--skill` to install the agent skill. For Firefox, run `bobby install --companion`, then `bobby firefox-start` and click **Pair** in the Bobby Companion toolbar popup. After `make install`, the companion is already installed.
+The setup checklist creates a credential and connects your agent host. Firefox requires [one-time companion installation and pairing](docs/bobby-browser/source/pages/guides/firefox-companion.md).
 
-Restart your agent host. The agent then calls `workflow_start` with `{"profile": "default", "url": "https://example.com"}`, `workflow_observe` with the returned handle, and `click`, `type_text` or an `intent_*` tool to act. See the [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md).
+Restart your agent host, then give it the task above.
 
-### Try a controlled form
+[Linux, Windows, release archives and source installation](docs/bobby-browser/source/pages/introduction/installation.md) · [First browser session](docs/bobby-browser/source/pages/introduction/quickstart.md)
 
-After setup, open a test form you own and ask your agent:
+After an upgrade, restart the running runtime to activate the new build. See [installation](docs/bobby-browser/source/pages/introduction/installation.md).
 
-> Inspect this form with Bobby. Fill it with sample data, including any fields
-> revealed by earlier choices. Show the field evidence before submitting. Submit
-> once only when the values are correct, using the confirmation this form actually
-> returns, then inspect the saved result.
+## Keep the work connected
 
-The agent reuses one `workflowHandle`, reads `form_snapshot`, and calls
-`intent_complete_form` with the observed fields. If a field fails, inspect the
-returned evidence and correct only the remaining fields with `intent_fill`.
-`intent_submit_and_verify` is a separate call with the expected confirmation.
-If the submit outcome is uncertain, inspect the destination before another
-submit. Close the task session with `session_close` when finished.
+[Site memory](docs/bobby-browser/source/pages/concepts/context-graph.md) retains page structure and verified target records per durable browser profile, without storing typed values, credentials, page text or screenshots.
 
-See [form arguments and expected-state examples](docs/bobby-browser/source/pages/guides/intents.md#fill-a-whole-form).
-If the workflow stops unexpectedly, [report a reproducible issue](https://github.com/cavi-ai/bobby-browser/issues)
-with the tool, error and expected result, omitting tokens and private form values.
-Documentation improvements are welcome through [CONTRIBUTING.md](CONTRIBUTING.md).
+[Workflow files](docs/bobby-browser/source/pages/guides/workflows.md) support inputs, conditions, repeated steps and outputs. A stopped file workflow can continue from a reached step on the same connection, reusing its earlier recorded results.
+
+[Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md) cover durable checkpoints and resume, restart or reconciliation decisions after an interruption.
+
+[Scoped callers](docs/bobby-browser/source/pages/concepts/multi-principal.md) let one runtime serve multiple agents and applications with separate sessions, pages and request quotas.
 
 ## Use from code
 
-Run `bobby serve`, then export the token with `export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"`.
+The SDKs connect to an installed Bobby runtime.
 
-TypeScript (`npm install @cavi-ai/bobby-browser`):
+| Language | Package | Guide |
+| --- | --- | --- |
+| TypeScript | `npm install @cavi-ai/bobby-browser` | [TypeScript SDK](docs/bobby-browser/source/pages/surfaces/typescript-sdk.md) |
+| Python | `pip install bobby-browser` | [Python SDK](docs/bobby-browser/source/pages/surfaces/python-sdk.md) |
+| Rust | `cargo add bobby-browser-client` | [Rust SDK](docs/bobby-browser/source/pages/rust/index.md) |
 
-```ts
-import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
+Start with [a session from code](docs/bobby-browser/source/pages/introduction/first-session.md), the [HTTP API](docs/bobby-browser/source/pages/surfaces/http-api.md), or [authenticated CDP](docs/bobby-browser/source/pages/surfaces/cdp.md).
 
-const client = new BrowserRuntimeClient({
-  baseUrl: "http://127.0.0.1:7777",
-  bearerToken: process.env.AUTOMATION_RUNTIME_TOKEN!,
-});
-const info = await client.runtimeInfo();
-```
+The [Cavi API client example](examples/cavi-api-client/README.md) reads page text with Bobby and streams a summary through your selected model provider.
 
-The [Cavi API client example](examples/cavi-api-client/README.md) reads page text
-with Bobby and streams a summary through a selected model provider.
+## Access and permissions
 
-Python (`pip install bobby-browser`):
+Calls are authenticated and checked against the caller's capabilities. Side-effecting calls use idempotency keys; command evidence and checkpoints support inspection and recovery. Credentials are never accepted in URLs.
 
-```python
-import os
-from bobby_browser import BrowserRuntimeClient
+See the [security model](docs/bobby-browser/source/pages/security/model.md), [capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md) and [SECURITY.md](SECURITY.md).
 
-client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RUNTIME_TOKEN"])
-info = client.runtime_info()
-```
+## Documentation and help
 
-Rust (`cargo add bobby-browser-client`):
+Full documentation: [cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
 
-```rust,no_run
-use bobby_browser_client::BrowserRuntimeClient;
+- [Overview](docs/bobby-browser/source/pages/introduction/overview.md), [configuration](docs/bobby-browser/source/pages/guides/configuration.md) and [CLI](docs/bobby-browser/source/pages/guides/cli.md)
+- [MCP tools](docs/bobby-browser/source/pages/surfaces/mcp-tools.md) and [CDP support](docs/cdp-support.json)
+- [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md)
+- [Troubleshooting](docs/bobby-browser/source/pages/guides/troubleshooting.md)
+- [Report an issue](https://github.com/cavi-ai/bobby-browser/issues) or [contribute](CONTRIBUTING.md)
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = BrowserRuntimeClient::new(
-    "http://127.0.0.1:7777",
-    std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
-)?;
-let info = client.runtime_info(None).await?;
-# let _ = info;
-# Ok(()) }
-```
+Bobby is in alpha; interfaces may change before 1.0. Released builds are available on [GitHub Releases](https://github.com/cavi-ai/bobby-browser/releases).
 
-## Documentation
-
-Hosted at [cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
-
-- Start: [Overview](docs/bobby-browser/source/pages/introduction/overview.md), [Installation](docs/bobby-browser/source/pages/introduction/installation.md), [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md), [First session from code](docs/bobby-browser/source/pages/introduction/first-session.md)
-- Guides: [Intent commands](docs/bobby-browser/source/pages/guides/intents.md), [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md), [Firefox companion](docs/bobby-browser/source/pages/guides/firefox-companion.md), [Troubleshooting](docs/bobby-browser/source/pages/guides/troubleshooting.md)
-- Reference: [CLI](docs/bobby-browser/source/pages/guides/cli.md), [Configuration](docs/bobby-browser/source/pages/guides/configuration.md), [HTTP API](docs/bobby-browser/source/pages/surfaces/http-api.md), [MCP tools](docs/bobby-browser/source/pages/surfaces/mcp-tools.md), [Rust SDK](docs/bobby-browser/source/pages/rust/index.md), [Python SDK](docs/bobby-browser/source/pages/surfaces/python-sdk.md), [TypeScript SDK](docs/bobby-browser/source/pages/surfaces/typescript-sdk.md)
-- Concepts: [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md), [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md), [Multi-principal runtime](docs/bobby-browser/source/pages/concepts/multi-principal.md)
-
-Packages: [GitHub releases](https://github.com/cavi-ai/bobby-browser/releases/latest), [npm](https://www.npmjs.com/package/@cavi-ai/bobby-browser), [PyPI](https://pypi.org/project/bobby-browser/), [crates.io](https://crates.io/crates/bobby-browser-client) ([docs.rs](https://docs.rs/bobby-browser-client)), [Homebrew tap](https://github.com/cavi-ai/homebrew-tap).
-
-## Contributing
+## Development
 
 ```bash
-make build   # workspace and gateways
-make test    # workspace tests
-make lint    # clippy and format check
+make build
+make test
+make lint
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md). The CDP method allowlist is [`docs/cdp-support.json`](docs/cdp-support.json). The docs are built from `docs/bobby-browser/source` with `pnpm docs:build` into the release asset `bobby-browser-docs-v0.25.0.tar.gz`; the [consumer contract](docs/bobby-browser/CONSUMER.md) describes it.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md).
+
+## License
+
+[MIT](LICENSE).
