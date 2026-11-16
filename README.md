@@ -1,7 +1,10 @@
 # bobby-browser
 
 [![Release](https://img.shields.io/github/v/release/cavi-ai/bobby-browser)](https://github.com/cavi-ai/bobby-browser/releases/latest)
-[![Release asset downloads](https://img.shields.io/github/downloads/cavi-ai/bobby-browser/total?label=release%20asset%20downloads)](https://github.com/cavi-ai/bobby-browser/releases)
+[![Release asset downloads, all time](https://img.shields.io/github/downloads/cavi-ai/bobby-browser/total?label=release%20assets%20total)](https://github.com/cavi-ai/bobby-browser/releases)
+[![TypeScript SDK downloads per week](https://img.shields.io/npm/dw/@cavi-ai/bobby-browser?label=TypeScript%20SDK)](https://www.npmjs.com/package/@cavi-ai/bobby-browser)
+[![Python SDK downloads per week](https://img.shields.io/pypi/dw/bobby-browser?label=Python%20SDK)](https://pypi.org/project/bobby-browser/)
+[![Rust SDK downloads, all time](https://img.shields.io/crates/d/bobby-browser-client?label=Rust%20SDK%20total)](https://crates.io/crates/bobby-browser-client)
 [![License: MIT](https://img.shields.io/github/license/cavi-ai/bobby-browser)](LICENSE)
 
 ![Bobby Browser: a cartoon bee takes on a stack of browser tasks.](assets/bobby-browser-hero.png)
