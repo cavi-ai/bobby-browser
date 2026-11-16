@@ -1,3 +1,6 @@
+#[path = "support/http_broker.rs"]
+mod http_broker;
+
 use interface_conformance::{
     live::ChromeRuntimeHarness, validate_canonical_proof, AuthorizationProof, CanonicalProof,
     CheckpointLineage, DenialProof, EvidenceProof, CANONICAL_STEPS,
@@ -953,18 +956,15 @@ impl McpEndpoint for McpStdioTransport {
 }
 
 impl McpStdioTransport {
-    async fn start(role: &str, control: &std::path::Path) -> Self {
+    /// Re-spawns this test binary running the named ignored fixture test with its
+    /// stdin/stdout piped. The ACP arm reuses it as a newline-delimited JSON-RPC pipe.
+    fn spawn(fixture: &str, role: &str, control: &std::path::Path) -> Self {
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "mcp_performance_stdio_fixture_process",
-                "--nocapture",
-            ])
-            .env("CONFORMANCE_MCP_PERFORMANCE_CHILD", "1")
-            .env("CONFORMANCE_MCP_ROLE", role)
+            .args(["--ignored", "--exact", fixture, "--nocapture"])
+            .env("CONFORMANCE_STDIO_CHILD", "1")
+            .env("CONFORMANCE_STDIO_ROLE", role)
             .env(
-                "CONFORMANCE_MCP_METADATA",
+                "CONFORMANCE_STDIO_METADATA",
                 control.join(format!("{role}.json")),
             )
             .stdin(Stdio::piped())
@@ -974,11 +974,14 @@ impl McpStdioTransport {
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let mut transport = Self {
+        Self {
             child,
             stdin: Some(stdin),
             lines: BufReader::new(stdout).lines(),
-        };
+        }
+    }
+    async fn start(role: &str, control: &std::path::Path) -> Self {
+        let mut transport = Self::spawn("mcp_performance_stdio_fixture_process", role, control);
         transport.request(req(1,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"performance","version":"1"}}))).await;
         transport
             .notify(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
@@ -1024,19 +1027,12 @@ impl McpStdioTransport {
 #[tokio::test]
 #[ignore = "spawned as the persistent MCP stdio transport by the performance gate"]
 async fn mcp_performance_stdio_fixture_process() {
-    if std::env::var("CONFORMANCE_MCP_PERFORMANCE_CHILD").as_deref() != Ok("1") {
+    if std::env::var("CONFORMANCE_STDIO_CHILD").as_deref() != Ok("1") {
         return;
     }
     let harness = ChromeRuntimeHarness::start().await;
-    let metadata = FixtureMetadata {
-        site_url: harness.site_url(),
-        upload_root: harness.upload_root().to_path_buf(),
-    };
-    let destination = std::path::PathBuf::from(std::env::var("CONFORMANCE_MCP_METADATA").unwrap());
-    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temporary, serde_json::to_vec(&metadata).unwrap()).unwrap();
-    std::fs::rename(temporary, destination).unwrap();
-    let role = std::env::var("CONFORMANCE_MCP_ROLE").unwrap();
+    publish_fixture_metadata(&harness);
+    let role = std::env::var("CONFORMANCE_STDIO_ROLE").unwrap();
     let handle = if role == "denied" {
         harness
             .authority
@@ -1080,6 +1076,567 @@ async fn mcp_performance_stdio_fixture_process() {
         ),
     )
     .serve(tokio::io::stdin(), tokio::io::stdout())
+    .await
+    .unwrap();
+}
+
+fn write_metadata(destination: &std::path::Path, metadata: &FixtureMetadata) {
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec(metadata).unwrap()).unwrap();
+    std::fs::rename(temporary, destination).unwrap();
+}
+
+fn publish_fixture_metadata(harness: &ChromeRuntimeHarness) {
+    let destination =
+        std::path::PathBuf::from(std::env::var("CONFORMANCE_STDIO_METADATA").unwrap());
+    write_metadata(
+        &destination,
+        &FixtureMetadata {
+            site_url: harness.site_url(),
+            upload_root: harness.upload_root().to_path_buf(),
+        },
+    );
+}
+
+async fn read_metadata(path: &std::path::Path) -> FixtureMetadata {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(bytes) = std::fs::read(path) {
+            return serde_json::from_slice(&bytes).unwrap();
+        }
+        assert!(Instant::now() < deadline, "fixture metadata never appeared");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Emits the measurement events of one adapter run. The caller closes its transports
+/// between the last `record` and `finish`.
+struct PerformanceRun {
+    adapter: &'static str,
+    measured: Vec<Value>,
+}
+
+impl PerformanceRun {
+    fn start(adapter: &'static str, samples: usize) -> Self {
+        emit_performance_event(
+            json!({"event":"measurement-start","adapter":adapter,"samples":samples,"rootPid":std::process::id()}),
+        );
+        Self {
+            adapter,
+            measured: Vec::with_capacity(samples),
+        }
+    }
+    fn record(&mut self, wall: Duration, operation: Duration) {
+        let sample = json!({"adapterWallMs":duration_ms(wall),"adapterOperationMs":duration_ms(operation),"harnessEnvelopeOverheadMs":duration_ms(wall)-duration_ms(operation)});
+        emit_performance_event(
+            json!({"event":"sample","adapter":self.adapter,"index":self.measured.len(),"sample":sample,"rootPid":std::process::id()}),
+        );
+        self.measured.push(sample);
+    }
+    fn finish(self) {
+        emit_performance_event(
+            json!({"event":"client-disconnected","adapter":self.adapter,"samples":self.measured,"rootPid":std::process::id()}),
+        );
+        wait_for_rss_acknowledgement();
+    }
+}
+
+/// A production broker in its own process, reached over `POST /v1/mcp`.
+struct McpHttpBroker {
+    child: Child,
+    address: std::net::SocketAddr,
+}
+
+struct McpHttpPrincipal {
+    address: std::net::SocketAddr,
+    bearer: String,
+}
+
+#[async_trait::async_trait]
+impl McpEndpoint for McpHttpPrincipal {
+    async fn request(&mut self, value: Value) -> Value {
+        let (status, body) = http_broker::post_mcp(self.address, &self.bearer, value).await;
+        match status {
+            202 => Value::Null,
+            200 => body,
+            status => panic!("MCP over HTTP answered {status}: {body}"),
+        }
+    }
+}
+
+impl McpHttpBroker {
+    async fn start(control: &std::path::Path) -> (Self, FixtureMetadata) {
+        let port = http_broker::free_port().await;
+        let metadata_path = control.join("http-broker.json");
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp_http_performance_broker_process",
+                "--nocapture",
+            ])
+            .env("CONFORMANCE_HTTP_BROKER_CHILD", "1")
+            .env("CONFORMANCE_HTTP_BROKER_PORT", port.to_string())
+            .env("CONFORMANCE_HTTP_BROKER_METADATA", &metadata_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let metadata = read_metadata(&metadata_path).await;
+        let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        http_broker::wait_for_healthz(address).await;
+        (Self { child, address }, metadata)
+    }
+
+    async fn principal(&self, capabilities: &[types::Capability]) -> McpHttpPrincipal {
+        let names = capabilities
+            .iter()
+            .map(|capability| {
+                serde_json::to_value(capability)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let bearer = http_broker::issue_principal(
+            self.address,
+            http_broker::BOOTSTRAP_BEARER,
+            uuid::Uuid::new_v4(),
+            &names,
+        )
+        .await;
+        let mut principal = McpHttpPrincipal {
+            address: self.address,
+            bearer,
+        };
+        initialize(&mut principal).await;
+        principal
+    }
+
+    /// SIGTERM drives the broker's own graceful shutdown, which releases its browser.
+    async fn close(mut self) {
+        let pid = self.child.id().expect("broker child pid");
+        let signalled = tokio::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await
+            .unwrap();
+        assert!(signalled.success());
+        let status = tokio::time::timeout(Duration::from_secs(30), self.child.wait())
+            .await
+            .expect("broker child did not exit after SIGTERM")
+            .unwrap();
+        assert!(
+            status.success(),
+            "broker child did not exit cleanly: {status}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium; run by the performance gate"]
+async fn mcp_http_performance_arm() {
+    let control = tempfile::tempdir().unwrap();
+    let (broker, metadata) = McpHttpBroker::start(control.path()).await;
+    let mut capabilities = interface_conformance::live::all_capabilities().to_vec();
+    capabilities.retain(|capability| *capability != types::Capability::AuthorityAdmin);
+    let mut server = broker.principal(&capabilities).await;
+    // Issuance refuses an empty set; `network:egress` is held but gates no MCP tool.
+    let mut denied = broker.principal(&[types::Capability::NetworkEgress]).await;
+    let mut setup_id = 2;
+    let session = tool(
+        &mut server,
+        &mut setup_id,
+        "session_create",
+        json!({"profile":"mcp-conformance","proxy":null}),
+    )
+    .await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let page = tool(
+        &mut server,
+        &mut setup_id,
+        "page_open",
+        json!({"sessionId":session_id}),
+    )
+    .await;
+    let page_id = page["id"].as_str().unwrap().to_owned();
+    let sid = types::SessionId(uuid::Uuid::parse_str(&session_id).unwrap());
+    let pid = types::PageId(uuid::Uuid::parse_str(&page_id).unwrap());
+    run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
+    let mut run = None;
+    if let Some(samples) = performance_samples() {
+        let mut measuring = PerformanceRun::start("mcp-http", samples);
+        for _ in 0..samples {
+            let started = Instant::now();
+            let operation = run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
+            measuring.record(started.elapsed(), operation);
+        }
+        run = Some(measuring);
+    }
+    broker.close().await;
+    if let Some(run) = run {
+        run.finish();
+    }
+}
+
+#[tokio::test]
+#[ignore = "spawned as the production broker process by the HTTP performance arm"]
+async fn mcp_http_performance_broker_process() {
+    if std::env::var("CONFORMANCE_HTTP_BROKER_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let site = test_site::spawn().await;
+    let port = std::env::var("CONFORMANCE_HTTP_BROKER_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut config = http_broker::production_config(
+        port,
+        &root.path().join("authority.json"),
+        &root.path().join("data"),
+        4,
+        2,
+    );
+    config.http.allow_loopback = true;
+    write_metadata(
+        std::path::Path::new(&std::env::var("CONFORMANCE_HTTP_BROKER_METADATA").unwrap()),
+        &FixtureMetadata {
+            site_url: site.base_url(),
+            upload_root: config.browser.upload_roots[0].clone(),
+        },
+    );
+    let mut capabilities = interface_conformance::live::all_capabilities().to_vec();
+    capabilities.push(types::Capability::NetworkEgress);
+    let startup = http_broker::startup_credential(capabilities);
+    broker::serve(config, startup).await.unwrap();
+}
+
+struct IntentScope {
+    session_id: String,
+    page_id: String,
+    site_url: String,
+}
+
+struct FilledIntent {
+    command_id: String,
+    attempt_id: String,
+}
+
+/// The surface-specific transport of the shared intent scenario. Each method returns the
+/// operation's result payload; `fill` asserts the command completed.
+#[async_trait::async_trait(?Send)]
+trait IntentSurface {
+    async fn fill(&mut self, workflow_id: &str, input: Value) -> FilledIntent;
+    async fn checkpoint_save(&mut self, checkpoint: Value, evidence_refs: Vec<String>) -> Value;
+    async fn recovery_status(&mut self, workflow_id: &str) -> Value;
+}
+
+fn intent_fill_input() -> Value {
+    json!({
+        "purpose":"Name",
+        "hints":{"role":"textbox","accessibleName":"Name"},
+        "value":{"kind":"setText","value":"Maya Chen","clearFirst":true}
+    })
+}
+
+/// One fill, one checkpoint save and one recovery status read, identical on every surface.
+async fn run_intent_sample(surface: &mut dyn IntentSurface, scope: &IntentScope) -> Duration {
+    let workflow_id = uuid::Uuid::new_v4().to_string();
+    let checkpoint_id = uuid::Uuid::new_v4().to_string();
+    let started = Instant::now();
+    let filled = surface.fill(&workflow_id, intent_fill_input()).await;
+    let checkpoint = json!({
+        "schemaVersion":1,
+        "checkpointId":checkpoint_id,
+        "workflowId":workflow_id,
+        "attemptId":filled.attempt_id,
+        "sessionId":scope.session_id,
+        "pageId":scope.page_id,
+        "restartUrl":scope.site_url,
+        "currentUrl":scope.site_url,
+        "cursor":null,
+        "boundaryCommandId":null,
+        "recoveryClass":"replayable",
+        "invariants":[],
+        "replayableInputs":[],
+        "evidence":[],
+        "recoveryHistory":[],
+        "recoveryReceipts":[],
+        "createdAt":chrono::Utc::now().to_rfc3339(),
+    });
+    let saved = surface
+        .checkpoint_save(checkpoint, vec![filled.command_id])
+        .await;
+    let status = surface.recovery_status(&workflow_id).await;
+    let elapsed = started.elapsed();
+    assert_eq!(saved["checkpointId"], checkpoint_id, "{saved}");
+    assert_eq!(
+        status["checkpoint"]["checkpointId"], checkpoint_id,
+        "{status}"
+    );
+    elapsed
+}
+
+/// One discarded sample, then `samples` measured ones when the gate asks for them.
+async fn run_intent_arm(
+    adapter: &'static str,
+    surface: &mut dyn IntentSurface,
+    scope: &IntentScope,
+) -> Option<PerformanceRun> {
+    run_intent_sample(surface, scope).await;
+    let samples = performance_samples()?;
+    let mut run = PerformanceRun::start(adapter, samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        let operation = run_intent_sample(surface, scope).await;
+        run.record(started.elapsed(), operation);
+    }
+    Some(run)
+}
+
+struct AcpIntentSurface {
+    transport: McpStdioTransport,
+    session: String,
+    next_id: u64,
+}
+
+impl AcpIntentSurface {
+    async fn start(transport: McpStdioTransport, cwd: &std::path::Path) -> Self {
+        let mut surface = Self {
+            transport,
+            session: String::new(),
+            next_id: 0,
+        };
+        surface
+            .send(
+                "initialize",
+                json!({"protocolVersion":1,"clientCapabilities":{}}),
+            )
+            .await;
+        let (session, _) = surface
+            .send("session/new", json!({"cwd":cwd,"mcpServers":[]}))
+            .await;
+        surface.session = session["sessionId"].as_str().unwrap().to_owned();
+        surface
+    }
+
+    async fn send(&mut self, method: &str, params: Value) -> (Value, Vec<Value>) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.transport
+            .notify(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await;
+        let mut updates = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let line = tokio::time::timeout_at(deadline, self.transport.lines.next_line())
+                .await
+                .unwrap_or_else(|_| panic!("{method}: no answer within 60s"))
+                .unwrap()
+                .expect("ACP child EOF");
+            let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if frame["method"] == "session/update" {
+                updates.push(frame["params"].clone());
+            } else if frame["id"] == id {
+                assert!(frame.get("error").is_none(), "{method} failed: {frame}");
+                return (frame["result"].clone(), updates);
+            }
+        }
+    }
+
+    /// One structured prompt; returns the JSON payload the agent streamed back.
+    async fn prompt(&mut self, request: Value) -> Value {
+        let session = self.session.clone();
+        let (result, updates) = self
+            .send(
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":request.to_string()}]}),
+            )
+            .await;
+        let payload = updates
+            .iter()
+            .filter_map(|update| update.pointer("/update/content/text"))
+            .filter_map(Value::as_str)
+            .find_map(|text| serde_json::from_str::<Value>(text).ok())
+            .expect("a structured session/update payload");
+        assert_eq!(result["stopReason"], "end_turn", "{payload}");
+        payload
+    }
+
+    /// Opens the session's page on the fixture site; later prompts act on it.
+    async fn open_page(&mut self, site_url: &str) -> IntentScope {
+        let payload = self
+            .prompt(json!({
+                "url":site_url,
+                "workflowId":uuid::Uuid::new_v4().to_string(),
+                "intent":{"kind":"fill","input":intent_fill_input()}
+            }))
+            .await;
+        assert_eq!(payload["outcome"]["status"], "completed", "{payload}");
+        IntentScope {
+            session_id: payload["sessionId"].as_str().unwrap().to_owned(),
+            page_id: payload["pageId"].as_str().unwrap().to_owned(),
+            site_url: site_url.to_owned(),
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl IntentSurface for AcpIntentSurface {
+    async fn fill(&mut self, workflow_id: &str, input: Value) -> FilledIntent {
+        let payload = self
+            .prompt(json!({"workflowId":workflow_id,"intent":{"kind":"fill","input":input}}))
+            .await;
+        assert_eq!(payload["operation"], "execute", "{payload}");
+        assert_eq!(payload["outcome"]["status"], "completed", "{payload}");
+        FilledIntent {
+            command_id: payload["outcome"]["commandId"].as_str().unwrap().to_owned(),
+            attempt_id: payload["attemptId"].as_str().unwrap().to_owned(),
+        }
+    }
+    async fn checkpoint_save(&mut self, checkpoint: Value, evidence_refs: Vec<String>) -> Value {
+        let payload = self
+            .prompt(json!({"operation":"checkpointSave","checkpoint":checkpoint,"evidenceRefs":evidence_refs}))
+            .await;
+        assert_eq!(payload["operation"], "checkpointSave", "{payload}");
+        payload["result"].clone()
+    }
+    async fn recovery_status(&mut self, workflow_id: &str) -> Value {
+        let payload = self
+            .prompt(json!({"operation":"recoveryStatus","workflowId":workflow_id}))
+            .await;
+        assert_eq!(payload["operation"], "recoveryStatus", "{payload}");
+        payload["result"].clone()
+    }
+}
+
+struct McpIntentSurface {
+    transport: McpStdioTransport,
+    id: u64,
+    session_id: String,
+    page_id: String,
+}
+
+#[async_trait::async_trait(?Send)]
+impl IntentSurface for McpIntentSurface {
+    async fn fill(&mut self, workflow_id: &str, input: Value) -> FilledIntent {
+        let mut arguments = input;
+        arguments["sessionId"] = json!(self.session_id);
+        arguments["pageId"] = json!(self.page_id);
+        arguments["workflowId"] = json!(workflow_id);
+        let outcome = tool(&mut self.transport, &mut self.id, "intent_fill", arguments).await;
+        assert_eq!(outcome["status"], "completed", "{outcome}");
+        FilledIntent {
+            command_id: outcome["commandId"].as_str().unwrap().to_owned(),
+            attempt_id: outcome["attemptId"].as_str().unwrap().to_owned(),
+        }
+    }
+    async fn checkpoint_save(&mut self, checkpoint: Value, evidence_refs: Vec<String>) -> Value {
+        tool(
+            &mut self.transport,
+            &mut self.id,
+            "checkpoint_save",
+            json!({"checkpoint":checkpoint,"evidenceRefs":evidence_refs}),
+        )
+        .await
+    }
+    async fn recovery_status(&mut self, workflow_id: &str) -> Value {
+        tool(
+            &mut self.transport,
+            &mut self.id,
+            "recovery_status",
+            json!({"workflowId":workflow_id}),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium; run by the performance gate"]
+async fn acp_intent_performance_arm() {
+    let control = tempfile::tempdir().unwrap();
+    let transport = McpStdioTransport::spawn(
+        "acp_performance_stdio_fixture_process",
+        "positive",
+        control.path(),
+    );
+    let mut surface = AcpIntentSurface::start(transport, control.path()).await;
+    let metadata = read_metadata(&control.path().join("positive.json")).await;
+    let scope = surface.open_page(&metadata.site_url).await;
+    let run = run_intent_arm("acp", &mut surface, &scope).await;
+    surface.transport.close().await;
+    if let Some(run) = run {
+        run.finish();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium; run by the performance gate"]
+async fn mcp_intent_performance_arm() {
+    let control = tempfile::tempdir().unwrap();
+    let transport = McpStdioTransport::start("positive", control.path()).await;
+    let metadata = read_metadata(&control.path().join("positive.json")).await;
+    let mut surface = McpIntentSurface {
+        transport,
+        id: 2,
+        session_id: String::new(),
+        page_id: String::new(),
+    };
+    let session = tool(
+        &mut surface.transport,
+        &mut surface.id,
+        "session_create",
+        json!({"profile":"mcp-conformance","proxy":null}),
+    )
+    .await;
+    surface.session_id = session["id"].as_str().unwrap().to_owned();
+    let page = tool(
+        &mut surface.transport,
+        &mut surface.id,
+        "page_open",
+        json!({"sessionId":surface.session_id}),
+    )
+    .await;
+    surface.page_id = page["id"].as_str().unwrap().to_owned();
+    tool(
+        &mut surface.transport,
+        &mut surface.id,
+        "navigate",
+        json!({"sessionId":surface.session_id,"pageId":surface.page_id,"url":metadata.site_url,"waitUntil":"domContentLoaded"}),
+    )
+    .await;
+    let scope = IntentScope {
+        session_id: surface.session_id.clone(),
+        page_id: surface.page_id.clone(),
+        site_url: metadata.site_url,
+    };
+    let run = run_intent_arm("mcp-intent", &mut surface, &scope).await;
+    surface.transport.close().await;
+    if let Some(run) = run {
+        run.finish();
+    }
+}
+
+#[tokio::test]
+#[ignore = "spawned as the persistent ACP stdio transport by the performance gate"]
+async fn acp_performance_stdio_fixture_process() {
+    if std::env::var("CONFORMANCE_STDIO_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let harness = ChromeRuntimeHarness::start().await;
+    publish_fixture_metadata(&harness);
+    acp_gateway::AcpServer::new(
+        harness.runtime.clone(),
+        interface_conformance::live::all_capabilities().to_vec(),
+    )
+    .serve()
     .await
     .unwrap();
 }
