@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.26.0 - 2026-11-16
+
 ### Changed
 
+- Promoting a text adapter requires scores on a held-out suite that shares no journey with its training corpus.
 - The command journal rolls into segments at 64 MiB and startup scans only the active file.
 - Release builds use thin link-time optimization and one codegen unit.
 - Concurrent command journal appends share one write and one sync.
