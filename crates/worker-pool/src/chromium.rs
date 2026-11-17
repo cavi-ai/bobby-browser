@@ -89,6 +89,11 @@ fn shared_memory_needs_disk(dev_shm_bytes: Option<u64>) -> bool {
     dev_shm_bytes.is_none_or(|bytes| bytes < MIN_DEV_SHM_BYTES)
 }
 
+/// The launch switch that moves shared memory to disk. The launcher adds the
+/// leading dashes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SHARED_MEMORY_ON_DISK: &str = "disable-dev-shm-usage";
+
 /// Only a hidden page, or one whose visibility cannot be read, is brought to
 /// front before input.
 fn needs_bring_to_front(visibility: Option<&str>) -> bool {
@@ -510,7 +515,11 @@ impl ChromiumWorkerFactory {
         if let Some(executable) = &self.config.executable {
             builder = builder.chrome_executable(executable);
         }
-        if !self.config.headless {
+        if self.config.headless {
+            // Sessions open their own pages; Chrome's startup tab would only
+            // hold renderers nothing uses.
+            builder = builder.arg("no-startup-window");
+        } else {
             builder = builder.with_head();
         }
         // A durable profile runs the extensions installed in it, such as a
@@ -542,7 +551,7 @@ impl ChromiumWorkerFactory {
         }
         #[cfg(target_os = "linux")]
         if shared_memory_needs_disk(dev_shm_bytes()) {
-            builder = builder.arg("--disable-dev-shm-usage");
+            builder = builder.arg(SHARED_MEMORY_ON_DISK);
         }
         builder
             .build()
@@ -5487,6 +5496,26 @@ mod tests {
     }
 
     #[test]
+    fn only_a_headless_launch_skips_the_startup_window() {
+        use super::ChromiumWorkerFactory;
+        let args = |headless: bool| {
+            let config = config::BrowserConfig {
+                executable: Some("/usr/bin/true".into()),
+                headless,
+                ..config::BrowserConfig::default()
+            };
+            let registry = tempfile::tempdir().unwrap();
+            ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into())
+                .chromium_config(std::path::Path::new("/profiles/p"))
+                .unwrap()
+                .launch_args()
+        };
+        let flag = "--no-startup-window".to_string();
+        assert!(args(true).contains(&flag), "{:?}", args(true));
+        assert!(!args(false).contains(&flag), "{:?}", args(false));
+    }
+
+    #[test]
     fn the_automation_flag_launches_without_its_warning_bar() {
         use super::ChromiumWorkerFactory;
         let config = config::BrowserConfig {
@@ -5509,6 +5538,20 @@ mod tests {
         assert!(shared_memory_needs_disk(None));
         assert!(shared_memory_needs_disk(Some(64 << 20)));
         assert!(!shared_memory_needs_disk(Some(8 << 30)));
+    }
+
+    #[test]
+    fn the_shared_memory_switch_reaches_chrome_with_two_dashes() {
+        let args = super::ChromiumConfig::builder()
+            .chrome_executable("chrome")
+            .arg(super::SHARED_MEMORY_ON_DISK)
+            .build()
+            .unwrap()
+            .launch_args();
+        assert!(
+            args.contains(&"--disable-dev-shm-usage".to_string()),
+            "{args:?}"
+        );
     }
 
     #[test]

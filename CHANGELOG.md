@@ -10,6 +10,7 @@
 - The command journal rolls into segments at 64 MiB and startup scans only the active file.
 - Release builds use thin link-time optimization and one codegen unit.
 - Concurrent command journal appends share one write and one sync.
+- Headless Chromium launches without Chrome's startup tab, which drops two idle renderer processes.
 
 ### Security
 
@@ -19,6 +20,7 @@
 
 - A vision click that lands just outside a control clicks that control, and one that lands between two controls is declined.
 - The CDP gateway accepts `playwright-core` 1.65.
+- On Linux with a missing or small `/dev/shm`, Chromium is launched with a working `--disable-dev-shm-usage`.
 - Page timers in the managed Firefox profile run at foreground speed: `bobby install --companion` turns off background timer throttling.
 
 ## 0.25.0 - 2026-11-16
