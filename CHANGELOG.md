@@ -20,6 +20,7 @@
 
 - A vision click that lands just outside a control clicks that control, and one that lands between two controls is declined.
 - The CDP gateway accepts `playwright-core` 1.65.
+- On Linux with a missing or small `/dev/shm`, Chromium is launched with a working `--disable-dev-shm-usage`.
 - Page timers in the managed Firefox profile run at foreground speed: `bobby install --companion` turns off background timer throttling.
 
 ## 0.25.0 - 2026-11-16
