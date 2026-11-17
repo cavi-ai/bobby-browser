@@ -510,7 +510,11 @@ impl ChromiumWorkerFactory {
         if let Some(executable) = &self.config.executable {
             builder = builder.chrome_executable(executable);
         }
-        if !self.config.headless {
+        if self.config.headless {
+            // Sessions open their own pages; Chrome's startup tab would only
+            // hold renderers nothing uses.
+            builder = builder.arg("no-startup-window");
+        } else {
             builder = builder.with_head();
         }
         // A durable profile runs the extensions installed in it, such as a
@@ -5484,6 +5488,26 @@ mod tests {
         assert!(args(disposable.clone()).contains(&"--disable-extensions".to_string()));
         let durable = disposable.with_durable_profile("p".into());
         assert!(!args(durable).contains(&"--disable-extensions".to_string()));
+    }
+
+    #[test]
+    fn only_a_headless_launch_skips_the_startup_window() {
+        use super::ChromiumWorkerFactory;
+        let args = |headless: bool| {
+            let config = config::BrowserConfig {
+                executable: Some("/usr/bin/true".into()),
+                headless,
+                ..config::BrowserConfig::default()
+            };
+            let registry = tempfile::tempdir().unwrap();
+            ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into())
+                .chromium_config(std::path::Path::new("/profiles/p"))
+                .unwrap()
+                .launch_args()
+        };
+        let flag = "--no-startup-window".to_string();
+        assert!(args(true).contains(&flag), "{:?}", args(true));
+        assert!(!args(false).contains(&flag), "{:?}", args(false));
     }
 
     #[test]

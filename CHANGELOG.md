@@ -10,6 +10,7 @@
 - The command journal rolls into segments at 64 MiB and startup scans only the active file.
 - Release builds use thin link-time optimization and one codegen unit.
 - Concurrent command journal appends share one write and one sync.
+- Headless Chromium launches without Chrome's startup tab, which drops two idle renderer processes.
 
 ### Security
 
