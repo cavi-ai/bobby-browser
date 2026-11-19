@@ -1,14 +1,14 @@
 # bobby-browser
 
+Give your agents the browser work.
+
+![Bobby Browser: a cartoon bee takes on a stack of browser tasks.](assets/bobby-browser-hero.png)
+
 [![Release](https://img.shields.io/github/v/release/cavi-ai/bobby-browser)](https://github.com/cavi-ai/bobby-browser/releases/latest)
 [![TypeScript SDK downloads per week](https://img.shields.io/npm/dw/@cavi-ai/bobby-browser?label=TypeScript%20SDK%2Fweek)](https://www.npmjs.com/package/@cavi-ai/bobby-browser)
 [![Python SDK downloads per week](https://img.shields.io/pypi/dw/bobby-browser?label=Python%20SDK%2Fweek)](https://pypi.org/project/bobby-browser/)
 [![Rust SDK](https://img.shields.io/crates/v/bobby-browser-client?label=Rust%20SDK)](https://crates.io/crates/bobby-browser-client)
 [![License: MIT](https://img.shields.io/github/license/cavi-ai/bobby-browser)](LICENSE)
-
-![Bobby Browser: a cartoon bee takes on a stack of browser tasks.](assets/bobby-browser-hero.png)
-
-Give your agents the browser work.
 
 Bobby automates Firefox and Chromium for AI agents and applications. Turn recurring web tasks into reusable workflows, retain useful site structure and continue interrupted work from recorded progress.
 
