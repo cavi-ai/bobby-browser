@@ -588,10 +588,33 @@ impl RuntimeService {
     pub async fn open_page(&self, req: OpenPageRequest) -> Result<PageState, RuntimeError> {
         self.sessions.get(&req.session_id).await?;
         let page = self.pages.open_browser(req.session_id).await?;
-        self.sessions
-            .add_page(&page.session_id, page.id.clone())
-            .await?;
+        self.sync_live_page(&page.session_id, &page.id).await?;
         Ok(page)
+    }
+
+    async fn sync_live_page(
+        &self,
+        session_id: &types::SessionId,
+        page_id: &types::PageId,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .pages
+            .get(page_id)
+            .await
+            .is_ok_and(|page| &page.session_id == session_id)
+        {
+            return Ok(());
+        }
+        self.sessions.add_page(session_id, page_id.clone()).await?;
+        if !self
+            .pages
+            .get(page_id)
+            .await
+            .is_ok_and(|page| &page.session_id == session_id)
+        {
+            self.sessions.remove_page(session_id, page_id).await?;
+        }
+        Ok(())
     }
 
     pub async fn form_snapshot(
@@ -883,14 +906,14 @@ impl RuntimeService {
                 Some(PageLifecycleSync::OpenPage) => {
                     for item in evidence {
                         if let Evidence::Page { page_id, .. } = item {
-                            let _ = self.sessions.add_page(&session_id, page_id.clone()).await;
+                            let _ = self.sync_live_page(&session_id, page_id).await;
                         }
                     }
                 }
                 Some(PageLifecycleSync::ClickAndWaitForPopup) => {
                     for item in evidence {
                         if let Evidence::Popup { page_id, .. } = item {
-                            let _ = self.sessions.add_page(&session_id, page_id.clone()).await;
+                            let _ = self.sync_live_page(&session_id, page_id).await;
                         }
                     }
                 }
@@ -898,17 +921,7 @@ impl RuntimeService {
                     for item in evidence {
                         if let Evidence::Pages { pages } = item {
                             for page in pages {
-                                if self
-                                    .pages
-                                    .get(&page.page_id)
-                                    .await
-                                    .is_ok_and(|state| state.session_id == session_id)
-                                {
-                                    let _ = self
-                                        .sessions
-                                        .add_page(&session_id, page.page_id.clone())
-                                        .await;
-                                }
+                                let _ = self.sync_live_page(&session_id, &page.page_id).await;
                             }
                         }
                     }

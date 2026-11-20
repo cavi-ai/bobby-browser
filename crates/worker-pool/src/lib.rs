@@ -168,6 +168,10 @@ pub trait BrowserWorker: Send + Sync {
         self.close().await
     }
 
+    async fn cancel_launch(&self) -> Result<(), CommandError> {
+        self.terminate().await
+    }
+
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
@@ -486,7 +490,7 @@ impl WorkerPool {
                     }
                     let worker = factory.launch(&launch_session).await?;
                     if cancelled.load(Ordering::Acquire) {
-                        let _ = worker.close().await;
+                        let _ = worker.cancel_launch().await;
                         return Err(resource_error("worker launch caller was cancelled"));
                     }
                     Ok(worker)

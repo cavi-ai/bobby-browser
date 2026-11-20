@@ -1896,7 +1896,10 @@ async fn boundary_target_detached_revives_and_fails_not_needs_reconciliation() {
 
 #[tokio::test]
 async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
-    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let url = format!(
+        "{}?private=value#section",
+        http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await
+    );
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
     runtime
         .set_url(&page, url.clone(), "interactive")
@@ -1920,6 +1923,10 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
             ..
         }
     )));
+    assert_eq!(
+        runtime.get(&page).await.unwrap().url.as_deref(),
+        Some(url.as_str())
+    );
     // A mutating command taints the page.
     let click = runtime
         .execute(envelope(
@@ -4046,10 +4053,7 @@ impl worker_pool::TabsEngine for LifecycleTestWorker {
     async fn open_page(&self, _page_id: PageId) -> Result<(), CommandError> {
         Ok(())
     }
-    async fn list_pages(
-        &self,
-        _: &types::ListPagesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+    async fn list_pages(&self, _: &types::ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![Evidence::Pages {
             pages: self.listed_pages.lock().await.clone(),
         }])
@@ -4082,11 +4086,7 @@ impl worker_pool::NavigationEngine for LifecycleTestWorker {
 
 #[async_trait]
 impl worker_pool::ObservationEngine for LifecycleTestWorker {
-    async fn inspect(
-        &self,
-        _: &PageId,
-        _: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![Evidence::Inspection {
             selector: None,
             url: "https://app.example.test/inspected".into(),
@@ -4190,6 +4190,14 @@ async fn list_pages_registers_discovered_pages_without_pruning_or_resurrecting_c
     let other_page_a = runtime.open_browser(session_a.clone()).await.unwrap();
     let popup_id = PageId::new();
 
+    runtime
+        .set_url(
+            &page_a.id,
+            "https://app.example.test/fresh".into(),
+            "complete",
+        )
+        .await
+        .unwrap();
     // ListPages returns popup_id (new) and omits other_page_a (must NOT prune).
     *listed_pages.lock().await = vec![
         PageEvidence {
@@ -4211,9 +4219,18 @@ async fn list_pages_registers_discovered_pages_without_pruning_or_resurrecting_c
         ))
         .await;
     assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    let existing = runtime.get(&page_a.id).await.unwrap();
+    assert_eq!(
+        existing.url.as_deref(),
+        Some("https://app.example.test/fresh")
+    );
+    assert_eq!(existing.ready_state, "complete");
     let discovered = runtime.get(&popup_id).await.unwrap();
     assert_eq!(discovered.session_id, session_a);
-    assert_eq!(discovered.url.as_deref(), Some("https://app.example.test/popup"));
+    assert_eq!(
+        discovered.url.as_deref(),
+        Some("https://app.example.test/popup")
+    );
     assert!(
         runtime.get(&other_page_a.id).await.is_ok(),
         "absent page must not be pruned on ListPages"
@@ -4295,7 +4312,11 @@ async fn url_syncs_from_evidence_and_current_url_while_ignoring_popup_and_dialog
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
     runtime
-        .set_url(&page.id, "https://app.example.test/start".into(), "interactive")
+        .set_url(
+            &page.id,
+            "https://app.example.test/start".into(),
+            "interactive",
+        )
         .await
         .unwrap();
 
@@ -4318,7 +4339,10 @@ async fn url_syncs_from_evidence_and_current_url_while_ignoring_popup_and_dialog
         runtime.get(&page.id).await.unwrap().url.as_deref(),
         Some("https://app.example.test/after-click")
     );
-    assert_eq!(current_url_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 
     // Click that opens a dialog must NOT call current_url().
     click_opens_dialog.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4341,7 +4365,10 @@ async fn url_syncs_from_evidence_and_current_url_while_ignoring_popup_and_dialog
         runtime.get(&page.id).await.unwrap().url.as_deref(),
         Some("https://app.example.test/after-click")
     );
-    assert_eq!(current_url_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 
     // ClickAndWaitForPopup must NOT overwrite opener URL with popup URL.
     let outcome = runtime
@@ -4374,5 +4401,8 @@ async fn url_syncs_from_evidence_and_current_url_while_ignoring_popup_and_dialog
         runtime.get(&page.id).await.unwrap().url.as_deref(),
         Some("https://app.example.test/inspected")
     );
-    assert_eq!(current_url_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }

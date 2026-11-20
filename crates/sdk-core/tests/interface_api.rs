@@ -2661,10 +2661,7 @@ async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempote
         discovered_id: discovered_id.clone(),
         popup_id: popup_id.clone(),
     });
-    let workers = Arc::new(WorkerPool::new(
-        2,
-        Arc::new(PageSyncFactory { worker }),
-    ));
+    let workers = Arc::new(WorkerPool::new(2, Arc::new(PageSyncFactory { worker })));
     let journal = Arc::new(
         workflow_journal::JsonlJournal::open(root.path().join("commands.jsonl"))
             .await

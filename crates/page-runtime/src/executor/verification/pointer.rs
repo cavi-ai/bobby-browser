@@ -61,7 +61,7 @@ impl CommandVerifier for Pointer {
             PrimitiveCommand::ClickAndWaitForPopup(_) => {
                 if evidence
                     .iter()
-                    .any(|item| matches!(item, Evidence::Popup { .. }))
+                    .any(|item| matches!(item, Evidence::Popup { opener_page_id, .. } | Evidence::PopupClosed { opener_page_id, .. } if Some(opener_page_id) == page_id))
                 {
                     Ok(evidence)
                 } else {

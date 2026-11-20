@@ -43,7 +43,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
 };
 use chromiumoxide::cdp::browser_protocol::system_info::GetInfoParams;
 use chromiumoxide::cdp::browser_protocol::target::{
-    CreateTargetParams, EventTargetCreated, TargetId,
+    CreateTargetParams, EventTargetCreated, EventTargetDestroyed, TargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::handler::Handler;
@@ -577,16 +577,49 @@ impl WorkerFactory for ChromiumWorkerFactory {
             .clone()
             .unwrap_or_else(|| self.config.profiles_dir.join(session_id.0.to_string()));
         let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
-        tokio::fs::create_dir_all(&profile_dir)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
-        tokio::fs::create_dir_all(&download_dir)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
-
-        let config = self.chromium_config(&profile_dir)?;
         let shared_browser = self.durable_profile_dir.is_some();
-        let disposable_profile = self.durable_profile_dir.is_none();
+        let disposable_profile = !shared_browser;
+        let created_profile = if disposable_profile {
+            tokio::fs::create_dir_all(&self.config.profiles_dir)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+            match tokio::fs::create_dir(&profile_dir).await {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    tokio::fs::create_dir_all(&profile_dir)
+                        .await
+                        .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+                    false
+                }
+                Err(error) => return Err(driver_error(ErrorCode::BrowserLaunchFailed, error)),
+            }
+        } else {
+            tokio::fs::create_dir_all(&profile_dir)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+            false
+        };
+        let setup = async {
+            tokio::fs::create_dir_all(&download_dir)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+            self.chromium_config(&profile_dir)
+        }
+        .await;
+        let config = match setup {
+            Ok(config) => config,
+            Err(error) => {
+                if created_profile {
+                    remove_disposable_profile_dir(
+                        &self.config.profiles_dir,
+                        session_id,
+                        &profile_dir,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         if shared_browser {
             if let Some(source) = chrome_native_messaging_hosts_dir() {
                 link_native_messaging_hosts(&source, &profile_dir);
@@ -599,7 +632,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             match Browser::launch(config).await {
                 Ok(launched) => launched,
                 Err(error) => {
-                    if disposable_profile {
+                    if created_profile {
                         remove_disposable_profile_dir(
                             &self.config.profiles_dir,
                             session_id,
@@ -665,6 +698,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             profile_dir,
             profiles_root: self.config.profiles_dir.clone(),
             disposable_profile,
+            created_profile,
             pid_registry_path,
             debug_ws_url: Some(browser.websocket_address().clone()),
             upload_roots: self.config.upload_roots.clone(),
@@ -787,6 +821,7 @@ struct ChromiumWorker {
     profile_dir: PathBuf,
     profiles_root: PathBuf,
     disposable_profile: bool,
+    created_profile: bool,
     /// Path of this worker's entry in the orphan-reaping PID registry
     /// (`None` if we couldn't determine the child PID at launch). Removed
     /// once `close`/`terminate` confirms the browser process is gone.
@@ -2022,6 +2057,10 @@ impl BrowserWorker for ChromiumWorker {
 
     async fn terminate(&self) -> Result<(), CommandError> {
         self.shutdown(false).await
+    }
+
+    async fn cancel_launch(&self) -> Result<(), CommandError> {
+        self.shutdown(self.created_profile).await
     }
 
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
@@ -3486,6 +3525,10 @@ impl crate::EventsEngine for ChromiumWorker {
             .event_listener::<EventTargetCreated>()
             .await
             .map_err(command_failed)?;
+        let mut destroyed = browser
+            .event_listener::<EventTargetDestroyed>()
+            .await
+            .map_err(command_failed)?;
         let opener_target = opener.target_id().clone();
         let resolved = resolve_browser_target(
             page_id,
@@ -3499,10 +3542,11 @@ impl crate::EventsEngine for ChromiumWorker {
         // tab hangs to the CDP request timeout, so surface the opener first.
         let _front = self.bring_page_to_front(&opener).await;
         let deadline = Instant::now() + Duration::from_millis(command.timeout_ms);
-        press(&opener, &resolved).await?;
-        let event = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            async {
+        tokio::time::timeout_at(deadline.into(), press(&opener, &resolved))
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))??;
+        let event =
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
                 loop {
                     let event = events.next().await.ok_or_else(|| {
                         driver_error(ErrorCode::BrowserCommandFailed, "popup event stream closed")
@@ -3513,42 +3557,63 @@ impl crate::EventsEngine for ChromiumWorker {
                         return Ok::<_, CommandError>(event);
                     }
                 }
-            },
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let popup = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            async {
-                loop {
-                    if let Some(page) = browser
-                        .pages()
-                        .await
-                        .map_err(command_failed)?
-                        .into_iter()
-                        .find(|page| page.target_id() == &event.target_info.target_id)
-                    {
-                        return Ok::<_, CommandError>(page);
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            },
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
+            })
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))??;
         let popup_id = PageId::new();
-        if let Err(error) = self.register_page(popup_id.clone(), popup.clone()).await {
+        let popup = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+            loop {
+                tokio::select! {
+                    event_destroyed = destroyed.next() => {
+                        let event_destroyed = event_destroyed.ok_or_else(|| driver_error(ErrorCode::BrowserCommandFailed, "popup destruction event stream closed"))?;
+                        if event_destroyed.target_id == event.target_info.target_id {
+                            return Ok::<_, CommandError>(None);
+                        }
+                    }
+                    pages = browser.pages() => {
+                        if let Some(page) = pages.map_err(command_failed)?.into_iter().find(|page| page.target_id() == &event.target_info.target_id) {
+                            return Ok(Some(page));
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        }).await.map_err(|_| timeout_error(command.timeout_ms))??;
+        let Some(popup) = popup else {
+            self.closed_targets
+                .lock()
+                .await
+                .insert(event.target_info.target_id.clone());
+            return Ok(vec![
+                Evidence::PopupClosed {
+                    opener_page_id: page_id.clone(),
+                    popup_page_id: popup_id,
+                },
+                resolved.evidence,
+            ]);
+        };
+        let registered = tokio::time::timeout_at(
+            deadline.into(),
+            self.register_page(popup_id.clone(), popup.clone()),
+        )
+        .await;
+        let registered = match registered {
+            Ok(result) => result,
+            Err(_) => {
+                self.unregister_page(&popup_id).await;
+                return Err(timeout_error(command.timeout_ms));
+            }
+        };
+        if let Err(error) = registered {
             if is_closed_page_message(&error.message) {
                 self.closed_targets
                     .lock()
                     .await
                     .insert(event.target_info.target_id.clone());
                 return Ok(vec![
-                    Evidence::Popup {
+                    Evidence::PopupClosed {
                         opener_page_id: page_id.clone(),
-                        page_id: popup_id,
-                        url: event.target_info.url.clone(),
-                        title: String::new(),
+                        popup_page_id: popup_id,
                     },
                     resolved.evidence,
                 ]);
@@ -3557,32 +3622,61 @@ impl crate::EventsEngine for ChromiumWorker {
         }
         let tracker = self.network_trackers.lock().await.get(&popup_id).cloned();
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let (url, title) = if let Some((url, title)) = settle_document(
-            &popup,
-            remaining.min(NAVIGATION_SETTLE_CAP),
-            &event.target_info.url,
-            tracker.as_deref(),
+        let settled = tokio::time::timeout_at(
+            deadline.into(),
+            settle_document(
+                &popup,
+                remaining.min(NAVIGATION_SETTLE_CAP),
+                &event.target_info.url,
+                tracker.as_deref(),
+            ),
         )
-        .await
-        {
-            (url, page_title_evidence(title))
-        } else {
-            match page_evidence(popup_id.clone(), &popup).await {
-                Ok(page) => (page.url, page.title),
-                Err(error) if popup.is_closed() || is_closed_page_message(&error.message) => {
+        .await;
+        let (url, title) = match settled {
+            Ok(Some((url, title))) => (url, page_title_evidence(title)),
+            Ok(None) => match tokio::time::timeout_at(
+                deadline.into(),
+                page_evidence(popup_id.clone(), &popup),
+            )
+            .await
+            {
+                Ok(Ok(page)) => (page.url, page.title),
+                Ok(Err(error)) if popup.is_closed() || is_closed_page_message(&error.message) => {
                     self.unregister_page(&popup_id).await;
                     self.closed_targets
                         .lock()
                         .await
                         .insert(event.target_info.target_id.clone());
-                    (event.target_info.url.clone(), String::new())
+                    return Ok(vec![
+                        Evidence::PopupClosed {
+                            opener_page_id: page_id.clone(),
+                            popup_page_id: popup_id,
+                        },
+                        resolved.evidence,
+                    ]);
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     self.unregister_page(&popup_id).await;
                     return Err(error);
                 }
-            }
+                Err(_) => (event.target_info.url.clone(), String::new()),
+            },
+            Err(_) => (event.target_info.url.clone(), String::new()),
         };
+        if popup.is_closed() {
+            self.unregister_page(&popup_id).await;
+            self.closed_targets
+                .lock()
+                .await
+                .insert(event.target_info.target_id.clone());
+            return Ok(vec![
+                Evidence::PopupClosed {
+                    opener_page_id: page_id.clone(),
+                    popup_page_id: popup_id,
+                },
+                resolved.evidence,
+            ]);
+        }
         Ok(vec![
             Evidence::Popup {
                 opener_page_id: page_id.clone(),
@@ -6065,6 +6159,7 @@ mod tests {
             profile_dir: root.join("profile"),
             profiles_root: root.to_path_buf(),
             disposable_profile: false,
+            created_profile: false,
             pid_registry_path: None,
             debug_ws_url: None,
             upload_roots: Vec::new(),
@@ -6772,7 +6867,10 @@ mod tests {
 
         // Matching session dir must be removed.
         super::remove_disposable_profile_dir(&profiles_root, &session_id, &valid_dir).await;
-        assert!(!valid_dir.exists(), "disposable session dir must be removed");
+        assert!(
+            !valid_dir.exists(),
+            "disposable session dir must be removed"
+        );
 
         // Symlink at the exact session path must NOT be followed or removed.
         #[cfg(unix)]
@@ -6789,6 +6887,45 @@ mod tests {
                 target_dir.join("keep").exists(),
                 "symlink target must never be deleted"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_relaunch_preserves_existing_profile() {
+        use crate::WorkerFactory;
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let profiles = root.path().join("profiles");
+        let profile = profiles.join(session.0.to_string());
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("sentinel"), b"keep").unwrap();
+        let config = config::BrowserConfig {
+            executable: Some(root.path().join("missing-chromium")),
+            profiles_dir: profiles,
+            downloads_dir: root.path().join("downloads"),
+            ..Default::default()
+        };
+        let factory =
+            super::ChromiumWorkerFactory::with_pid_registry_dir(config, root.path().join("pids"));
+        assert!(factory.launch(&session).await.is_err());
+        assert_eq!(std::fs::read(profile.join("sentinel")).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn cancelled_launch_only_removes_new_disposable_profile() {
+        use crate::BrowserWorker;
+        let root = tempfile::tempdir().unwrap();
+        let profiles = root.path().join("profiles");
+        for created in [false, true] {
+            let mut worker = chromium_worker_without_browser(root.path());
+            worker.profiles_root = profiles.clone();
+            worker.disposable_profile = true;
+            worker.created_profile = created;
+            worker.profile_dir = profiles.join(worker.session_id.0.to_string());
+            std::fs::create_dir_all(&worker.profile_dir).unwrap();
+            std::fs::write(worker.profile_dir.join("sentinel"), b"keep").unwrap();
+            worker.cancel_launch().await.unwrap();
+            assert_eq!(worker.profile_dir.exists(), !created);
         }
     }
 

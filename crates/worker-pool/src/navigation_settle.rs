@@ -312,7 +312,10 @@ pub async fn run_settle(
         let landed_before = session.landed_loads().await;
         match session.probe(remaining, requested_url).await {
             ProbeStep::Replaced => continue,
-            ProbeStep::Closed => break SettleExit::Unreadable,
+            ProbeStep::Closed => {
+                settled = None;
+                break SettleExit::Unreadable;
+            }
             ProbeStep::Finished(None) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -591,6 +594,26 @@ mod tests {
             session.probes.len(),
             1,
             "run_settle must stop immediately on ProbeStep::Closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_probe_discards_an_earlier_read() {
+        let mut session = Scripted {
+            probes: vec![ProbeStep::Finished(Some(quiet_page())), ProbeStep::Closed],
+            current: None,
+            pending: None,
+            landed: 0,
+        };
+        assert_eq!(
+            run_settle(
+                "test",
+                Duration::from_secs(1),
+                "https://a.test/a",
+                &mut session
+            )
+            .await,
+            None
         );
     }
 

@@ -385,6 +385,7 @@ impl PageRuntime {
                     .finish_failure_durable(
                         &envelope,
                         prepared_failure(&envelope, error, execution.evidence.clone()),
+                        pre_url.as_deref(),
                     )
                     .await;
                 if terminal_durable {
@@ -408,7 +409,9 @@ impl PageRuntime {
         let lease_ref = lease_slot.as_ref().expect("lease survives to verify");
         match self.verify(&envelope, lease_ref, evidence, typed_on).await {
             Ok(evidence) => {
-                let mut observed_url = observed_url_from_evidence(&envelope, &evidence);
+                let mut observed_url = used_browser
+                    .then(|| observed_url_from_evidence(&envelope, &evidence))
+                    .flatten();
                 if observed_url.is_none()
                     && used_browser
                     && envelope.command.class() != CommandClass::Replayable
@@ -429,12 +432,11 @@ impl PageRuntime {
                     })
                 {
                     if let Some(page_id) = envelope.page_id.as_ref() {
-                        observed_url = worker_pool::observation_or_default(
-                            lease_ref.worker().observation(),
-                        )
-                        .current_url(page_id)
-                        .await
-                        .map(|url| (page_id.clone(), url));
+                        observed_url =
+                            worker_pool::observation_or_default(lease_ref.worker().observation())
+                                .current_url(page_id)
+                                .await
+                                .map(|url| (page_id.clone(), url));
                     }
                 }
                 if let Some((target_page_id, new_url)) = observed_url {
@@ -486,6 +488,7 @@ impl PageRuntime {
                     .finish_failure_durable(
                         &envelope,
                         classify_failure(&envelope, error, Vec::new()),
+                        pre_url.as_deref(),
                     )
                     .await;
                 if terminal_durable {
@@ -568,13 +571,14 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
-        self.finish_failure_durable(envelope, outcome).await.0
+        self.finish_failure_durable(envelope, outcome, None).await.0
     }
 
     async fn finish_failure_durable(
         &self,
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
+        pre_url: Option<&str>,
     ) -> (CommandOutcome, bool) {
         let failure_fields = match &outcome {
             CommandOutcome::Failed { error, .. } => Some(("failed", error)),
@@ -608,7 +612,7 @@ impl PageRuntime {
             | CommandOutcome::NeedsReconciliation { evidence, .. } => evidence.clone(),
             _ => Vec::new(),
         };
-        self.promote_outcome(envelope, &failure_evidence, false, None)
+        self.promote_outcome(envelope, &failure_evidence, false, pre_url)
             .await;
         let Some(journal) = &self.journal else {
             return (outcome, false);
@@ -651,15 +655,14 @@ impl PageRuntime {
                     | types::IntentCommand::EnterCode(_)
             )
         );
-        let url = if let Some(url) =
-            pre_url.filter(|url| context_store::page_pattern(url).is_some())
-        {
-            Some(url.to_owned())
-        } else if !success || !is_navigating_intent {
-            self.get(page_id).await.ok().and_then(|page| page.url)
-        } else {
-            None
-        };
+        let url =
+            if let Some(url) = pre_url.filter(|url| context_store::page_pattern(url).is_some()) {
+                Some(url.to_owned())
+            } else if !is_navigating_intent {
+                self.get(page_id).await.ok().and_then(|page| page.url)
+            } else {
+                None
+            };
         promotion
             .record_outcome(url.as_deref(), evidence, success)
             .await;
@@ -697,9 +700,7 @@ fn observed_url_from_evidence(
         Evidence::Inspection { url, .. } if !url.is_empty() => {
             Some((target_page_id.clone(), url.clone()))
         }
-        Evidence::Page { page_id, url, .. }
-            if page_id == target_page_id && !url.is_empty() =>
-        {
+        Evidence::Page { page_id, url, .. } if page_id == target_page_id && !url.is_empty() => {
             Some((target_page_id.clone(), url.clone()))
         }
         Evidence::Wait {
@@ -709,9 +710,7 @@ fn observed_url_from_evidence(
         } if !url.is_empty() && url.chars().count() < types::MAX_WAIT_OBSERVED_CHARS => {
             Some((target_page_id.clone(), url.clone()))
         }
-        Evidence::Screenshot { origin, .. }
-            if origin.page_id.as_ref() == Some(target_page_id) =>
-        {
+        Evidence::Screenshot { origin, .. } if origin.page_id.as_ref() == Some(target_page_id) => {
             origin
                 .url
                 .as_deref()

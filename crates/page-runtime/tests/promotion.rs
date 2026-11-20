@@ -765,7 +765,9 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
                 types::WaitCondition::Url { .. } => Ok(worker_pool::wait::WaitObservation::Url(
                     self.0.url.lock().await.clone(),
                 )),
-                _ => Ok(worker_pool::wait::WaitObservation::Document("complete".into())),
+                _ => Ok(worker_pool::wait::WaitObservation::Document(
+                    "complete".into(),
+                )),
             }
         }
     }
@@ -912,13 +914,17 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
             root: root.path().to_path_buf(),
         }),
     ));
-    let runtime = page_runtime::PageRuntime::new(journal, workers)
-        .with_context_promotion(promotion.clone());
+    let runtime =
+        page_runtime::PageRuntime::new(journal, workers).with_context_promotion(promotion.clone());
 
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
     runtime
-        .set_url(&page.id, "https://app.example.test/login".into(), "interactive")
+        .set_url(
+            &page.id,
+            "https://app.example.test/login".into(),
+            "interactive",
+        )
         .await
         .unwrap();
 
@@ -947,7 +953,10 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
             })),
         })
         .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
 
     // PageState.url MUST be updated to the post-navigation URL.
     assert_eq!(
@@ -989,6 +998,8 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
         id: WorkerId,
         profile: PathBuf,
         url: tokio::sync::Mutex<String>,
+        clicked: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait]
@@ -1031,7 +1042,9 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
                 types::WaitCondition::Url { .. } => Ok(worker_pool::wait::WaitObservation::Url(
                     self.0.url.lock().await.clone(),
                 )),
-                _ => Ok(worker_pool::wait::WaitObservation::Document("complete".into())),
+                _ => Ok(worker_pool::wait::WaitObservation::Document(
+                    "complete".into(),
+                )),
             }
         }
     }
@@ -1120,7 +1133,9 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
             page_id: &PageId,
             _: &types::ClickCommand,
         ) -> Result<Vec<Evidence>, CommandError> {
-            // Click resolves the control but fails to navigate away from /login.
+            // Pause at the real command boundary while the registry changes.
+            self.clicked.notify_one();
+            self.resume.notified().await;
             Ok(vec![Evidence::Resolution {
                 target: Box::new(TargetSpec {
                     role: Some("link".into()),
@@ -1149,6 +1164,8 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
 
     struct StalledFollowFactory {
         root: PathBuf,
+        clicked: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait]
@@ -1158,6 +1175,8 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
                 id: WorkerId::new(),
                 profile: self.root.clone(),
                 url: tokio::sync::Mutex::new("https://app.example.test/login".into()),
+                clicked: self.clicked.clone(),
+                resume: self.resume.clone(),
             }))
         }
     }
@@ -1172,47 +1191,66 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
             .await
             .unwrap(),
     );
+    let clicked = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
     let workers = Arc::new(WorkerPool::new(
         2,
         Arc::new(StalledFollowFactory {
             root: root.path().to_path_buf(),
+            clicked: clicked.clone(),
+            resume: resume.clone(),
         }),
     ));
-    let runtime = page_runtime::PageRuntime::new(journal, workers)
-        .with_context_promotion(promotion.clone());
+    let runtime =
+        page_runtime::PageRuntime::new(journal, workers).with_context_promotion(promotion.clone());
 
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
     runtime
-        .set_url(&page.id, "https://app.example.test/login".into(), "interactive")
+        .set_url(
+            &page.id,
+            "https://app.example.test/login".into(),
+            "interactive",
+        )
         .await
         .unwrap();
 
-    let outcome = runtime
-        .execute(CommandEnvelope {
-            schema_version: CommandEnvelope::SCHEMA_VERSION,
-            command_id: CommandId::new(),
-            workflow_id: WorkflowId::new(),
-            attempt_id: AttemptId::new(),
-            session_id: session,
-            page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
-            command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
-                purpose: "open dashboard".into(),
-                hints: IntentHints {
-                    accessible_name: Some("Open dashboard".into()),
-                    ..Default::default()
+    let execution = runtime.execute(CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: session,
+        page_id: Some(page.id.clone()),
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
+            purpose: "open dashboard".into(),
+            hints: IntentHints {
+                accessible_name: Some("Open dashboard".into()),
+                ..Default::default()
+            },
+            boundary: false,
+            expected_destination: types::WaitForCommand {
+                condition: types::WaitCondition::Url {
+                    matcher: types::TextMatch::Contains("/dashboard".into()),
                 },
-                boundary: false,
-                expected_destination: types::WaitForCommand {
-                    condition: types::WaitCondition::Url {
-                        matcher: types::TextMatch::Contains("/dashboard".into()),
-                    },
-                    timeout_ms: 100,
-                },
-            })),
-        })
-        .await;
+                timeout_ms: 100,
+            },
+        })),
+    });
+    let update = async {
+        clicked.notified().await;
+        runtime
+            .set_url(
+                &page.id,
+                "https://app.example.test/newer".into(),
+                "interactive",
+            )
+            .await
+            .unwrap();
+        resume.notify_one();
+    };
+    let (outcome, ()) = tokio::join!(execution, update);
     assert!(
         matches!(
             outcome,

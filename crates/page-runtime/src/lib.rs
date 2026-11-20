@@ -469,14 +469,7 @@ impl PageRuntime {
             if registry.closed.contains_key(&entry.page_id) {
                 continue;
             }
-            if let Some(existing) = registry.pages.get_mut(&entry.page_id) {
-                if existing.session_id == *session_id {
-                    existing.url = (!entry.url.is_empty())
-                        .then(|| entry.url.clone())
-                        .or(existing.url.take());
-                    existing.ready_state = "interactive".into();
-                }
-            } else {
+            if !registry.pages.contains_key(&entry.page_id) {
                 registry.pages.insert(
                     entry.page_id.clone(),
                     PageState {

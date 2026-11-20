@@ -731,10 +731,7 @@ async fn http_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
                 .await
                 .map_err(|error| format!("{error:?}"))?;
         }
-        let response = task
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+        let response = task.await.map_err(|error| error.to_string())?.unwrap();
         require!(
             response.status() == StatusCode::UNAUTHORIZED,
             "HTTP lifetime returned {}",
@@ -1323,11 +1320,7 @@ async fn duplicate_headers(fixture: &BoundaryFixture) -> SecurityResult {
         request
             .headers_mut()
             .append(header, "duplicate".parse().unwrap());
-        let response = app
-            .clone()
-            .oneshot(request)
-            .await
-            .map_err(|error| error.to_string())?;
+        let response = app.clone().oneshot(request).await.unwrap();
         require!(
             response.status() == expected,
             "duplicate {header} returned {}",
@@ -1354,7 +1347,7 @@ async fn oversized_http(fixture: &BoundaryFixture) -> SecurityResult {
             Body::from(body),
         ))
         .await
-        .map_err(|error| error.to_string())?;
+        .unwrap();
     require!(
         response.status() == StatusCode::PAYLOAD_TOO_LARGE,
         "oversized HTTP returned {}",
@@ -1405,7 +1398,7 @@ async fn unsupported_protocols(fixture: &BoundaryFixture) -> SecurityResult {
     let response = runtime_app(fixture, InterfaceConfig::default())
         .oneshot(http)
         .await
-        .map_err(|error| error.to_string())?;
+        .unwrap();
     require!(
         response.status() == StatusCode::UNPROCESSABLE_ENTITY,
         "unsupported HTTP version returned {}",
@@ -1442,7 +1435,7 @@ async fn unsupported_protocols(fixture: &BoundaryFixture) -> SecurityResult {
     let response = runtime_app(fixture, InterfaceConfig::default())
         .oneshot(malicious)
         .await
-        .map_err(|error| error.to_string())?;
+        .unwrap();
     let body = to_bytes(response.into_body(), 16 * 1024)
         .await
         .map_err(|error| error.to_string())?;
