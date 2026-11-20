@@ -644,6 +644,15 @@ impl NetworkQuietTracker {
         pending_page_loads(&*self.state.lock().await, Instant::now())
     }
 
+    pub async fn has_pending_document_load(&self) -> bool {
+        let now = Instant::now();
+        self.state.lock().await.requests().any(|req| {
+            req.resource_type == NetworkResourceType::Document
+                && now.duration_since(req.started_at)
+                    < crate::navigation_settle::NAVIGATION_SETTLE_CAP
+        })
+    }
+
     pub async fn landed_page_loads(&self) -> u64 {
         self.state.lock().await.landed_page_loads()
     }

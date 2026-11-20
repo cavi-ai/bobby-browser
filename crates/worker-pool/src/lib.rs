@@ -486,7 +486,7 @@ impl WorkerPool {
                     }
                     let worker = factory.launch(&launch_session).await?;
                     if cancelled.load(Ordering::Acquire) {
-                        let _ = worker.terminate().await;
+                        let _ = worker.close().await;
                         return Err(resource_error("worker launch caller was cancelled"));
                     }
                     Ok(worker)
