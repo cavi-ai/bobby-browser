@@ -162,7 +162,9 @@ impl SessionManager {
         let session = guard
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
-        session.page_ids.push(page_id);
+        if !session.page_ids.contains(&page_id) {
+            session.page_ids.push(page_id);
+        }
         session.last_used_at = Utc::now();
         Ok(())
     }

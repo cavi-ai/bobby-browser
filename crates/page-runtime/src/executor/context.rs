@@ -28,9 +28,17 @@ impl PageRuntime {
                     .await;
                 }
             }
+            RuntimeCommand::Primitive(PrimitiveCommand::ListPages(_)) => {
+                for item in evidence.iter() {
+                    if let Evidence::Pages { pages } = item {
+                        self.sync_listed_pages(&envelope.session_id, pages).await;
+                    }
+                }
+            }
             RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
                 self.context().forget(&command.page_id);
-                self.remove_page(&command.page_id).await
+                self.close_page(envelope.session_id.clone(), &command.page_id)
+                    .await;
             }
             RuntimeCommand::Primitive(_) | RuntimeCommand::Intent(_) => {}
         }

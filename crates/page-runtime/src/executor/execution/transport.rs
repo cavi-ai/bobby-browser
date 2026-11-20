@@ -19,7 +19,7 @@ impl ExecutionContext<'_> {
             if self.envelope.command.class() == types::CommandClass::Replayable {
                 return self.retry(lease, page, Vec::new()).await;
             }
-            return Err(self.runtime.finish_failure(self.envelope, CommandOutcome::Failed {
+            return Err(self.runtime.finish_failure_durable(self.envelope, CommandOutcome::Failed {
                 command_id: self.envelope.command_id.clone(),
                 error: CommandError {
                     code: ErrorCode::TargetDetached,
@@ -28,7 +28,7 @@ impl ExecutionContext<'_> {
                     retryable: true,
                 },
                 evidence: vec![transient_target_loss_evidence(&failure.error.message)],
-            }).await);
+            }, self.pre_url).await.0);
         }
         match lease.worker().reconnect_live_process().await {
             Ok(_) => self.after_reattach(failure, lease, page).await,

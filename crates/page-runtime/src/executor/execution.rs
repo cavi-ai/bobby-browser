@@ -13,16 +13,19 @@ struct ExecutionContext<'a> {
     envelope: &'a CommandEnvelope,
     gate: &'a SessionGate,
     workers: &'a Arc<worker_pool::WorkerPool>,
+    pre_url: Option<&'a str>,
 }
 
 impl ExecutionContext<'_> {
     async fn finish(&self, failure: AdaptiveFailure) -> CommandOutcome {
         self.runtime
-            .finish_failure(
+            .finish_failure_durable(
                 self.envelope,
                 classify_failure(self.envelope, failure.error, failure.evidence),
+                self.pre_url,
             )
             .await
+            .0
     }
 
     async fn retry(
@@ -52,11 +55,13 @@ impl PageRuntime {
         lease: worker_pool::WorkerLease,
         page_state: Option<types::PageState>,
     ) -> ExecutionResult {
+        let pre_url = page_state.as_ref().and_then(|page| page.url.clone());
         let context = ExecutionContext {
             runtime: self,
             envelope,
             gate,
             workers,
+            pre_url: pre_url.as_deref(),
         };
         match context.attempt(&lease, page_state.clone()).await {
             Ok(execution) => Ok((execution, Some(lease))),

@@ -9,9 +9,9 @@ use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
-    AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
-    EvaluateJavaScriptCommand, Evidence, ListPagesCommand, NavigateCommand, OpenPageRequest,
-    PrimitiveCommand, RuntimeCommand, WaitUntil, WorkflowId,
+    AttemptId, ClickAndWaitForPopupCommand, ClickCommand, CommandEnvelope, CommandId,
+    CommandOutcome, CreateSessionRequest, EvaluateJavaScriptCommand, Evidence, ListPagesCommand,
+    NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, WaitUntil, WorkflowId,
 };
 
 async fn site() -> FixtureSite {
@@ -21,11 +21,16 @@ async fn site() -> FixtureSite {
             Route::Html(
                 r#"<!doctype html><title>Integrations</title><main>
 <button aria-label="Connect Ledger Cloud" id="connect">Connect</button>
+<button id="short-popup" onclick="window.open('/short', '_blank')">Short popup</button>
 <script>document.getElementById("connect").addEventListener("click", () => {
   window.open("/ledger/authorize", "_blank");
 });</script></main>"#
                     .into(),
             ),
+        ),
+        (
+            "/short",
+            Route::Html("<!doctype html><script>window.close()</script>".into()),
         ),
         (
             "/ledger/authorize",
@@ -43,12 +48,8 @@ fn chrome_executable() -> PathBuf {
         })
 }
 
-#[tokio::test]
-#[ignore = "requires installed Chrome or Chromium"]
-async fn popup_opens_as_a_listed_page() {
-    let server = site().await;
-    let root = tempfile::tempdir().unwrap();
-    let config = AppConfig {
+fn test_config(root: &std::path::Path) -> AppConfig {
+    AppConfig {
         cdp: config::CdpConfig::default(),
         mcp: config::McpConfig::default(),
         credentials: Vec::new(),
@@ -63,22 +64,22 @@ async fn popup_opens_as_a_listed_page() {
         },
         browser: BrowserConfig {
             executable: Some(chrome_executable()),
-            profiles_dir: root.path().join("profiles"),
+            profiles_dir: root.join("profiles"),
             headless: true,
             max_active: 8,
-            upload_roots: vec![root.path().join("uploads")],
-            downloads_dir: root.path().join("downloads"),
-            artifacts_dir: root.path().join("artifacts"),
+            upload_roots: vec![root.join("uploads")],
+            downloads_dir: root.join("downloads"),
+            artifacts_dir: root.join("artifacts"),
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
             max_js_result_bytes: 64 * 1024,
             max_js_timeout_ms: 30_000,
         },
         storage: StorageConfig {
-            journal_path: root.path().join("commands.jsonl"),
-            checkpoints_dir: root.path().join("checkpoints"),
-            authority_path: root.path().join("authority.json"),
-            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_path: root.join("commands.jsonl"),
+            checkpoints_dir: root.join("checkpoints"),
+            authority_path: root.join("authority.json"),
+            scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
             journal_key_path: None,
         },
         interface: config::InterfaceConfig::default(),
@@ -86,7 +87,15 @@ async fn popup_opens_as_a_listed_page() {
         vision: config::VisionConfig::default(),
         context: Default::default(),
         nodes: Default::default(),
-    };
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn popup_opens_as_a_listed_page() {
+    let server = site().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = test_config(root.path());
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime
         .create_session(CreateSessionRequest {
@@ -146,17 +155,49 @@ async fn popup_opens_as_a_listed_page() {
     let CommandOutcome::Completed { evidence, .. } = outcome else {
         panic!("list_pages did not complete: {outcome:?}")
     };
-    let urls: Vec<String> = evidence
+    let pages = evidence
         .iter()
         .find_map(|item| match item {
-            Evidence::Pages { pages } => Some(pages.iter().map(|page| page.url.clone()).collect()),
+            Evidence::Pages { pages } => Some(pages.clone()),
             _ => None,
         })
         .unwrap_or_default();
+    let urls: Vec<String> = pages.iter().map(|page| page.url.clone()).collect();
     assert_eq!(urls.len(), 2, "expected opener plus popup, got {urls:?}");
+    let popup = pages
+        .iter()
+        .find(|page| page.url.contains("ledger"))
+        .unwrap_or_else(|| panic!("popup URL not listed: {urls:?}"));
+
+    // A popup discovered via ListPages must be registered in PageRuntime and
+    // SessionManager so subsequent commands can address it directly without NotFound.
     assert!(
-        urls.iter().any(|url| url.contains("ledger")),
-        "popup URL not listed: {urls:?}"
+        runtime
+            .sessions
+            .get(&session.id)
+            .await
+            .unwrap()
+            .page_ids
+            .contains(&popup.page_id),
+        "SessionManager.page_ids missing discovered popup"
+    );
+    let inspect_outcome = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(popup.page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
+                types::InspectCommand::default(),
+            )),
+        })
+        .await;
+    assert!(
+        matches!(inspect_outcome, CommandOutcome::Completed { .. }),
+        "discovered popup must be addressable by Inspect: {inspect_outcome:?}"
     );
 
     runtime.sessions.delete(&session.id).await.unwrap();
@@ -168,51 +209,16 @@ async fn popup_opens_as_a_listed_page() {
 async fn popup_closed_from_inside_still_lists_the_opener() {
     let server = site().await;
     let root = tempfile::tempdir().unwrap();
-    let config = AppConfig {
-        cdp: config::CdpConfig::default(),
-        mcp: config::McpConfig::default(),
-        credentials: Vec::new(),
-        http: config::HttpConfig {
-            allow_loopback: true,
-            ..config::HttpConfig::default()
-        },
-        server: ServerConfig {
-            host: "127.0.0.1".into(),
-            port: 0,
-            shutdown_timeout_ms: 10_000,
-        },
-        browser: BrowserConfig {
-            executable: Some(chrome_executable()),
-            profiles_dir: root.path().join("profiles"),
-            headless: true,
-            max_active: 8,
-            upload_roots: vec![root.path().join("uploads")],
-            downloads_dir: root.path().join("downloads"),
-            artifacts_dir: root.path().join("artifacts"),
-            max_artifact_bytes: 8 * 1024 * 1024,
-            max_screenshot_dimension: 16_384,
-            max_js_result_bytes: 64 * 1024,
-            max_js_timeout_ms: 30_000,
-        },
-        storage: StorageConfig {
-            journal_path: root.path().join("commands.jsonl"),
-            checkpoints_dir: root.path().join("checkpoints"),
-            authority_path: root.path().join("authority.json"),
-            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
-            journal_key_path: None,
-        },
-        interface: config::InterfaceConfig::default(),
-        observability: config::ObservabilityConfig::default(),
-        vision: config::VisionConfig::default(),
-        context: Default::default(),
-        nodes: Default::default(),
-    };
+    let config = test_config(root.path());
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime
         .create_session(CreateSessionRequest {
             profile: "popup-discovery-close".into(),
             proxy: None,
-            execution_policy: Default::default(),
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+                ..Default::default()
+            },
             zigzagzig: false,
         })
         .await
@@ -292,7 +298,7 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
     // under the eval's own reply, so either a completed eval or a
     // page-not-open failure on *this* call is acceptable; what matters is
     // what `list_pages` says next.
-    let _ = submit(
+    let close_outcome = submit(
         popup_id,
         PrimitiveCommand::EvaluateJavaScript(EvaluateJavaScriptCommand {
             expression: "window.close()".into(),
@@ -301,6 +307,10 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         }),
     )
     .await;
+    assert!(
+        !matches!(close_outcome, CommandOutcome::PolicyDenied { .. }),
+        "window.close() must not be policy-denied: {close_outcome:?}"
+    );
 
     let outcome = submit(
         opener.id.clone(),
@@ -320,6 +330,134 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
     assert!(
         urls.iter().any(|url| url == &opener_url),
         "opener missing from list_pages after the popup closed itself: {urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|url| url.contains("ledger")),
+        "closed popup should no longer appear in list_pages: {urls:?}"
+    );
+
+    runtime.sessions.delete(&session.id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn popup_closing_during_wait_is_not_registered() {
+    let server = site().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = test_config(root.path());
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "popup-discovery-close".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+                ..Default::default()
+            },
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let opener = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+
+    let submit = |page_id: types::PageId, command: PrimitiveCommand| {
+        runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page_id),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(command),
+        })
+    };
+
+    let opener_url = server.url("/integrations");
+    let outcome = submit(
+        opener.id.clone(),
+        PrimitiveCommand::Navigate(NavigateCommand {
+            url: opener_url.clone(),
+            wait_until: WaitUntil::Interactive,
+            timeout_ms: 30_000,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+
+    let (outcome, _) = runtime
+        .submit_with_auto_checkpoint(
+            CommandEnvelope {
+                schema_version: CommandEnvelope::SCHEMA_VERSION,
+                command_id: CommandId::new(),
+                workflow_id: WorkflowId::new(),
+                attempt_id: AttemptId::new(),
+                session_id: session.id.clone(),
+                page_id: Some(opener.id.clone()),
+                deadline: Utc::now() + Duration::seconds(30),
+                command: RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(
+                    ClickAndWaitForPopupCommand {
+                        selector: "#short-popup".into(),
+                        target: None,
+                        timeout_ms: 5_000,
+                    },
+                )),
+            },
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("popup command failed: {outcome:?}")
+    };
+    let popup_id = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::PopupClosed {
+                opener_page_id,
+                popup_page_id,
+            } if opener_page_id == &opener.id => Some(popup_page_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing closed popup evidence: {evidence:?}"));
+    assert!(runtime.pages.get(&popup_id).await.is_err());
+    assert_eq!(
+        runtime.sessions.get(&session.id).await.unwrap().page_ids,
+        vec![opener.id.clone()]
+    );
+
+    let outcome = submit(
+        opener.id.clone(),
+        PrimitiveCommand::ListPages(ListPagesCommand),
+    )
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("list_pages did not complete after popup close: {outcome:?}")
+    };
+    let urls: Vec<String> = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Pages { pages } => Some(pages.iter().map(|page| page.url.clone()).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        urls.iter().any(|url| url == &opener_url),
+        "opener missing from list_pages after the popup closed itself: {urls:?}"
+    );
+    assert_eq!(urls.len(), 1, "only the opener should remain: {urls:?}");
+    assert!(
+        !urls.iter().any(|url| url.contains("ledger")),
+        "closed popup should no longer appear in list_pages: {urls:?}"
     );
 
     runtime.sessions.delete(&session.id).await.unwrap();

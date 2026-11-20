@@ -2554,3 +2554,239 @@ async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
     assert_eq!(missing.code, unowned.code);
     assert_eq!(missing.message, unowned.message);
 }
+
+#[tokio::test]
+async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempotent() {
+    struct PageSyncWorker {
+        id: WorkerId,
+        profile: PathBuf,
+        opened_id: PageId,
+        discovered_id: PageId,
+        popup_id: PageId,
+    }
+
+    #[async_trait]
+    impl BrowserWorker for PageSyncWorker {
+        fn worker_id(&self) -> WorkerId {
+            self.id.clone()
+        }
+        fn profile_dir(&self) -> &Path {
+            &self.profile
+        }
+        async fn close(&self) -> Result<(), CommandError> {
+            Ok(())
+        }
+        fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+            Some(self)
+        }
+        fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::TabsEngine for PageSyncWorker {
+        async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+            Ok(())
+        }
+        async fn open_page_command(
+            &self,
+            _: &types::OpenPageCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            Ok(vec![Evidence::Page {
+                page_id: self.opened_id.clone(),
+                url: "https://app.example.test/opened".into(),
+                title: "Opened".into(),
+            }])
+        }
+        async fn list_pages(
+            &self,
+            _: &types::ListPagesCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            Ok(vec![Evidence::Pages {
+                pages: vec![types::PageEvidence {
+                    page_id: self.discovered_id.clone(),
+                    url: "https://app.example.test/discovered".into(),
+                    title: "Discovered".into(),
+                }],
+            }])
+        }
+        async fn close_page_command(
+            &self,
+            cmd: &types::ClosePageCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            Ok(vec![Evidence::Page {
+                page_id: cmd.page_id.clone(),
+                url: String::new(),
+                title: String::new(),
+            }])
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::EventsEngine for PageSyncWorker {
+        async fn click_and_wait_for_popup(
+            &self,
+            opener: &PageId,
+            _: &types::ClickAndWaitForPopupCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            Ok(vec![Evidence::Popup {
+                opener_page_id: opener.clone(),
+                page_id: self.popup_id.clone(),
+                url: "https://app.example.test/popup".into(),
+                title: "Popup".into(),
+            }])
+        }
+    }
+
+    struct PageSyncFactory {
+        worker: Arc<PageSyncWorker>,
+    }
+
+    #[async_trait]
+    impl WorkerFactory for PageSyncFactory {
+        async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+            Ok(self.worker.clone())
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let opened_id = PageId::new();
+    let discovered_id = PageId::new();
+    let popup_id = PageId::new();
+    let worker = Arc::new(PageSyncWorker {
+        id: WorkerId::new(),
+        profile: root.path().to_path_buf(),
+        opened_id: opened_id.clone(),
+        discovered_id: discovered_id.clone(),
+        popup_id: popup_id.clone(),
+    });
+    let workers = Arc::new(WorkerPool::new(2, Arc::new(PageSyncFactory { worker })));
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("commands.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = RuntimeService::new(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new(journal, workers),
+    );
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "sync-test".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy::default(),
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let first = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+
+    // OpenPage command registers in SessionManager.
+    let outcome = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(first.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(types::PrimitiveCommand::OpenPage(
+                types::OpenPageCommand { url: None },
+            )),
+        })
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert!(runtime
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .page_ids
+        .contains(&opened_id));
+
+    // ListPages registers discovered_id and is idempotent on repeat calls.
+    for _ in 0..2 {
+        let outcome = runtime
+            .submit(CommandEnvelope {
+                schema_version: CommandEnvelope::SCHEMA_VERSION,
+                command_id: CommandId::new(),
+                workflow_id: WorkflowId::new(),
+                attempt_id: AttemptId::new(),
+                session_id: session.id.clone(),
+                page_id: None,
+                deadline: Utc::now() + Duration::seconds(30),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+                    types::ListPagesCommand,
+                )),
+            })
+            .await;
+        assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    }
+    let page_ids = runtime.sessions.get(&session.id).await.unwrap().page_ids;
+    assert_eq!(
+        page_ids.iter().filter(|id| *id == &discovered_id).count(),
+        1,
+        "add_page must be idempotent across repeated ListPages"
+    );
+
+    // ClickAndWaitForPopup registers popup_id.
+    let outcome = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(first.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(types::PrimitiveCommand::ClickAndWaitForPopup(
+                types::ClickAndWaitForPopupCommand {
+                    selector: "#pop".into(),
+                    target: None,
+                    timeout_ms: 5_000,
+                },
+            )),
+        })
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert!(runtime
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .page_ids
+        .contains(&popup_id));
+
+    // ClosePage removes popup_id from SessionManager.
+    let outcome = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(popup_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(types::PrimitiveCommand::ClosePage(
+                types::ClosePageCommand {
+                    page_id: popup_id.clone(),
+                },
+            )),
+        })
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert!(!runtime
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .page_ids
+        .contains(&popup_id));
+}

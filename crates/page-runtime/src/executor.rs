@@ -272,6 +272,7 @@ impl PageRuntime {
             }
             _ => None,
         };
+        let pre_url = page_state.as_ref().and_then(|page| page.url.clone());
         let (mut execution, lease_slot) = match self
             .run_with_deadline(&envelope, &gate, workers, lease, page_state)
             .await
@@ -384,6 +385,7 @@ impl PageRuntime {
                     .finish_failure_durable(
                         &envelope,
                         prepared_failure(&envelope, error, execution.evidence.clone()),
+                        pre_url.as_deref(),
                     )
                     .await;
                 if terminal_durable {
@@ -392,6 +394,7 @@ impl PageRuntime {
                 return outcome;
             }
         }
+        let used_browser = execution.used_browser;
         let mut evidence = execution.evidence;
         self.record_execution_context(&envelope, &mut evidence)
             .await;
@@ -403,39 +406,63 @@ impl PageRuntime {
             return journal_failure(&envelope, error, true);
         }
         self.observe_durable_phase(CommandPhase::Verifying).await;
-        match self
-            .verify(
-                &envelope,
-                lease_slot.as_ref().expect("lease survives to verify"),
-                evidence,
-                typed_on,
-            )
-            .await
-        {
+        let lease_ref = lease_slot.as_ref().expect("lease survives to verify");
+        match self.verify(&envelope, lease_ref, evidence, typed_on).await {
             Ok(evidence) => {
-                self.promote_outcome(&envelope, &evidence, true).await;
-                if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command
+                let mut observed_url = used_browser
+                    .then(|| observed_url_from_evidence(&envelope, &evidence))
+                    .flatten();
+                if observed_url.is_none()
+                    && used_browser
+                    && envelope.command.class() != CommandClass::Replayable
+                    && !matches!(
+                        envelope.command,
+                        RuntimeCommand::Primitive(
+                            PrimitiveCommand::OpenPage(_)
+                                | PrimitiveCommand::ClosePage(_)
+                                | PrimitiveCommand::ClickAndWaitForPopup(_)
+                                | PrimitiveCommand::DownloadUrl(_)
+                        )
+                    )
+                    && !evidence.iter().any(|item| {
+                        matches!(
+                            item,
+                            Evidence::Configuration { name, .. } if name == "dialogOpened"
+                        )
+                    })
                 {
-                    if let Some(Evidence::Navigation { url, .. }) = evidence.first() {
-                        // The navigation itself succeeded, so the outcome is
-                        // still completed -- but a registry write failure
-                        // leaves page_list showing a stale URL, and that must
-                        // be visible in logs rather than swallowed.
-                        if let Err(error) = self
-                            .set_url(
-                                envelope.page_id.as_ref().expect("validated page id"),
-                                url.clone(),
-                                "interactive",
-                            )
+                    if let Some(page_id) = envelope.page_id.as_ref() {
+                        observed_url =
+                            worker_pool::observation_or_default(lease_ref.worker().observation())
+                                .current_url(page_id)
+                                .await
+                                .map(|url| (page_id.clone(), url));
+                    }
+                }
+                if let Some((target_page_id, new_url)) = observed_url {
+                    let can_update = if matches!(
+                        envelope.command,
+                        RuntimeCommand::Primitive(PrimitiveCommand::ActivatePage(_))
+                    ) {
+                        self.get(&target_page_id)
                             .await
+                            .is_ok_and(|page| page.session_id == envelope.session_id)
+                    } else {
+                        true
+                    };
+                    if can_update {
+                        if let Err(error) =
+                            self.set_url(&target_page_id, new_url, "interactive").await
                         {
                             tracing::warn!(
                                 error = %error,
-                                "page registry URL update failed after navigate"
+                                "page registry URL update failed after command"
                             );
                         }
                     }
                 }
+                self.promote_outcome(&envelope, &evidence, true, pre_url.as_deref())
+                    .await;
                 let outcome = CommandOutcome::Completed {
                     command_id: command_id.clone(),
                     evidence,
@@ -461,6 +488,7 @@ impl PageRuntime {
                     .finish_failure_durable(
                         &envelope,
                         classify_failure(&envelope, error, Vec::new()),
+                        pre_url.as_deref(),
                     )
                     .await;
                 if terminal_durable {
@@ -543,13 +571,14 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
-        self.finish_failure_durable(envelope, outcome).await.0
+        self.finish_failure_durable(envelope, outcome, None).await.0
     }
 
     async fn finish_failure_durable(
         &self,
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
+        pre_url: Option<&str>,
     ) -> (CommandOutcome, bool) {
         let failure_fields = match &outcome {
             CommandOutcome::Failed { error, .. } => Some(("failed", error)),
@@ -583,7 +612,7 @@ impl PageRuntime {
             | CommandOutcome::NeedsReconciliation { evidence, .. } => evidence.clone(),
             _ => Vec::new(),
         };
-        self.promote_outcome(envelope, &failure_evidence, false)
+        self.promote_outcome(envelope, &failure_evidence, false, pre_url)
             .await;
         let Some(journal) = &self.journal else {
             return (outcome, false);
@@ -610,6 +639,7 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         evidence: &[Evidence],
         success: bool,
+        pre_url: Option<&str>,
     ) {
         let Some(promotion) = &self.promotion else {
             return;
@@ -617,11 +647,79 @@ impl PageRuntime {
         let Some(page_id) = envelope.page_id.as_ref() else {
             return;
         };
-        let url = self.get(page_id).await.ok().and_then(|page| page.url);
+        let is_navigating_intent = matches!(
+            envelope.command,
+            RuntimeCommand::Intent(
+                types::IntentCommand::Follow(_)
+                    | types::IntentCommand::SubmitAndVerify(_)
+                    | types::IntentCommand::EnterCode(_)
+            )
+        );
+        let url =
+            if let Some(url) = pre_url.filter(|url| context_store::page_pattern(url).is_some()) {
+                Some(url.to_owned())
+            } else if !is_navigating_intent {
+                self.get(page_id).await.ok().and_then(|page| page.url)
+            } else {
+                None
+            };
         promotion
             .record_outcome(url.as_deref(), evidence, success)
             .await;
     }
+}
+
+fn observed_url_from_evidence(
+    envelope: &CommandEnvelope,
+    evidence: &[Evidence],
+) -> Option<(types::PageId, String)> {
+    match &envelope.command {
+        RuntimeCommand::Primitive(PrimitiveCommand::ActivatePage(command)) => {
+            return evidence.iter().rev().find_map(|item| match item {
+                Evidence::Page { page_id, url, .. }
+                    if page_id == &command.page_id && !url.is_empty() =>
+                {
+                    Some((page_id.clone(), url.clone()))
+                }
+                _ => None,
+            });
+        }
+        RuntimeCommand::Primitive(
+            PrimitiveCommand::OpenPage(_)
+            | PrimitiveCommand::ClosePage(_)
+            | PrimitiveCommand::ListPages(_)
+            | PrimitiveCommand::DownloadUrl(_),
+        ) => return None,
+        _ => {}
+    }
+    let target_page_id = envelope.page_id.as_ref()?;
+    evidence.iter().rev().find_map(|item| match item {
+        Evidence::Navigation { url, .. } if !url.is_empty() => {
+            Some((target_page_id.clone(), url.clone()))
+        }
+        Evidence::Inspection { url, .. } if !url.is_empty() => {
+            Some((target_page_id.clone(), url.clone()))
+        }
+        Evidence::Page { page_id, url, .. } if page_id == target_page_id && !url.is_empty() => {
+            Some((target_page_id.clone(), url.clone()))
+        }
+        Evidence::Wait {
+            condition: WaitCondition::Url { .. },
+            observed: Some(url),
+            ..
+        } if !url.is_empty() && url.chars().count() < types::MAX_WAIT_OBSERVED_CHARS => {
+            Some((target_page_id.clone(), url.clone()))
+        }
+        Evidence::Screenshot { origin, .. } if origin.page_id.as_ref() == Some(target_page_id) => {
+            origin
+                .url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+                .map(|url| (target_page_id.clone(), url.to_owned()))
+        }
+        Evidence::Popup { .. } | Evidence::ExecutionPath { .. } => None,
+        _ => None,
+    })
 }
 
 /// Evidence that the CDP transport was reattached without losing the page.

@@ -68,9 +68,15 @@ fn worker_command_error(error: types::CommandError) -> RuntimeError {
     }
 }
 
+#[derive(Default)]
+struct PageRegistry {
+    pages: HashMap<PageId, PageState>,
+    closed: HashMap<PageId, SessionId>,
+}
+
 #[derive(Clone, Default)]
 pub struct PageRuntime {
-    inner: Arc<RwLock<HashMap<PageId, PageState>>>,
+    inner: Arc<RwLock<PageRegistry>>,
     journal: Option<Arc<dyn CommandJournal>>,
     workers: Option<Arc<WorkerPool>>,
     checkpoints: Option<CheckpointStore>,
@@ -350,7 +356,7 @@ impl PageRuntime {
                 let revived = match workers.lease(session_id).await {
                     Ok(revived) => revived,
                     Err(error) => {
-                        self.inner.write().await.remove(&page.id);
+                        self.inner.write().await.pages.remove(&page.id);
                         return Err(RuntimeError::Internal(error.message));
                     }
                 };
@@ -360,12 +366,12 @@ impl PageRuntime {
                 {
                     Ok(()) => return Ok(page),
                     Err(retry) => {
-                        self.inner.write().await.remove(&page.id);
+                        self.inner.write().await.pages.remove(&page.id);
                         return Err(worker_command_error(retry));
                     }
                 }
             }
-            self.inner.write().await.remove(&page.id);
+            self.inner.write().await.pages.remove(&page.id);
             return Err(worker_command_error(error));
         }
         Ok(page)
@@ -381,6 +387,7 @@ impl PageRuntime {
             .inner
             .read()
             .await
+            .pages
             .get(page_id)
             .cloned()
             .ok_or_else(|| RuntimeError::NotFound("page".into()))?;
@@ -420,6 +427,7 @@ impl PageRuntime {
         self.inner
             .write()
             .await
+            .pages
             .insert(page.id.clone(), page.clone());
         page
     }
@@ -430,12 +438,14 @@ impl PageRuntime {
         page_id: PageId,
         url: String,
     ) {
-        self.inner.write().await.insert(
+        let mut registry = self.inner.write().await;
+        registry.closed.remove(&page_id);
+        registry.pages.insert(
             page_id.clone(),
             PageState {
                 id: page_id,
                 session_id,
-                url: Some(url),
+                url: (!url.is_empty()).then_some(url),
                 mode: PageMode::Document,
                 ready_state: "interactive".into(),
                 pending_requests: 0,
@@ -443,23 +453,52 @@ impl PageRuntime {
         );
     }
 
-    pub(crate) async fn remove_page(&self, page_id: &PageId) {
-        self.inner.write().await.remove(page_id);
+    pub(crate) async fn close_page(&self, session_id: SessionId, page_id: &PageId) {
+        let mut registry = self.inner.write().await;
+        registry.pages.remove(page_id);
+        registry.closed.insert(page_id.clone(), session_id);
+    }
+
+    pub(crate) async fn sync_listed_pages(
+        &self,
+        session_id: &SessionId,
+        listed: &[types::PageEvidence],
+    ) {
+        let mut registry = self.inner.write().await;
+        for entry in listed {
+            if registry.closed.contains_key(&entry.page_id) {
+                continue;
+            }
+            if !registry.pages.contains_key(&entry.page_id) {
+                registry.pages.insert(
+                    entry.page_id.clone(),
+                    PageState {
+                        id: entry.page_id.clone(),
+                        session_id: session_id.clone(),
+                        url: (!entry.url.is_empty()).then(|| entry.url.clone()),
+                        mode: PageMode::Document,
+                        ready_state: "interactive".into(),
+                        pending_requests: 0,
+                    },
+                );
+            }
+        }
     }
 
     /// Remove every registered page owned by `session_id` under one registry
     /// write lock. Session metadata is not authoritative for reclamation: a
     /// failed or interrupted page-registration update can leave it stale.
     pub async fn remove_session_pages(&self, session_id: &SessionId) -> Vec<PageId> {
-        let mut pages = self.inner.write().await;
+        let mut registry = self.inner.write().await;
         let mut removed = Vec::new();
-        pages.retain(|page_id, page| {
+        registry.pages.retain(|page_id, page| {
             let keep = &page.session_id != session_id;
             if !keep {
                 removed.push(page_id.clone());
             }
             keep
         });
+        registry.closed.retain(|_, owner| owner != session_id);
         removed
     }
 
@@ -467,6 +506,7 @@ impl PageRuntime {
         self.inner
             .read()
             .await
+            .pages
             .get(id)
             .cloned()
             .ok_or_else(|| RuntimeError::NotFound("page".to_string()))
@@ -480,6 +520,7 @@ impl PageRuntime {
     ) -> Result<PageState, RuntimeError> {
         let mut guard = self.inner.write().await;
         let page = guard
+            .pages
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("page".to_string()))?;
         page.url = Some(url);

@@ -372,7 +372,9 @@ impl SkillRecoveryCoordinator {
                 })
             }
             SkillTactic::FreshGhostSession => {
-                self.workers.release_session(&envelope.session_id).await?;
+                self.workers
+                    .invalidate_session(&envelope.session_id)
+                    .await?;
                 Ok(PreparedOwnedTactic::Recovery {
                     checkpoint: Box::new(checkpoint),
                     effect: SkillTacticEffect::SessionReplaced,
@@ -724,7 +726,9 @@ impl SkillRecoveryCoordinator {
                     .verify_unchanged()
                     .await
                     .map_err(recovery_coordinator_error)?;
-                self.workers.release_session(&envelope.session_id).await?;
+                self.workers
+                    .invalidate_session(&envelope.session_id)
+                    .await?;
                 let recovered = self
                     .recovery
                     .recover_locked(verified, false)

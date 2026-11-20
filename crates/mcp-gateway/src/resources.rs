@@ -1244,7 +1244,9 @@ Capabilities: `browser:mutate` only. **Boundary class** -- like
 `recoveryClass` is `boundary`, and whose `boundaryCommandId` is this
 envelope's `commandId`; otherwise it fails with `invalidRequest` before
 clicking. Produces `Evidence::Popup` (`openerPageId`, the new `pageId`, `url`,
-`title`); a run that produces no popup evidence fails with
+`title`) when the popup remains open. If it closes during the command, the
+outcome contains `Evidence::PopupClosed` and the handle remains on the opener.
+A run that produces no popup evidence fails with
 `verificationFailed`. A timeout waiting for the popup is `deadlineExceeded`.
 The flat MCP tool returns compact `postState` from the popup when readable.
 Its `workflowHandle` follows the popup automatically; reuse the handle alone,
