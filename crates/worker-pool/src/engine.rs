@@ -165,6 +165,13 @@ pub trait ObservationEngine: Send + Sync {
     async fn password_manager_prompt(&self, _page_id: &PageId) -> Option<(f64, f64)> {
         None
     }
+
+    /// The page's current URL, read best-effort without mutating page state.
+    /// Default: `None`, leaving `PageRuntime` with whatever URL the command's
+    /// own evidence reported.
+    async fn current_url(&self, _page_id: &PageId) -> Option<String> {
+        None
+    }
 }
 
 #[async_trait]
