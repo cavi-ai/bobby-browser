@@ -146,17 +146,49 @@ async fn popup_opens_as_a_listed_page() {
     let CommandOutcome::Completed { evidence, .. } = outcome else {
         panic!("list_pages did not complete: {outcome:?}")
     };
-    let urls: Vec<String> = evidence
+    let pages = evidence
         .iter()
         .find_map(|item| match item {
-            Evidence::Pages { pages } => Some(pages.iter().map(|page| page.url.clone()).collect()),
+            Evidence::Pages { pages } => Some(pages.clone()),
             _ => None,
         })
         .unwrap_or_default();
+    let urls: Vec<String> = pages.iter().map(|page| page.url.clone()).collect();
     assert_eq!(urls.len(), 2, "expected opener plus popup, got {urls:?}");
+    let popup = pages
+        .iter()
+        .find(|page| page.url.contains("ledger"))
+        .unwrap_or_else(|| panic!("popup URL not listed: {urls:?}"));
+
+    // P0-1: the discovered popup must be registered in PageRuntime and SessionManager
+    // so subsequent commands can address it directly without NotFound.
     assert!(
-        urls.iter().any(|url| url.contains("ledger")),
-        "popup URL not listed: {urls:?}"
+        runtime
+            .sessions
+            .get(&session.id)
+            .await
+            .unwrap()
+            .page_ids
+            .contains(&popup.page_id),
+        "SessionManager.page_ids missing discovered popup"
+    );
+    let inspect_outcome = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(popup.page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
+                types::InspectCommand::default(),
+            )),
+        })
+        .await;
+    assert!(
+        matches!(inspect_outcome, CommandOutcome::Completed { .. }),
+        "discovered popup must be addressable by Inspect: {inspect_outcome:?}"
     );
 
     runtime.sessions.delete(&session.id).await.unwrap();
@@ -212,7 +244,10 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         .create_session(CreateSessionRequest {
             profile: "popup-discovery-close".into(),
             proxy: None,
-            execution_policy: Default::default(),
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+                ..Default::default()
+            },
             zigzagzig: false,
         })
         .await
@@ -292,7 +327,7 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
     // under the eval's own reply, so either a completed eval or a
     // page-not-open failure on *this* call is acceptable; what matters is
     // what `list_pages` says next.
-    let _ = submit(
+    let close_outcome = submit(
         popup_id,
         PrimitiveCommand::EvaluateJavaScript(EvaluateJavaScriptCommand {
             expression: "window.close()".into(),
@@ -301,6 +336,10 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         }),
     )
     .await;
+    assert!(
+        !matches!(close_outcome, CommandOutcome::PolicyDenied { .. }),
+        "window.close() must not be policy-denied: {close_outcome:?}"
+    );
 
     let outcome = submit(
         opener.id.clone(),
@@ -320,6 +359,10 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
     assert!(
         urls.iter().any(|url| url == &opener_url),
         "opener missing from list_pages after the popup closed itself: {urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|url| url.contains("ledger")),
+        "closed popup should no longer appear in list_pages: {urls:?}"
     );
 
     runtime.sessions.delete(&session.id).await.unwrap();
