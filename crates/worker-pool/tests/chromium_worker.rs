@@ -4723,7 +4723,8 @@ async fn navigation_settle_ignores_repeated_text_content_churn() {
         .unwrap();
 
     // Updating el.textContent every 30ms replaces the child Text node via childList
-    // on every tick. With P1-2, this must settle well under the 5s NAVIGATION_SETTLE_CAP.
+    // on every tick. Because repeated text-only mutations are deduplicated during
+    // navigation settle, this must settle well under the 5s NAVIGATION_SETTLE_CAP.
     let server = test_site::FixtureSite::spawn(vec![(
         "/clock",
         test_site::Route::Html(

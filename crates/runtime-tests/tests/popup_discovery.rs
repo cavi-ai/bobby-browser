@@ -160,8 +160,8 @@ async fn popup_opens_as_a_listed_page() {
         .find(|page| page.url.contains("ledger"))
         .unwrap_or_else(|| panic!("popup URL not listed: {urls:?}"));
 
-    // P0-1: the discovered popup must be registered in PageRuntime and SessionManager
-    // so subsequent commands can address it directly without NotFound.
+    // A popup discovered via ListPages must be registered in PageRuntime and
+    // SessionManager so subsequent commands can address it directly without NotFound.
     assert!(
         runtime
             .sessions

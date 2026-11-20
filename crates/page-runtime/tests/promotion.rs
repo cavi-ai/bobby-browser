@@ -973,3 +973,272 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
         "must not corrupt /dashboard with a control from /login"
     );
 }
+
+#[tokio::test]
+async fn failed_navigating_intent_records_failure_under_source_url() {
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use std::path::{Path, PathBuf};
+    use types::{
+        AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, FollowIntent,
+        IntentCommand, IntentHints, RuntimeCommand, SessionId, WorkerId, WorkflowId,
+    };
+    use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
+
+    struct StalledFollowWorker {
+        id: WorkerId,
+        profile: PathBuf,
+        url: tokio::sync::Mutex<String>,
+    }
+
+    #[async_trait]
+    impl BrowserWorker for StalledFollowWorker {
+        fn worker_id(&self) -> WorkerId {
+            self.id.clone()
+        }
+        fn profile_dir(&self) -> &Path {
+            &self.profile
+        }
+        async fn close(&self) -> Result<(), CommandError> {
+            Ok(())
+        }
+        fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+            Some(self)
+        }
+        fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+            Some(self)
+        }
+        fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+            Some(self)
+        }
+        fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+            Some(self)
+        }
+        fn wait_provider(&self) -> Option<&dyn worker_pool::WaitProvider> {
+            Some(self)
+        }
+    }
+
+    struct StalledWaitObserver<'a>(&'a StalledFollowWorker);
+
+    #[async_trait]
+    impl worker_pool::wait::WaitObserver for StalledWaitObserver<'_> {
+        async fn observe(
+            &self,
+            condition: &types::WaitCondition,
+        ) -> Result<worker_pool::wait::WaitObservation, CommandError> {
+            match condition {
+                types::WaitCondition::Url { .. } => Ok(worker_pool::wait::WaitObservation::Url(
+                    self.0.url.lock().await.clone(),
+                )),
+                _ => Ok(worker_pool::wait::WaitObservation::Document("complete".into())),
+            }
+        }
+    }
+
+    impl worker_pool::WaitProvider for StalledFollowWorker {
+        fn observer<'a>(
+            &'a self,
+            _page_id: &'a PageId,
+        ) -> Box<dyn worker_pool::wait::WaitObserver + 'a> {
+            Box::new(StalledWaitObserver(self))
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::TabsEngine for StalledFollowWorker {
+        async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::NavigationEngine for StalledFollowWorker {
+        async fn navigate(
+            &self,
+            _: &PageId,
+            cmd: &types::NavigateCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            *self.url.lock().await = cmd.url.clone();
+            Ok(vec![Evidence::Navigation {
+                url: cmd.url.clone(),
+                title: "Nav".into(),
+            }])
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::ObservationEngine for StalledFollowWorker {
+        async fn inspect(
+            &self,
+            _: &PageId,
+            _: &types::InspectCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            let url = self.url.lock().await.clone();
+            Ok(vec![Evidence::Inspection {
+                selector: None,
+                url,
+                title: "Login".into(),
+                text: "Open dashboard".into(),
+                html: None,
+            }])
+        }
+
+        async fn collect_candidates(
+            &self,
+            _: &PageId,
+            _: &TargetSpec,
+        ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+            Ok(vec![dom_engine::Candidate {
+                id: "c1".into(),
+                css: Some("a#dash".into()),
+                tag: Some("a".into()),
+                test_id: None,
+                role: Some("link".into()),
+                name: Some("Open dashboard".into()),
+                label: Some("Open dashboard".into()),
+                text: "Open dashboard".into(),
+                attributes: BTreeMap::new(),
+                state: dom_engine::CandidateState {
+                    attached: true,
+                    visible: true,
+                    enabled: true,
+                },
+                frame_path: Vec::new(),
+            }])
+        }
+
+        async fn current_url(&self, _: &PageId) -> Option<String> {
+            Some(self.url.lock().await.clone())
+        }
+    }
+
+    #[async_trait]
+    impl worker_pool::InputEngine for StalledFollowWorker {
+        async fn click(
+            &self,
+            page_id: &PageId,
+            _: &types::ClickCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            // Click resolves the control but fails to navigate away from /login.
+            Ok(vec![Evidence::Resolution {
+                target: Box::new(TargetSpec {
+                    role: Some("link".into()),
+                    accessible_name: Some("Open dashboard".into()),
+                    ..TargetSpec::default()
+                }),
+                fingerprint: Box::new(TargetFingerprint {
+                    page_id: page_id.clone(),
+                    frame: None,
+                    role: Some("link".into()),
+                    name: Some("Open dashboard".into()),
+                    stable_attributes: BTreeMap::new(),
+                }),
+                candidates: Vec::new(),
+                best_match_authorized: false,
+            }])
+        }
+        async fn type_text(
+            &self,
+            _: &PageId,
+            _: &types::TypeTextCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StalledFollowFactory {
+        root: PathBuf,
+    }
+
+    #[async_trait]
+    impl WorkerFactory for StalledFollowFactory {
+        async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+            Ok(Arc::new(StalledFollowWorker {
+                id: WorkerId::new(),
+                profile: self.root.clone(),
+                url: tokio::sync::Mutex::new("https://app.example.test/login".into()),
+            }))
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(root.path(), "profile-nav-fail")
+        .await
+        .unwrap();
+    let promotion = Arc::new(ContextPromotion::new(store));
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("commands.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(
+        2,
+        Arc::new(StalledFollowFactory {
+            root: root.path().to_path_buf(),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers)
+        .with_context_promotion(promotion.clone());
+
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    runtime
+        .set_url(&page.id, "https://app.example.test/login".into(), "interactive")
+        .await
+        .unwrap();
+
+    let outcome = runtime
+        .execute(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session,
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
+                purpose: "open dashboard".into(),
+                hints: IntentHints {
+                    accessible_name: Some("Open dashboard".into()),
+                    ..Default::default()
+                },
+                boundary: false,
+                expected_destination: types::WaitForCommand {
+                    condition: types::WaitCondition::Url {
+                        matcher: types::TextMatch::Contains("/dashboard".into()),
+                    },
+                    timeout_ms: 100,
+                },
+            })),
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            CommandOutcome::Failed { .. } | CommandOutcome::NeedsReconciliation { .. }
+        ),
+        "expected failed follow outcome, got {outcome:?}"
+    );
+
+    // Failure must still demote / record failure_count under the source URL (/login).
+    promotion.flush().await;
+    drop(runtime);
+    drop(promotion);
+    let (reopened, _) = ContextStore::open(root.path(), "profile-nav-fail")
+        .await
+        .unwrap();
+    let site = reopened.site("https://example.test").await.unwrap();
+    let login_page = site.pages.get("/login").unwrap_or_else(|| {
+        panic!(
+            "expected failure recorded under /login, got {:?}",
+            site.pages.keys().collect::<Vec<_>>()
+        )
+    });
+    let control = &login_page.forms["page"].controls[0];
+    assert_eq!(control.accessible_name, "Open dashboard");
+    let stats = control.intents.get("follow").unwrap();
+    assert_eq!(stats.failure_count, 1);
+    assert_eq!(stats.success_count, 0);
+    assert!(!site.pages.contains_key("/dashboard"));
+}

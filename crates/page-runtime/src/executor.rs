@@ -655,7 +655,7 @@ impl PageRuntime {
             pre_url.filter(|url| context_store::page_pattern(url).is_some())
         {
             Some(url.to_owned())
-        } else if !is_navigating_intent {
+        } else if !success || !is_navigating_intent {
             self.get(page_id).await.ok().and_then(|page| page.url)
         } else {
             None
