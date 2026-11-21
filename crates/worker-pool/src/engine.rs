@@ -51,6 +51,11 @@ pub trait TabsEngine: Send + Sync {
         Err(unsupported_error())
     }
 
+    /// Pages the engine has positively observed closing in this worker's lifetime.
+    async fn confirmed_closed_pages(&self) -> Vec<PageId> {
+        Vec::new()
+    }
+
     async fn activate_page(
         &self,
         _command: &types::ActivatePageCommand,

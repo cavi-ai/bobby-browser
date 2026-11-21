@@ -168,6 +168,29 @@ impl SessionManager {
         Ok(())
     }
 
+    pub async fn sync_pages(
+        &self,
+        id: &SessionId,
+        live: &[PageId],
+        closed: &[PageId],
+    ) -> Result<(), RuntimeError> {
+        use std::collections::HashSet;
+        let mut guard = self.inner.write().await;
+        let session = guard
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound("session".into()))?;
+        let closed: HashSet<_> = closed.iter().collect();
+        session.page_ids.retain(|page| !closed.contains(page));
+        let mut known: HashSet<_> = session.page_ids.iter().cloned().collect();
+        for page in live {
+            if !closed.contains(page) && known.insert(page.clone()) {
+                session.page_ids.push(page.clone());
+            }
+        }
+        session.last_used_at = types::WireTimestamp::now();
+        Ok(())
+    }
+
     pub async fn remove_page(&self, id: &SessionId, page_id: &PageId) -> Result<(), RuntimeError> {
         let mut guard = self.inner.write().await;
         let session = guard

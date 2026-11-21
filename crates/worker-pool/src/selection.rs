@@ -384,6 +384,13 @@ impl WorkerFactory for PreferenceWorkerFactory {
         Err(last_error.unwrap_or_else(|| policy_error("no browser worker factory is available")))
     }
 
+    async fn finalize_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        for factory in &self.factories {
+            factory.finalize_session(session_id).await?;
+        }
+        Ok(())
+    }
+
     async fn release_session(&self, session_id: &SessionId) {
         let mut launched = self.launched.lock().await;
         if let Some(factory) = launched.get(session_id).cloned() {
@@ -490,6 +497,13 @@ impl WorkerFactory for SelectedWorkerFactory {
 
     async fn release_session(&self, session_id: &SessionId) {
         self.selector.release_session(session_id).await;
+    }
+
+    async fn finalize_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        for registration in &self.selector.registrations {
+            registration.factory.finalize_session(session_id).await?;
+        }
+        Ok(())
     }
 
     async fn shutdown(&self) {

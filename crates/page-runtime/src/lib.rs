@@ -439,7 +439,14 @@ impl PageRuntime {
         url: String,
     ) {
         let mut registry = self.inner.write().await;
-        registry.closed.remove(&page_id);
+        if registry.closed.contains_key(&page_id)
+            || registry
+                .pages
+                .get(&page_id)
+                .is_some_and(|page| page.session_id != session_id)
+        {
+            return;
+        }
         registry.pages.insert(
             page_id.clone(),
             PageState {
@@ -455,8 +462,62 @@ impl PageRuntime {
 
     pub(crate) async fn close_page(&self, session_id: SessionId, page_id: &PageId) {
         let mut registry = self.inner.write().await;
-        registry.pages.remove(page_id);
-        registry.closed.insert(page_id.clone(), session_id);
+        if registry
+            .pages
+            .get(page_id)
+            .is_some_and(|page| page.session_id == session_id)
+        {
+            registry.pages.remove(page_id);
+            registry.closed.insert(page_id.clone(), session_id);
+        }
+    }
+
+    async fn record_confirmed_closed(&self, session_id: &SessionId, closed: &[PageId]) {
+        let mut registry = self.inner.write().await;
+        for id in closed {
+            if registry
+                .pages
+                .get(id)
+                .is_some_and(|page| &page.session_id != session_id)
+                || registry
+                    .closed
+                    .get(id)
+                    .is_some_and(|owner| owner != session_id)
+            {
+                continue;
+            }
+            if registry.pages.remove(id).is_some() {
+                self.context().forget(id);
+            }
+            registry.closed.insert(id.clone(), session_id.clone());
+        }
+    }
+
+    /// Returns authoritative membership and confirmed closures for this session.
+    pub async fn page_membership(
+        &self,
+        session_id: &SessionId,
+        candidates: &[PageId],
+    ) -> (Vec<PageId>, Vec<PageId>) {
+        let registry = self.inner.read().await;
+        (
+            candidates
+                .iter()
+                .filter(|id| {
+                    registry
+                        .pages
+                        .get(*id)
+                        .is_some_and(|page| &page.session_id == session_id)
+                })
+                .cloned()
+                .collect(),
+            registry
+                .closed
+                .iter()
+                .filter(|(_, owner)| *owner == session_id)
+                .map(|(id, _)| id.clone())
+                .collect(),
+        )
     }
 
     pub(crate) async fn sync_listed_pages(
@@ -526,5 +587,37 @@ impl PageRuntime {
         page.url = Some(url);
         page.ready_state = ready_state.to_string();
         Ok(page.clone())
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn confirmed_close_before_first_registration_blocks_stale_listing() {
+        let runtime = PageRuntime::default();
+        let owner = SessionId::new();
+        let other = SessionId::new();
+        let closed = PageId::new();
+        let other_page = runtime.register_page(other.clone()).await;
+        runtime
+            .record_confirmed_closed(&owner, &[closed.clone(), other_page.id.clone()])
+            .await;
+        runtime
+            .sync_listed_pages(
+                &owner,
+                &[types::PageEvidence {
+                    page_id: closed.clone(),
+                    url: "https://example.test".into(),
+                    title: String::new(),
+                }],
+            )
+            .await;
+        assert!(runtime.get(&closed).await.is_err());
+        assert_eq!(runtime.get(&other_page.id).await.unwrap().session_id, other);
+        let (_, tombstones) = runtime.page_membership(&owner, &[]).await;
+        assert!(tombstones.contains(&closed));
+        assert!(!tombstones.contains(&other_page.id));
     }
 }

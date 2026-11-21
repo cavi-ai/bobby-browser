@@ -11,7 +11,7 @@ use crate::worker_failure::is_closed_page_message;
 use crate::{count_a11y_nodes, truncate_a11y_preorder};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, Weak};
 use std::time::{Duration, Instant};
 
 use crate::navigation_settle::{
@@ -55,7 +55,7 @@ use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::AtomicBool;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
@@ -434,6 +434,8 @@ pub struct ChromiumWorkerFactory {
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
+    /// Disposable sessions retained across worker replacement; true means the owned process exited.
+    retained_profiles: Arc<Mutex<HashMap<SessionId, bool>>>,
     /// Credentials its workers fill by name, each on its own origin only.
     credentials: Vec<config::CredentialConfig>,
 }
@@ -452,6 +454,7 @@ impl ChromiumWorkerFactory {
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
+            retained_profiles: Arc::default(),
             credentials: Vec::new(),
         }
     }
@@ -468,6 +471,7 @@ impl ChromiumWorkerFactory {
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
+            retained_profiles: Arc::default(),
             credentials: Vec::new(),
         }
     }
@@ -569,6 +573,24 @@ impl WorkerFactory for ChromiumWorkerFactory {
         vec![crate::EngineFeatureSupport::for_engine(
             companion_protocol::BrowserEngine::Chromium,
         )]
+    }
+
+    async fn finalize_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        let mut retained = self.retained_profiles.lock().await;
+        match retained.get(session_id).copied() {
+            Some(true) => {
+                let profile = self.config.profiles_dir.join(session_id.0.to_string());
+                remove_disposable_profile_dir(&self.config.profiles_dir, session_id, &profile)
+                    .await;
+                retained.remove(session_id);
+                Ok(())
+            }
+            Some(false) => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "cannot dispose Chromium profile before process exit is confirmed",
+            )),
+            None => Ok(()),
+        }
     }
 
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
@@ -692,12 +714,31 @@ impl WorkerFactory for ChromiumWorkerFactory {
             }
         }
 
+        let destroyed_targets = Arc::new(Mutex::new(HashSet::new()));
+        let destroyed_task = match browser.event_listener::<EventTargetDestroyed>().await {
+            Ok(mut events) => {
+                let destroyed = destroyed_targets.clone();
+                Some(tokio::spawn(async move {
+                    while let Some(event) = events.next().await {
+                        destroyed.lock().await.insert(event.target_id.clone());
+                    }
+                }))
+            }
+            Err(_) => None,
+        };
         let behavioral_config = BehavioralConfig::default().sanitize();
+        if disposable_profile {
+            self.retained_profiles
+                .lock()
+                .await
+                .insert(session_id.clone(), false);
+        }
         Ok(Arc::new(ChromiumWorker {
             id: worker_id,
             profile_dir,
             profiles_root: self.config.profiles_dir.clone(),
             disposable_profile,
+            retained_profiles: self.retained_profiles.clone(),
             created_profile,
             pid_registry_path,
             debug_ws_url: Some(browser.websocket_address().clone()),
@@ -716,13 +757,18 @@ impl WorkerFactory for ChromiumWorkerFactory {
             max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
             shared_browser,
-            pages: Mutex::new(HashMap::new()),
-            closed_targets: Mutex::new(HashSet::new()),
-            network_trackers: Mutex::new(HashMap::new()),
-            har_recorders: Mutex::new(HashMap::new()),
-            har_tasks: Mutex::new(HashMap::new()),
+            pages: Arc::new(Mutex::new(HashMap::new())),
+            closed_targets: Arc::new(Mutex::new(HashSet::new())),
+            target_gates: Arc::new(Mutex::new(HashMap::new())),
+            creation_gate: Arc::new(Mutex::new(())),
+            confirmed_closed: Arc::new(Mutex::new(HashSet::new())),
+            destroyed_targets,
+            destroyed_task: Mutex::new(destroyed_task),
+            network_trackers: Arc::new(Mutex::new(HashMap::new())),
+            har_recorders: Arc::new(Mutex::new(HashMap::new())),
+            har_tasks: Arc::new(Mutex::new(HashMap::new())),
             pending_dialogs: Arc::new(Mutex::new(HashMap::new())),
-            dialog_tasks: Mutex::new(HashMap::new()),
+            dialog_tasks: Arc::new(Mutex::new(HashMap::new())),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
             fingerprint: Mutex::new(self.fingerprint.clone()),
@@ -821,6 +867,7 @@ struct ChromiumWorker {
     profile_dir: PathBuf,
     profiles_root: PathBuf,
     disposable_profile: bool,
+    retained_profiles: Arc<Mutex<HashMap<SessionId, bool>>>,
     created_profile: bool,
     /// Path of this worker's entry in the orphan-reaping PID registry
     /// (`None` if we couldn't determine the child PID at launch). Removed
@@ -843,13 +890,20 @@ struct ChromiumWorker {
     /// The browser serves every session on a durable profile: this worker
     /// owns only its pages and never closes the browser.
     shared_browser: bool,
-    pages: Mutex<HashMap<PageId, Page>>,
-    /// Targets this worker closed, kept until the browser reaps them so
-    /// `sync_untracked_pages` does not re-adopt a page that is on its way out.
-    closed_targets: Mutex<HashSet<TargetId>>,
-    network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
-    har_recorders: Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>,
-    har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
+    pages: Arc<Mutex<HashMap<PageId, Page>>>,
+    /// Targets closed during this worker's lifetime. Retaining these prevents
+    /// a stale concurrent browser listing from re-adopting a closed page.
+    closed_targets: Arc<Mutex<HashSet<TargetId>>>,
+    /// Serializes registration and closure of one target without blocking other tabs.
+    target_gates: Arc<Mutex<HashMap<TargetId, Weak<Mutex<()>>>>>,
+    /// Coordinates discovery with creation until the new target has an identity.
+    creation_gate: Arc<Mutex<()>>,
+    confirmed_closed: Arc<Mutex<HashSet<PageId>>>,
+    destroyed_targets: Arc<Mutex<HashSet<TargetId>>>,
+    destroyed_task: Mutex<Option<JoinHandle<()>>>,
+    network_trackers: Arc<Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>>,
+    har_recorders: Arc<Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>>,
+    har_tasks: Arc<Mutex<HashMap<PageId, JoinHandle<()>>>>,
     /// Dialogs (`alert`/`confirm`/`prompt`) that opened on a page before a
     /// client called `dialog`, keyed by page. `install_dialog_listener`
     /// spawns a background task per registered page that records the latest
@@ -858,7 +912,7 @@ struct ChromiumWorker {
     /// open, so waiting for a *future* `EventJavascriptDialogOpening` (the
     /// old behavior) hangs forever.
     pending_dialogs: Arc<Mutex<HashMap<PageId, Arc<EventJavascriptDialogOpening>>>>,
-    dialog_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
+    dialog_tasks: Arc<Mutex<HashMap<PageId, JoinHandle<()>>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
     fingerprint: Mutex<FingerprintConfig>,
@@ -880,15 +934,105 @@ struct ChromiumWorker {
     input_gate: Mutex<()>,
 }
 
+async fn target_gate_for(
+    gates: &Mutex<HashMap<TargetId, Weak<Mutex<()>>>>,
+    target: &TargetId,
+) -> Arc<Mutex<()>> {
+    let mut gates = gates.lock().await;
+    if let Some(gate) = gates.get(target).and_then(Weak::upgrade) {
+        return gate;
+    }
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(target.clone(), Arc::downgrade(&gate));
+    gate
+}
+
+/// Owns a newly created target until its successful result is exposed.
+struct ChromiumOpenGuard {
+    page: Option<Page>,
+    page_id: PageId,
+    creation_permit: Option<OwnedMutexGuard<()>>,
+    pages: Arc<Mutex<HashMap<PageId, Page>>>,
+    closed: Arc<Mutex<HashSet<TargetId>>>,
+    confirmed_closed: Arc<Mutex<HashSet<PageId>>>,
+    destroyed: Arc<Mutex<HashSet<TargetId>>>,
+    gates: Arc<Mutex<HashMap<TargetId, Weak<Mutex<()>>>>>,
+    trackers: Arc<Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>>,
+    dialogs: Arc<Mutex<HashMap<PageId, JoinHandle<()>>>>,
+    recorders: Arc<Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>>,
+    har_tasks: Arc<Mutex<HashMap<PageId, JoinHandle<()>>>>,
+    pending: Arc<Mutex<HashMap<PageId, Arc<EventJavascriptDialogOpening>>>>,
+}
+
+impl Drop for ChromiumOpenGuard {
+    fn drop(&mut self) {
+        let Some(page) = self.page.take() else { return };
+        let id = self.page_id.clone();
+        let creation_permit = self.creation_permit.take();
+        let pages = self.pages.clone();
+        let closed = self.closed.clone();
+        let confirmed_closed = self.confirmed_closed.clone();
+        let destroyed = self.destroyed.clone();
+        let recorders = self.recorders.clone();
+        let har_tasks = self.har_tasks.clone();
+        let gates = self.gates.clone();
+        let trackers = self.trackers.clone();
+        let dialogs = self.dialogs.clone();
+        let pending = self.pending.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _creation_permit = creation_permit;
+                let target = page.target_id().clone();
+                let gate = target_gate_for(&gates, &target).await;
+                let _guard = gate.lock().await;
+                let close = tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, page.close()).await;
+                if !matches!(close, Ok(Ok(()))) && !destroyed.lock().await.contains(&target) {
+                    tracing::warn!(target = ?target, "cancelled page cleanup did not confirm closure");
+                    return;
+                }
+                closed.lock().await.insert(target.clone());
+                let ids: Vec<_> = {
+                    let mut pages = pages.lock().await;
+                    let ids = pages
+                        .iter()
+                        .filter(|(_, p)| p.target_id() == &target)
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    for id in &ids {
+                        pages.remove(id);
+                    }
+                    ids
+                };
+                confirmed_closed.lock().await.extend(ids.iter().cloned());
+                for page_id in ids.iter().chain(std::iter::once(&id)) {
+                    trackers.lock().await.remove(page_id);
+                    pending.lock().await.remove(page_id);
+                    if let Some(task) = dialogs.lock().await.remove(page_id) { task.abort(); }
+                    recorders.lock().await.remove(page_id);
+                    if let Some(task) = har_tasks.lock().await.remove(page_id) { task.abort(); }
+                }
+            });
+        }
+    }
+}
+
 impl Drop for ChromiumWorker {
     fn drop(&mut self) {
-        for (_, task) in self.har_tasks.get_mut().drain() {
-            task.abort();
+        if let Ok(mut tasks) = self.har_tasks.try_lock() {
+            for (_, task) in tasks.drain() {
+                task.abort();
+            }
         }
-        for (_, task) in self.dialog_tasks.get_mut().drain() {
-            task.abort();
+        if let Ok(mut tasks) = self.dialog_tasks.try_lock() {
+            for (_, task) in tasks.drain() {
+                task.abort();
+            }
         }
         if let Some(task) = self.handler_task.get_mut().take() {
+            task.abort();
+        }
+        if let Some(task) = self.destroyed_task.get_mut().take() {
             task.abort();
         }
     }
@@ -976,10 +1120,19 @@ impl ChromiumWorker {
         if let Some(task) = self.handler_task.lock().await.take() {
             task.abort();
         }
+        if let Some(task) = self.destroyed_task.lock().await.take() {
+            task.abort();
+        }
         if result.is_ok() {
             self.upload_cache.lock().await.clear();
             if let Some(path) = &self.pid_registry_path {
                 unregister_chrome_pid(path);
+            }
+            if self.disposable_profile && !self.shared_browser {
+                self.retained_profiles
+                    .lock()
+                    .await
+                    .insert(self.session_id.clone(), true);
             }
             if remove_profile && self.disposable_profile && !self.shared_browser {
                 remove_disposable_profile_dir(
@@ -988,6 +1141,16 @@ impl ChromiumWorker {
                     &self.profile_dir,
                 )
                 .await;
+                if tokio::fs::try_exists(&self.profile_dir)
+                    .await
+                    .unwrap_or(true)
+                {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "failed to remove disposable Chromium profile",
+                    ));
+                }
+                self.retained_profiles.lock().await.remove(&self.session_id);
             }
         }
         result
@@ -1009,30 +1172,34 @@ impl ChromiumWorker {
         if !page.is_closed() {
             return Ok(page);
         }
-        // The handle's channel is dead (renderer crash or target hiccup).
-        // Re-attach to the live target if it still exists; if it is truly
-        // gone, drop the registration so the caller gets a clean notFound
-        // instead of a dead handle.
-        let target_id = page.target_id().clone();
-        let reattached = match self.browser_handle().await {
-            Ok(browser) => browser.get_page(target_id).await.ok(),
-            Err(_) => None,
-        };
-        match reattached {
-            Some(fresh) => {
-                let (_, recorder) = self.unregister_page_state(page_id, true).await;
-                self.register_page(page_id.clone(), fresh.clone()).await?;
-                if let Some(recorder) = recorder {
-                    self.install_har_collector(page_id, fresh.clone(), Some(recorder))
-                        .await?;
-                }
-                Ok(fresh)
-            }
-            None => {
-                self.unregister_page(page_id).await;
-                Err(page_missing())
-            }
+        let target = page.target_id().clone();
+        let gate = self.target_gate(&target).await;
+        let _target_guard = gate.lock().await;
+        let current = self
+            .pages
+            .lock()
+            .await
+            .get(page_id)
+            .cloned()
+            .ok_or_else(page_missing)?;
+        if !current.is_closed() {
+            return Ok(current);
         }
+        if self.destroyed_targets.lock().await.contains(&target) {
+            self.closed_targets.lock().await.insert(target);
+            self.unregister_page(page_id).await;
+            self.confirmed_closed.lock().await.insert(page_id.clone());
+            return Err(page_missing());
+        }
+        let fresh = self
+            .browser_handle()
+            .await?
+            .get_page(target)
+            .await
+            .map_err(command_failed)?;
+        self.replace_page_handle_locked(page_id, fresh.clone())
+            .await?;
+        Ok(fresh)
     }
 
     /// Clone a handle to the live browser and release the mutex immediately.
@@ -1562,7 +1729,81 @@ impl ChromiumWorker {
         resolve_browser_target(page_id, page, selector, target, Some(&browser)).await
     }
 
-    async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
+    async fn create_guarded_page(
+        &self,
+        page_id: PageId,
+    ) -> Result<ChromiumOpenGuard, CommandError> {
+        let browser = self.browser_handle().await?;
+        let gate = self.creation_gate.clone();
+        let headless = self.headless;
+        let mut guard = ChromiumOpenGuard {
+            page: None,
+            page_id,
+            creation_permit: None,
+            pages: self.pages.clone(),
+            closed: self.closed_targets.clone(),
+            confirmed_closed: self.confirmed_closed.clone(),
+            destroyed: self.destroyed_targets.clone(),
+            gates: self.target_gates.clone(),
+            trackers: self.network_trackers.clone(),
+            dialogs: self.dialog_tasks.clone(),
+            recorders: self.har_recorders.clone(),
+            har_tasks: self.har_tasks.clone(),
+            pending: self.pending_dialogs.clone(),
+        };
+        tokio::spawn(async move {
+            guard.creation_permit = Some(gate.lock_owned().await);
+            let page = browser
+                .new_page(blank_page(headless))
+                .await
+                .map_err(command_failed)?;
+            guard.page = Some(page);
+            Ok(guard)
+        })
+        .await
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?
+    }
+
+    async fn target_gate(&self, target: &TargetId) -> Arc<Mutex<()>> {
+        target_gate_for(&self.target_gates, target).await
+    }
+
+    async fn register_page(&self, page_id: PageId, page: Page) -> Result<PageId, CommandError> {
+        let target = page.target_id().clone();
+        let gate = self.target_gate(&target).await;
+        let _target_guard = gate.lock().await;
+        if self.closed_targets.lock().await.contains(&target) {
+            return Err(page_missing());
+        }
+        if let Some(existing) = self
+            .pages
+            .lock()
+            .await
+            .iter()
+            .find_map(|(id, known)| (known.target_id() == &target).then(|| id.clone()))
+        {
+            return Ok(existing);
+        }
+        self.install_page_handle(page_id.clone(), page).await?;
+        Ok(page_id)
+    }
+
+    async fn replace_page_handle_locked(
+        &self,
+        page_id: &PageId,
+        fresh: Page,
+    ) -> Result<(), CommandError> {
+        let recorder = self.har_recorders.lock().await.get(page_id).cloned();
+        self.install_page_handle(page_id.clone(), fresh.clone())
+            .await?;
+        if let Some(recorder) = recorder {
+            self.install_har_collector(page_id, fresh, Some(recorder))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn install_page_handle(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
         self.apply_fingerprint_to_page(&page).await?;
         // Every page acts as the focused one: a page whose window does not
         // hold focus otherwise holds back its focus events.
@@ -1736,6 +1977,24 @@ impl ChromiumWorker {
         self.unregister_page_state(page_id, false).await.0
     }
 
+    async fn forget_closed_page(&self, page_id: &PageId, target: &TargetId) {
+        let gate = self.target_gate(target).await;
+        let _guard = gate.lock().await;
+        self.closed_targets.lock().await.insert(target.clone());
+        let ids: Vec<_> = self
+            .pages
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, page)| page.target_id() == target)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids.iter().chain(std::iter::once(page_id)) {
+            self.unregister_page(id).await;
+        }
+        self.confirmed_closed.lock().await.extend(ids);
+    }
+
     /// Register page targets the runtime did not open — popups from
     /// `window.open` and any other tab the site spawned. A browser of its own
     /// serves one session, so an untracked page target belongs to it; on a
@@ -1747,6 +2006,7 @@ impl ChromiumWorker {
             return Ok(());
         };
         let mut live = browser.pages().await.map_err(command_failed)?;
+        let _discovery = self.creation_gate.lock().await;
         if self.shared_browser {
             let mut owned: HashSet<TargetId> = self
                 .pages
@@ -1776,13 +2036,8 @@ impl ChromiumWorker {
         // `Page.close` is acknowledged before the browser finishes destroying
         // the target, so a page this worker just closed can still sit in the
         // handler's target cache. Tombstones keep it from being resurrected
-        // here as an "untracked" page, and are dropped once the target is
-        // actually gone.
-        let closed = {
-            let mut closed = self.closed_targets.lock().await;
-            closed.retain(|target| live.iter().any(|page| page.target_id() == target));
-            closed.clone()
-        };
+        // here as an "untracked" page, including from an older listing.
+        let closed = self.closed_targets.lock().await.clone();
         for page in live {
             if closed.contains(page.target_id()) {
                 continue;
@@ -1812,7 +2067,7 @@ impl ChromiumWorker {
                 // not a page of this session: skip it instead of failing the
                 // whole listing.
                 if let Err(error) = self.register_page(PageId::new(), page).await {
-                    if is_closed_page_message(&error.message) {
+                    if error.code == ErrorCode::NotFound || is_closed_page_message(&error.message) {
                         continue;
                     }
                     return Err(error);
@@ -1887,11 +2142,22 @@ impl ChromiumWorker {
         };
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
         *self.handler_task.lock().await = Some(handler_task);
+        if let Some(task) = self.destroyed_task.lock().await.take() {
+            task.abort();
+        }
+        if let Ok(mut events) = fresh.event_listener::<EventTargetDestroyed>().await {
+            let destroyed = self.destroyed_targets.clone();
+            *self.destroyed_task.lock().await = Some(tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    destroyed.lock().await.insert(event.target_id.clone());
+                }
+            }));
+        }
         // Swap the fresh connection in, then reconcile the page registry.
         // The old page handles reference the dead browser's channels: each
         // tracked page is re-resolved against the live browser by target id.
-        // A target that died WITH the transport (renderer crash alongside the
-        // reset) is dropped, so page_handle reports a clean page_missing.
+        // A confirmed target destruction removes its registration; a transport
+        // error alone leaves the existing identity intact.
         let tracked: Vec<(
             PageId,
             chromiumoxide::cdp::browser_protocol::target::TargetId,
@@ -1904,21 +2170,27 @@ impl ChromiumWorker {
         };
         *self.browser.lock().await = Some(fresh);
         {
-            let mut pages = self.pages.lock().await;
-            pages.clear();
-        }
-        {
             let handle = self.browser_handle().await?;
             for (page_id, target_id) in tracked {
-                match handle.get_page(target_id).await {
-                    Ok(live) => {
-                        self.register_page(page_id, live).await?;
-                    }
-                    Err(_) => {
-                        // Target lost with the transport: drop the page so
-                        // callers get notFound instead of a stale handle.
+                let gate = self.target_gate(&target_id).await;
+                let _target_guard = gate.lock().await;
+                if !self
+                    .pages
+                    .lock()
+                    .await
+                    .get(&page_id)
+                    .is_some_and(|page| page.target_id() == &target_id)
+                {
+                    continue;
+                }
+                match handle.get_page(target_id.clone()).await {
+                    Ok(live) => self.replace_page_handle_locked(&page_id, live).await?,
+                    Err(_) if self.destroyed_targets.lock().await.contains(&target_id) => {
+                        self.closed_targets.lock().await.insert(target_id);
                         self.unregister_page_state(&page_id, true).await;
+                        self.confirmed_closed.lock().await.insert(page_id);
                     }
+                    Err(error) => return Err(reattach_failed(format!("target reattach: {error}"))),
                 }
             }
         }
@@ -2142,31 +2414,31 @@ impl crate::SessionSettings for ChromiumWorker {
 #[async_trait]
 impl crate::TabsEngine for ChromiumWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        let browser = self.browser_handle().await?;
-        let page = browser
-            .new_page(blank_page(self.headless))
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        self.register_page(page_id, page).await
+        let mut guard = self.create_guarded_page(page_id.clone()).await?;
+        let page = guard.page.as_ref().expect("created page").clone();
+        let registered = self.register_page(page_id.clone(), page).await?;
+        if registered != page_id {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "page identity changed during creation",
+            ));
+        }
+        guard.creation_permit.take();
+        guard.page = None;
+        Ok(())
     }
 
     async fn open_page_command(
         &self,
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let page_id = PageId::new();
-        let browser = self.browser_handle().await?;
-        // Always start blank so init scripts register before first real document.
-        let page = browser
-            .new_page(blank_page(self.headless))
-            .await
-            .map_err(command_failed)?;
-        let target_id = page.target_id().clone();
-        if let Err(error) = self.register_page(page_id.clone(), page.clone()).await {
-            self.closed_targets.lock().await.insert(target_id);
-            let _ = page.close().await;
-            return Err(error);
-        }
+        let mut guard = self.create_guarded_page(PageId::new()).await?;
+        let page = guard.page.as_ref().expect("created page").clone();
+        let page_id = self
+            .register_page(guard.page_id.clone(), page.clone())
+            .await?;
+        guard.page_id = page_id.clone();
+        guard.creation_permit.take();
         if let Some(url) = command.url.as_deref() {
             let nav_result = tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, page.goto(url))
                 .await
@@ -2176,16 +2448,12 @@ impl crate::TabsEngine for ChromiumWorker {
                     )
                 })
                 .and_then(|res| res.map_err(|error| navigation_failed(url, error)));
-            if let Err(error) = nav_result {
-                self.unregister_page(&page_id).await;
-                self.closed_targets.lock().await.insert(target_id);
-                let _ = page.close().await;
-                return Err(error);
-            }
+            nav_result?;
             let tracker = self.network_trackers.lock().await.get(&page_id).cloned();
             if let Some((settled_url, title)) =
                 settle_document(&page, NAVIGATION_SETTLE_CAP, url, tracker.as_deref()).await
             {
+                guard.page = None;
                 return Ok(vec![Evidence::Page {
                     page_id,
                     url: settled_url,
@@ -2194,17 +2462,15 @@ impl crate::TabsEngine for ChromiumWorker {
             }
         }
         match page_evidence(page_id.clone(), &page).await {
-            Ok(evidence) => Ok(vec![Evidence::Page {
-                page_id: evidence.page_id,
-                url: evidence.url,
-                title: evidence.title,
-            }]),
-            Err(error) => {
-                self.unregister_page(&page_id).await;
-                self.closed_targets.lock().await.insert(target_id);
-                let _ = page.close().await;
-                Err(error)
+            Ok(evidence) => {
+                guard.page = None;
+                Ok(vec![Evidence::Page {
+                    page_id: evidence.page_id,
+                    url: evidence.url,
+                    title: evidence.title,
+                }])
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -2219,10 +2485,25 @@ impl crate::TabsEngine for ChromiumWorker {
             .collect();
         let mut listed = Vec::with_capacity(handles.len());
         for (page_id, page) in handles {
+            if self
+                .destroyed_targets
+                .lock()
+                .await
+                .contains(page.target_id())
+            {
+                self.forget_closed_page(&page_id, page.target_id()).await;
+                continue;
+            }
             match page_evidence(page_id.clone(), &page).await {
                 Ok(evidence) => listed.push(evidence),
-                Err(error) if is_closed_page_message(&error.message) => {
-                    self.unregister_page(&page_id).await;
+                Err(_error)
+                    if self
+                        .destroyed_targets
+                        .lock()
+                        .await
+                        .contains(page.target_id()) =>
+                {
+                    self.forget_closed_page(&page_id, page.target_id()).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -2231,29 +2512,73 @@ impl crate::TabsEngine for ChromiumWorker {
         Ok(vec![Evidence::Pages { pages: listed }])
     }
 
+    async fn confirmed_closed_pages(&self) -> Vec<PageId> {
+        self.confirmed_closed.lock().await.iter().cloned().collect()
+    }
+
     async fn close_page_command(
         &self,
         command: &ClosePageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self
-            .unregister_page(&command.page_id)
-            .await
-            .ok_or_else(page_missing)?;
-        // The tab closes even when its url and title cannot be read.
-        let evidence = page_evidence(command.page_id.clone(), &page).await.ok();
-        self.closed_targets
+        let id = command.page_id.clone();
+        let target = self
+            .pages
             .lock()
             .await
-            .insert(page.target_id().clone());
-        page.close().await.map_err(command_failed)?;
-        let (url, title) = evidence
-            .map(|evidence| (evidence.url, evidence.title))
-            .unwrap_or_default();
-        Ok(vec![Evidence::Page {
-            page_id: command.page_id.clone(),
-            url,
-            title,
-        }])
+            .get(&id)
+            .map(|page| page.target_id().clone())
+            .ok_or_else(page_missing)?;
+        let gate = self.target_gate(&target).await;
+        let pages = self.pages.clone();
+        let closed = self.closed_targets.clone();
+        let confirmed = self.confirmed_closed.clone();
+        let destroyed = self.destroyed_targets.clone();
+        let trackers = self.network_trackers.clone();
+        let dialogs = self.dialog_tasks.clone();
+        let pending = self.pending_dialogs.clone();
+        let recorders = self.har_recorders.clone();
+        let tasks = self.har_tasks.clone();
+        tokio::spawn(async move {
+            let _target_guard = gate.lock().await;
+            let page = pages
+                .lock()
+                .await
+                .get(&id)
+                .cloned()
+                .ok_or_else(page_missing)?;
+            let evidence = page_evidence(id.clone(), &page).await.ok();
+            let close = tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, page.close()).await;
+            let acknowledged = matches!(close, Ok(Ok(())));
+            if !acknowledged && !destroyed.lock().await.contains(&target) {
+                return match close {
+                    Ok(Err(error)) => Err(command_failed(error)),
+                    Err(_) => Err(timeout_error(DEFAULT_CDP_CALL_TIMEOUT.as_millis() as u64)),
+                    Ok(Ok(())) => unreachable!(),
+                };
+            }
+            closed.lock().await.insert(target);
+            pages.lock().await.remove(&id);
+            confirmed.lock().await.insert(id.clone());
+            trackers.lock().await.remove(&id);
+            pending.lock().await.remove(&id);
+            if let Some(task) = dialogs.lock().await.remove(&id) {
+                task.abort();
+            }
+            recorders.lock().await.remove(&id);
+            if let Some(task) = tasks.lock().await.remove(&id) {
+                task.abort();
+            }
+            let (url, title) = evidence
+                .map(|evidence| (evidence.url, evidence.title))
+                .unwrap_or_default();
+            Ok(vec![Evidence::Page {
+                page_id: id,
+                url,
+                title,
+            }])
+        })
+        .await
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?
     }
 
     async fn activate_page(
@@ -3560,7 +3885,7 @@ impl crate::EventsEngine for ChromiumWorker {
             })
             .await
             .map_err(|_| timeout_error(command.timeout_ms))??;
-        let popup_id = PageId::new();
+        let mut popup_id = PageId::new();
         let popup = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
             loop {
                 tokio::select! {
@@ -3580,10 +3905,8 @@ impl crate::EventsEngine for ChromiumWorker {
             }
         }).await.map_err(|_| timeout_error(command.timeout_ms))??;
         let Some(popup) = popup else {
-            self.closed_targets
-                .lock()
-                .await
-                .insert(event.target_info.target_id.clone());
+            self.forget_closed_page(&popup_id, &event.target_info.target_id)
+                .await;
             return Ok(vec![
                 Evidence::PopupClosed {
                     opener_page_id: page_id.clone(),
@@ -3604,12 +3927,10 @@ impl crate::EventsEngine for ChromiumWorker {
                 return Err(timeout_error(command.timeout_ms));
             }
         };
-        if let Err(error) = registered {
-            if is_closed_page_message(&error.message) {
-                self.closed_targets
-                    .lock()
-                    .await
-                    .insert(event.target_info.target_id.clone());
+        if let Err(error) = &registered {
+            if error.code == ErrorCode::NotFound || is_closed_page_message(&error.message) {
+                self.forget_closed_page(&popup_id, &event.target_info.target_id)
+                    .await;
                 return Ok(vec![
                     Evidence::PopupClosed {
                         opener_page_id: page_id.clone(),
@@ -3618,8 +3939,9 @@ impl crate::EventsEngine for ChromiumWorker {
                     resolved.evidence,
                 ]);
             }
-            return Err(error);
+            return Err(error.clone());
         }
+        popup_id = registered.expect("registration checked above");
         let tracker = self.network_trackers.lock().await.get(&popup_id).cloned();
         let remaining = deadline.saturating_duration_since(Instant::now());
         let settled = tokio::time::timeout_at(
@@ -3642,11 +3964,8 @@ impl crate::EventsEngine for ChromiumWorker {
             {
                 Ok(Ok(page)) => (page.url, page.title),
                 Ok(Err(error)) if popup.is_closed() || is_closed_page_message(&error.message) => {
-                    self.unregister_page(&popup_id).await;
-                    self.closed_targets
-                        .lock()
-                        .await
-                        .insert(event.target_info.target_id.clone());
+                    self.forget_closed_page(&popup_id, &event.target_info.target_id)
+                        .await;
                     return Ok(vec![
                         Evidence::PopupClosed {
                             opener_page_id: page_id.clone(),
@@ -3664,11 +3983,8 @@ impl crate::EventsEngine for ChromiumWorker {
             Err(_) => (event.target_info.url.clone(), String::new()),
         };
         if popup.is_closed() {
-            self.unregister_page(&popup_id).await;
-            self.closed_targets
-                .lock()
-                .await
-                .insert(event.target_info.target_id.clone());
+            self.forget_closed_page(&popup_id, &event.target_info.target_id)
+                .await;
             return Ok(vec![
                 Evidence::PopupClosed {
                     opener_page_id: page_id.clone(),
@@ -5866,6 +6182,7 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::{
         clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
@@ -6159,6 +6476,7 @@ mod tests {
             profile_dir: root.join("profile"),
             profiles_root: root.to_path_buf(),
             disposable_profile: false,
+            retained_profiles: Arc::default(),
             created_profile: false,
             pid_registry_path: None,
             debug_ws_url: None,
@@ -6173,13 +6491,18 @@ mod tests {
             max_js_timeout_ms: 1_000,
             browser: super::Mutex::new(None),
             shared_browser: false,
-            pages: super::Mutex::new(super::HashMap::new()),
-            closed_targets: super::Mutex::new(super::HashSet::new()),
-            network_trackers: super::Mutex::new(super::HashMap::new()),
-            har_recorders: super::Mutex::new(super::HashMap::new()),
-            har_tasks: super::Mutex::new(super::HashMap::new()),
+            pages: Arc::new(super::Mutex::new(super::HashMap::new())),
+            closed_targets: Arc::new(super::Mutex::new(super::HashSet::new())),
+            target_gates: Arc::new(super::Mutex::new(super::HashMap::new())),
+            creation_gate: Arc::new(super::Mutex::new(())),
+            confirmed_closed: Arc::new(super::Mutex::new(super::HashSet::new())),
+            destroyed_targets: Arc::new(super::Mutex::new(super::HashSet::new())),
+            destroyed_task: super::Mutex::new(None),
+            network_trackers: Arc::new(super::Mutex::new(super::HashMap::new())),
+            har_recorders: Arc::new(super::Mutex::new(super::HashMap::new())),
+            har_tasks: Arc::new(super::Mutex::new(super::HashMap::new())),
             pending_dialogs: super::Arc::new(super::Mutex::new(super::HashMap::new())),
-            dialog_tasks: super::Mutex::new(super::HashMap::new()),
+            dialog_tasks: Arc::new(super::Mutex::new(super::HashMap::new())),
             http_state: super::Mutex::new(HttpBridgeState::default()),
             handler_task: super::Mutex::new(None),
             fingerprint: super::Mutex::new(fingerprint.clone()),
@@ -6909,6 +7232,71 @@ mod tests {
             super::ChromiumWorkerFactory::with_pid_registry_dir(config, root.path().join("pids"));
         assert!(factory.launch(&session).await.is_err());
         assert_eq!(std::fs::read(profile.join("sentinel")).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn target_gates_are_shared_per_target_and_reclaimed() {
+        let gates = super::Mutex::new(super::HashMap::new());
+        let first = super::TargetId::new("first");
+        let second = super::TargetId::new("second");
+        let one = super::target_gate_for(&gates, &first).await;
+        let again = super::target_gate_for(&gates, &first).await;
+        assert!(Arc::ptr_eq(&one, &again));
+        drop(one);
+        drop(again);
+        let _other = super::target_gate_for(&gates, &second).await;
+        assert!(!gates.lock().await.contains_key(&first));
+    }
+
+    #[tokio::test]
+    async fn final_disposal_retains_ownership_after_failed_relaunch() {
+        use crate::WorkerFactory;
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let profiles = root.path().join("profiles");
+        let profile = profiles.join(session.0.to_string());
+        std::fs::create_dir_all(&profile).unwrap();
+        let factory = super::ChromiumWorkerFactory::with_pid_registry_dir(
+            config::BrowserConfig {
+                executable: Some(root.path().join("missing")),
+                profiles_dir: profiles,
+                downloads_dir: root.path().join("downloads"),
+                ..Default::default()
+            },
+            root.path().join("pids"),
+        );
+        factory
+            .retained_profiles
+            .lock()
+            .await
+            .insert(session.clone(), true);
+        assert!(factory.launch(&session).await.is_err());
+        assert!(profile.exists());
+        factory.finalize_session(&session).await.unwrap();
+        assert!(!profile.exists());
+    }
+
+    #[tokio::test]
+    async fn final_disposal_refuses_unconfirmed_process_exit() {
+        use crate::WorkerFactory;
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let profile = root.path().join("profiles").join(session.0.to_string());
+        std::fs::create_dir_all(&profile).unwrap();
+        let factory = super::ChromiumWorkerFactory::with_pid_registry_dir(
+            config::BrowserConfig {
+                profiles_dir: root.path().join("profiles"),
+                ..Default::default()
+            },
+            root.path().join("pids"),
+        );
+        factory
+            .retained_profiles
+            .lock()
+            .await
+            .insert(session.clone(), false);
+        assert!(factory.finalize_session(&session).await.is_err());
+        assert!(profile.exists());
     }
 
     #[tokio::test]
