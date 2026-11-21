@@ -918,13 +918,21 @@ impl RuntimeService {
                     }
                 }
                 Some(PageLifecycleSync::ListPages) => {
-                    for item in evidence {
-                        if let Evidence::Pages { pages } = item {
-                            for page in pages {
-                                let _ = self.sync_live_page(&session_id, &page.page_id).await;
+                    let candidates = evidence
+                        .iter()
+                        .filter_map(|item| match item {
+                            Evidence::Pages { pages } => {
+                                Some(pages.iter().map(|page| page.page_id.clone()))
                             }
-                        }
-                    }
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    let (live, closed) = self.pages.page_membership(&session_id, &candidates).await;
+                    let _ = self.sessions.sync_pages(&session_id, &live, &closed).await;
+                    // A close racing the first snapshot must win over this update.
+                    let (_, closed) = self.pages.page_membership(&session_id, &[]).await;
+                    let _ = self.sessions.sync_pages(&session_id, &[], &closed).await;
                 }
                 Some(PageLifecycleSync::ClosePage(page_id)) => {
                     let _ = self.sessions.remove_page(&session_id, &page_id).await;

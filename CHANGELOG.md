@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.27.0
+
+### Fixed
+
+- Chromium tab IDs remain stable when tabs are discovered concurrently.
+- Self-closed Chromium tabs are removed from the tab inventory.
+- Disposable Chromium profiles are cleaned up when the session ends, including after a worker replacement.
+- The Rust SDK validates outcome status against the HTTP response and keeps credentials out of debug and transport errors.
+- `WireTimestamp` rejects instants below its earliest supported UTC timestamp, including subsecond offsets.
+- The Python SDK escapes slashes in context site keys.
+
 ## 0.26.0 - 2026-11-16
 
 ### Changed

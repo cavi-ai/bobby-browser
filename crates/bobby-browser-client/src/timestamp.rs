@@ -28,7 +28,7 @@ const MIN_WIRE_SECOND: i64 = -62_167_219_200;
 
 impl WireTimestamp {
     fn in_wire_range(ts: Timestamp) -> bool {
-        ts.as_second() >= MIN_WIRE_SECOND
+        ts >= Timestamp::from_second(MIN_WIRE_SECOND).expect("wire minimum is valid")
     }
     pub fn checked_add(self, duration: SignedDuration) -> Option<Self> {
         let ts = self.0.checked_add(duration).ok()?;
@@ -205,6 +205,12 @@ mod tests {
         let earliest = WireTimestamp::from_second(MIN_WIRE_SECOND).unwrap();
         let latest = WireTimestamp(Timestamp::MAX);
         assert!(WireTimestamp::from_second(MIN_WIRE_SECOND - 1).is_err());
+        assert!(earliest
+            .checked_add(SignedDuration::from_nanos(-1))
+            .is_none());
+        assert!("0000-01-01T00:59:59.999999999+01:00"
+            .parse::<WireTimestamp>()
+            .is_err());
         assert!(earliest
             .checked_add(SignedDuration::from_secs(-1))
             .is_none());

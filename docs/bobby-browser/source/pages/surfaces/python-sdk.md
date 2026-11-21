@@ -83,7 +83,7 @@ outcome = client.submit_command({
 client.delete_session(session["id"])
 ```
 
-The SDK has no intent helpers. Send intent envelopes the same way (see [Intent commands](../guides/intents.md)), or use the MCP `intent_*` tools.
+The SDK has no event stream, engine-scoped runtime info, context-neighbor method, or intent helpers. The TypeScript SDK supports event reads, and the Rust and TypeScript SDKs support engine-scoped runtime info and context neighbors. Send intent envelopes the same way (see [Intent commands](../guides/intents.md)), or use the MCP `intent_*` tools.
 
 ## Errors
 

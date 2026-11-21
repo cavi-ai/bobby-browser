@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import test from "node:test";
 import { inspect } from "node:util";
@@ -17,6 +18,16 @@ const CHECKPOINT_ID = "00000000-0000-4000-8000-000000000007";
 const CORRELATION_ID = "00000000-0000-4000-8000-000000000008";
 const PAGE_ID = "00000000-0000-4000-8000-000000000009";
 const JOB_ID = "job_00000000-0000-4000-8000-000000000010";
+
+test("shared reconciliation and event gap responses preserve evidence", async () => {
+  const fixtures = JSON.parse(readFileSync(new URL("../../../../crates/bobby-browser-client/tests/fixtures/sdk-responses.json", import.meta.url), "utf8"));
+  await withServer((request, response) => writeJson(response, 409, request.url === "/v1/commands" ? fixtures.command : request.url?.startsWith("/v1/recovery/") ? fixtures.recovery : fixtures.eventGap), async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    assert.deepEqual(await client.submit(envelope()), fixtures.command);
+    assert.deepEqual(await client.recover(WORKFLOW_ID), fixtures.recovery);
+    await assert.rejects(client.events(0)[Symbol.asyncIterator]().next(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "http" && error.eventGap?.earliestAvailable === 9);
+  });
+});
 
 test("runtimeInfoForEngine sends and accepts the requested scope", async () => {
   await withServer((request, response) => {

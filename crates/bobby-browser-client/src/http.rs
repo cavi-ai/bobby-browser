@@ -66,13 +66,75 @@ pub struct RequestOptions {
 ///
 /// Construct with [`BrowserRuntimeClient::new`]. `base_url` is the runtime
 /// origin; a trailing slash and a trailing `/v1` are stripped.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BrowserRuntimeClient {
     base_url: String,
     bearer_token: String,
     http: Client,
     default_timeout: Duration,
     max_artifact_bytes: u64,
+}
+
+impl std::fmt::Debug for BrowserRuntimeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserRuntimeClient")
+            .field("default_timeout", &self.default_timeout)
+            .field("max_artifact_bytes", &self.max_artifact_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+const MAX_JSON_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
+async fn bounded_body(mut response: reqwest::Response, limit: u64) -> Result<Vec<u8>, ClientError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return Err(ClientError::Protocol(
+            "response exceeds the client byte limit".into(),
+        ));
+    }
+    let mut result = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ClientError::Transport(e.without_url().to_string()))?
+    {
+        if chunk.len() as u64 > limit.saturating_sub(result.len() as u64) {
+            return Err(ClientError::Protocol(
+                "response exceeds the client byte limit".into(),
+            ));
+        }
+        result.reserve_exact(chunk.len());
+        result.extend_from_slice(&chunk);
+    }
+    Ok(result)
+}
+
+fn command_status(outcome: &CommandOutcome) -> reqwest::StatusCode {
+    use reqwest::StatusCode as S;
+    match outcome {
+        CommandOutcome::Completed { .. } | CommandOutcome::Restarted { .. } => S::OK,
+        CommandOutcome::RetryableFailure { .. } => S::SERVICE_UNAVAILABLE,
+        CommandOutcome::NeedsReconciliation { .. } => S::CONFLICT,
+        CommandOutcome::PolicyDenied { .. } => S::FORBIDDEN,
+        CommandOutcome::ResourceExhausted { .. } => S::TOO_MANY_REQUESTS,
+        CommandOutcome::Failed { error, .. } if error.code == crate::ErrorCode::InvalidRequest => {
+            S::UNPROCESSABLE_ENTITY
+        }
+        CommandOutcome::Failed { error, .. } if error.code == crate::ErrorCode::NotFound => {
+            S::NOT_FOUND
+        }
+        CommandOutcome::Failed { .. } => S::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn recovery_status_code(outcome: &RecoveryDecision) -> reqwest::StatusCode {
+    match outcome {
+        RecoveryDecision::NeedsReconciliation { .. } => reqwest::StatusCode::CONFLICT,
+        _ => reqwest::StatusCode::OK,
+    }
 }
 
 fn request_deadline(timeout: Duration) -> Result<crate::WireTimestamp, ClientError> {
@@ -121,7 +183,7 @@ impl BrowserRuntimeClient {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
+            .map_err(|error| ClientError::Transport(error.without_url().to_string()))?;
         Ok(Self {
             base_url,
             bearer_token,
@@ -242,8 +304,15 @@ impl BrowserRuntimeClient {
         input: &CommandEnvelope,
         options: Option<RequestOptions>,
     ) -> Result<CommandOutcome, ClientError> {
-        self.json(Method::POST, "/v1/commands", Some(input), options)
-            .await
+        self.json_mapped(
+            Method::POST,
+            "/v1/commands",
+            Some(input),
+            options,
+            None,
+            Some(command_status),
+        )
+        .await
     }
 
     /// `GET /v1/context/ask` — resolve one described control from retained context.
@@ -435,13 +504,18 @@ impl BrowserRuntimeClient {
         }
 
         let response = request.send().await.map_err(|error| {
-            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+            ClientError::Transport(error.without_url().to_string()).redact(&self.bearer_token)
         })?;
         let status = response.status();
         if expected_status.map_or_else(|| status.is_success(), |expected| status == expected) {
             return Ok(());
         }
-        let text = response.text().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(
+            &bounded_body(response, MAX_JSON_RESPONSE_BYTES)
+                .await
+                .map_err(|e| e.redact(&self.bearer_token))?,
+        )
+        .into_owned();
         if status.is_success() {
             return Err(ClientError::Protocol(format!(
                 "unexpected HTTP status {}",
@@ -482,6 +556,23 @@ impl BrowserRuntimeClient {
         B: Serialize,
         T: DeserializeOwned,
     {
+        self.json_mapped(method, path, body, options, expected_status, None)
+            .await
+    }
+
+    async fn json_mapped<B, T>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<B>,
+        options: Option<RequestOptions>,
+        expected_status: Option<reqwest::StatusCode>,
+        status_for: Option<fn(&T) -> reqwest::StatusCode>,
+    ) -> Result<T, ClientError>
+    where
+        B: Serialize,
+        T: DeserializeOwned,
+    {
         let options = options.unwrap_or_default();
         let timeout = options.timeout.unwrap_or(self.default_timeout);
         let deadline = request_deadline(timeout)?;
@@ -507,16 +598,24 @@ impl BrowserRuntimeClient {
         }
 
         let response = request.send().await.map_err(|error| {
-            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+            ClientError::Transport(error.without_url().to_string()).redact(&self.bearer_token)
         })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| {
-            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
-        })?;
-        if !status.is_success() {
+        let bytes = bounded_body(response, MAX_JSON_RESPONSE_BYTES)
+            .await
+            .map_err(|e| e.redact(&self.bearer_token))?;
+        let parsed: Result<T, _> = serde_json::from_slice(&bytes);
+        if let (Some(status_for), Ok(value)) = (status_for, parsed.as_ref()) {
+            if status_for(value) != status {
+                return Err(ClientError::Protocol(format!(
+                    "unexpected HTTP status {} for outcome",
+                    status.as_u16()
+                )));
+            }
+        } else if !status.is_success() {
             return Err(ClientError::Http {
                 status: status.as_u16(),
-                message: text,
+                message: String::from_utf8_lossy(&bytes).into_owned(),
             }
             .redact(&self.bearer_token));
         }
@@ -526,7 +625,7 @@ impl BrowserRuntimeClient {
                 status.as_u16()
             )));
         }
-        serde_json::from_str(&text).map_err(|error| {
+        parsed.map_err(|error| {
             ClientError::Protocol(format!("invalid JSON body: {error}")).redact(&self.bearer_token)
         })
     }
@@ -538,6 +637,7 @@ impl BrowserRuntimeClient {
     async fn bytes_with_headers(
         &self,
         path: &str,
+        reference: &ArtifactReference,
         options: Option<RequestOptions>,
     ) -> Result<(Vec<u8>, (String, Option<u64>)), ClientError> {
         let options = options.unwrap_or_default();
@@ -557,11 +657,16 @@ impl BrowserRuntimeClient {
             .send()
             .await
             .map_err(|error| {
-                ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+                ClientError::Transport(error.without_url().to_string()).redact(&self.bearer_token)
             })?;
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(
+                &bounded_body(response, MAX_JSON_RESPONSE_BYTES)
+                    .await
+                    .map_err(|e| e.redact(&self.bearer_token))?,
+            )
+            .into_owned();
             return Err(ClientError::Http {
                 status: status.as_u16(),
                 message: text,
@@ -586,10 +691,20 @@ impl BrowserRuntimeClient {
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let body = response.bytes().await.map_err(|error| {
-            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
-        })?;
-        Ok((body.to_vec(), (content_type, content_length)))
+        if content_type != reference.media_type_essence() {
+            return Err(ClientError::Protocol(
+                "artifact media type does not match its reference".into(),
+            ));
+        }
+        if content_length != Some(reference.bytes) {
+            return Err(ClientError::Protocol(
+                "artifact content length does not match its reference".into(),
+            ));
+        }
+        let body = bounded_body(response, reference.bytes)
+            .await
+            .map_err(|e| e.redact(&self.bearer_token))?;
+        Ok((body, (content_type, content_length)))
     }
 
     /// `GET /v1/sessions/{session}/pages/{page}/forms` — semantic form snapshot.
@@ -651,18 +766,19 @@ impl BrowserRuntimeClient {
     }
 
     /// `POST /v1/recovery/{workflow}` — resume, reconcile, or restart a
-    /// workflow. A `needsReconciliation` decision answers HTTP `409`, which
-    /// this method surfaces as `ClientError::Http` carrying the decision body.
+    /// workflow. A `needsReconciliation` decision is returned from HTTP `409`.
     pub async fn recover(
         &self,
         workflow_id: &WorkflowId,
         options: Option<RequestOptions>,
     ) -> Result<RecoveryDecision, ClientError> {
-        self.json(
+        self.json_mapped(
             Method::POST,
             &format!("/v1/recovery/{}", workflow_id.0),
             None::<()>,
             options,
+            None,
+            Some(recovery_status_code),
         )
         .await
     }
@@ -680,7 +796,11 @@ impl BrowserRuntimeClient {
     ) -> Result<Vec<u8>, ClientError> {
         validate_artifact_reference(reference, self.max_artifact_bytes)?;
         let (bytes, (content_type, content_length)) = self
-            .bytes_with_headers(&format!("/v1/artifacts/{}", reference.artifact_id), options)
+            .bytes_with_headers(
+                &format!("/v1/artifacts/{}", reference.artifact_id),
+                reference,
+                options,
+            )
             .await?;
         if content_type != reference.media_type_essence() {
             return Err(ClientError::Protocol(
@@ -1394,12 +1514,160 @@ mod tests {
         )
         .await;
         let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
-        let err = client.recover(&workflow, None).await.unwrap_err();
-        assert!(matches!(err, ClientError::Http { status: 409, .. }));
+        let decision = client.recover(&workflow, None).await.unwrap();
+        assert!(matches!(
+            decision,
+            RecoveryDecision::NeedsReconciliation { .. }
+        ));
         assert_eq!(
             rx.recv().await.unwrap(),
             format!("/v1/recovery/{}", workflow.0)
         );
+    }
+
+    #[test]
+    fn command_status_matches_all_broker_variants() {
+        let id = CommandId::new();
+        let attempt = AttemptId::new();
+        let error =
+            |code: &str| json!({"code":code,"message":"x","layer":"workflow","retryable":false});
+        for (status, value) in [
+            (
+                200,
+                json!({"status":"completed","commandId":id,"evidence":[]}),
+            ),
+            (
+                200,
+                json!({"status":"restarted","commandId":id,"priorAttemptId":attempt,"attemptId":attempt,"reason":"x","evidence":[]}),
+            ),
+            (
+                503,
+                json!({"status":"retryableFailure","commandId":id,"error":error("internal")}),
+            ),
+            (
+                409,
+                json!({"status":"needsReconciliation","commandId":id,"error":error("internal"),"evidence":[]}),
+            ),
+            (
+                403,
+                json!({"status":"policyDenied","commandId":id,"error":error("policyDenied")}),
+            ),
+            (
+                429,
+                json!({"status":"resourceExhausted","commandId":id,"error":error("resourceExhausted"),"retryAfterMs":1}),
+            ),
+            (
+                422,
+                json!({"status":"failed","commandId":id,"error":error("invalidRequest"),"evidence":[]}),
+            ),
+            (
+                404,
+                json!({"status":"failed","commandId":id,"error":error("notFound"),"evidence":[]}),
+            ),
+            (
+                500,
+                json!({"status":"failed","commandId":id,"error":error("internal"),"evidence":[]}),
+            ),
+        ] {
+            let outcome: CommandOutcome = serde_json::from_value(value).unwrap();
+            assert_eq!(command_status(&outcome).as_u16(), status);
+        }
+    }
+
+    #[test]
+    fn debug_never_prints_credentials() {
+        let client =
+            BrowserRuntimeClient::new("http://user:password@localhost:1", "secret-token").unwrap();
+        let output = format!("{client:?}");
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn shared_outcome_fixtures_obey_status_and_preserve_evidence() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/sdk-responses.json")).unwrap();
+        for (key, expected) in [("command", 409), ("recovery", 409)] {
+            let value = fixtures[key].clone();
+            for status in [expected, 418] {
+                let (base, _) = capture_uri(
+                    "/v1/test",
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        axum::Json(value.clone()),
+                    ),
+                )
+                .await;
+                let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+                if key == "command" {
+                    let result: Result<CommandOutcome, _> = client
+                        .json_mapped(
+                            Method::GET,
+                            "/v1/test",
+                            None::<()>,
+                            None,
+                            None,
+                            Some(command_status),
+                        )
+                        .await;
+                    if status == expected {
+                        assert_eq!(serde_json::to_value(result.unwrap()).unwrap(), value);
+                    } else {
+                        assert!(matches!(result, Err(ClientError::Protocol(_))));
+                    }
+                } else {
+                    let result: Result<RecoveryDecision, _> = client
+                        .json_mapped(
+                            Method::GET,
+                            "/v1/test",
+                            None::<()>,
+                            None,
+                            None,
+                            Some(recovery_status_code),
+                        )
+                        .await;
+                    if status == expected {
+                        assert_eq!(serde_json::to_value(result.unwrap()).unwrap(), value);
+                    } else {
+                        assert!(matches!(result, Err(ClientError::Protocol(_))));
+                    }
+                }
+            }
+        }
+        let (base, _) = capture_uri(
+            "/v1/test",
+            (
+                StatusCode::CONFLICT,
+                axum::Json(json!({"error":{"code":"invalidRequest"}})),
+            ),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let result: Result<RecoveryDecision, _> = client
+            .json_mapped(
+                Method::GET,
+                "/v1/test",
+                None::<()>,
+                None,
+                None,
+                Some(recovery_status_code),
+            )
+            .await;
+        assert!(matches!(result, Err(ClientError::Http { status: 409, .. })));
+    }
+
+    #[tokio::test]
+    async fn bounded_body_rejects_declared_and_streamed_excess() {
+        for declared in [true, false] {
+            let base = spawn_artifact_server("application/octet-stream", b"12345", declared).await;
+            let response = reqwest::get(format!("{base}/v1/artifacts/a"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                bounded_body(response, 4).await,
+                Err(ClientError::Protocol(_))
+            ));
+        }
     }
 
     const ARTIFACT_BODY: &[u8] = b"artifact";

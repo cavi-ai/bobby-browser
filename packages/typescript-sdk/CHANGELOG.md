@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.0
+
+- Validate response bodies and preserve genuine HTTP errors.
+
 ## 0.26.0
 
 - Align the client package with the Bobby Browser 0.26.0 runtime release.

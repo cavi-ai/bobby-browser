@@ -19,17 +19,41 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || format('refs/tags/{0}', inputs.tag) }}
+      - name: Require successful CI on the exact tag
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$TAG" = "v$VERSION"
+          python3 scripts/release-gate.py "$TAG" --output-sha
+
   # addons.mozilla.org accepts one upload per extension version, so the tag
   # push submits the companion once, to the listed channel, before the
   # platform builds. Manual re-attach runs fetch the approved signed file.
   sign-companion:
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
       signed: ${{ steps.fetch.outputs.signed }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -95,7 +119,7 @@ jobs:
           path: bobby-firefox-companion.xpi
 
   build:
-    needs: sign-companion
+    needs: [preflight, sign-companion]
     strategy:
       fail-fast: false
       matrix:
@@ -126,7 +150,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       # No `version:` input. pnpm/action-setup@v6 errors on a version given both
       # here and as `packageManager` in package.json, which failed all five
       # v0.9.0 binary builds. ci.yml, publish.yml, and publish-docs.yml already
@@ -156,15 +180,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build release bobby + gateways
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           cargo build --release \
             -p bobby-browser -p mcp-gateway -p acp-gateway \
             --target "${{ matrix.target }}"
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
-            VERSION="$(python -c "import pathlib,re; m=re.search(r'\[workspace\.package\][^[]*?\bversion\s*=\s*\"([^\"]+)\"', pathlib.Path('Cargo.toml').read_text(), re.S); print(m.group(1))")"
-          fi
+          VERSION="${TAG#v}"
           STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
           OUT="target/${{ matrix.target }}/release"
           mkdir -p "$STAGE"
@@ -223,19 +246,25 @@ jobs:
           path: ${{ env.ASSET }}
 
   release:
-    needs: build
+    needs: [preflight, build]
     if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
     runs-on: ubuntu-latest
     # Uploading assets needs write here even though the workflow already
     # declares it, matching publish-docs.
     permissions:
       contents: write
+      actions: read
     outputs:
       version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
+      - name: Recheck the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: python3 scripts/release-gate.py "$TAG" --timeout 0
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -293,11 +322,34 @@ jobs:
   # A release created with GITHUB_TOKEN does not fire `on: release`, so the
   # documentation artifact is invoked directly rather than left to the event.
   docs:
-    needs: release
+    needs: [preflight, release]
     permissions:
       contents: write
     uses: ./.github/workflows/publish-docs.yml
     with:
       version: ${{ needs.release.outputs.version }}
+      commit: ${{ needs.preflight.outputs.sha }}
       dry_run: ${{ 'false' }}
     secrets: inherit
+
+  dispatch-sdks:
+    needs: [preflight, release, docs]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      - name: Verify release assets and dispatch SDK publishers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_COMMIT: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-gate.py "$TAG" --assets --timeout 0
+          for workflow in publish.yml publish-crates.yml publish-python.yml; do
+            gh workflow run "$workflow" --ref "$TAG" -f tag="$TAG" -f commit="$RELEASE_COMMIT" -f dry_run=false
+          done

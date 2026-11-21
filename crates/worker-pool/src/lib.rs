@@ -304,6 +304,11 @@ pub trait WorkerFactory: Send + Sync {
 
     async fn release_session(&self, _session_id: &SessionId) {}
 
+    /// Final session disposal, distinct from release during worker replacement.
+    async fn finalize_session(&self, _session_id: &SessionId) -> Result<(), CommandError> {
+        Ok(())
+    }
+
     /// Graceful teardown on server shutdown: factories holding shared browser
     /// resources (e.g. the single Firefox BiDi WebDriver session) must end
     /// them here — process exit without this leaks the session in the
@@ -764,6 +769,11 @@ impl WorkerPool {
                 Ok(())
             };
             factory.release_session(&session_id).await;
+            let result = if result.is_ok() && !terminate {
+                factory.finalize_session(&session_id).await
+            } else {
+                result
+            };
             if result.is_ok() {
                 let action = if terminate {
                     "worker.invalidated"

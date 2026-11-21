@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bobby-browser"
-version = "0.26.0"
+version = "0.27.0"
 description = "Typed client for the authenticated Bobby Browser runtime interface"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Sasan Sotoodehfar" }]
 requires-python = ">=3.10"
 dependencies = []

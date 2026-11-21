@@ -87,10 +87,11 @@ test("release archives certify clean installs and upgrades on every release plat
   assert.match(releaseWorkflow, /push:\s+tags:\s+- "v\*"/);
   assert.match(releaseWorkflow, /tag:\s+description:[^\n]+\s+required: true/);
   assert.equal(
-    releaseWorkflow.match(/ref: \$\{\{ inputs\.tag \|\| github\.ref \}\}/g)?.length,
-    3,
-    "signing, packaging, and release notes must use the selected release revision",
+    releaseWorkflow.match(/ref: \$\{\{ github\.event_name == 'push' && github\.sha \|\| format\('refs\/tags\/\{0\}', inputs\.tag\) \}\}/g)?.length,
+    1,
+    "preflight pins push SHA and resolves the selected manual tag",
   );
+  assert.equal(releaseWorkflow.match(/ref: \$\{\{ needs\.preflight\.outputs\.sha \}\}/g)?.length, 4);
   assert.match(releaseWorkflow, /certify-release-install\.py/);
   assert.match(releaseWorkflow, /--asset-os "\$\{\{ matrix\.asset_os \}\}"/);
   assert.match(releaseWorkflow, /python -m zipfile -c/);
@@ -101,4 +102,23 @@ test("release archives certify clean installs and upgrades on every release plat
   assert.match(windowsInstaller, /File\]::Replace/);
   assert.match(certifier, /powershell\.exe/);
   assert.match(certifier, /upgrade retained stale managed files/);
+});
+
+test("release workflows bind packaged sources to the verified tag", async () => {
+  const [release, docs, ...publishers] = await Promise.all([
+    "release-binaries.yml", "publish-docs.yml", "publish.yml", "publish-crates.yml", "publish-python.yml",
+  ].map((name) => readFile(new URL(`.github/workflows/${name}`, root), "utf8")));
+  assert.match(release, /test "\$TAG" = "v\$VERSION"/);
+  assert.match(release, /VERSION="\$\{TAG#v\}"/);
+  assert.doesNotMatch(release, /VERSION="\$\{GITHUB_REF_NAME#v\}"/);
+  assert.match(release, /--ref "\$TAG" -f tag="\$TAG" -f commit="\$RELEASE_COMMIT"/);
+  assert.match(docs, /COMMIT="\$\(git rev-parse HEAD\)"/);
+  assert.match(docs, /if \[ "\$DRY_RUN" != "true" \]/);
+  assert.match(docs, /"\$COMMIT" != "\$TAG_COMMIT"/);
+  for (const publisher of publishers) {
+    assert.match(publisher, /ref: \$\{\{ inputs\.commit \|\|/);
+    assert.match(publisher, /test "\$GITHUB_REF" = "refs\/tags\/\$RELEASE_TAG"/);
+    assert.match(publisher, /test "\$GITHUB_SHA" = "\$RELEASE_COMMIT"/);
+    assert.match(publisher, /release-gate\.py "\$RELEASE_TAG" --assets/);
+  }
 });

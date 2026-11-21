@@ -6,14 +6,17 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
     SetTimezoneOverrideParams, SetTouchEmulationEnabledParams, UserAgentBrandVersion,
     UserAgentMetadata,
 };
+use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::types::MethodId;
-use chromiumoxide::{Command, Method, Page};
+use chromiumoxide::{error::CdpError, Command, Method, Page};
 use fingerprinting::{FingerprintApplyError, FingerprintApplyPlan, FingerprintHost};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct ChromiumPageHost<'a> {
     pub page: &'a Page,
+    pub shared_locale: &'a AtomicBool,
 }
 
 /// CDP setUserAgentOverride with a loose metadata object so we can include
@@ -135,7 +138,16 @@ impl FingerprintHost for ChromiumPageHost<'_> {
         );
         r_emu.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_net.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
-        r_locale.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        if let Err(error) = r_locale {
+            if !is_existing_locale_override(&error)
+                || !effective_locale_matches(self.page, &plan.locale)
+                    .await
+                    .unwrap_or(false)
+            {
+                return Err(FingerprintApplyError::Host(error.to_string()));
+            }
+            self.shared_locale.store(true, Ordering::Relaxed);
+        }
         r_tz.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_metrics.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_media.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
@@ -154,4 +166,56 @@ impl FingerprintHost for ChromiumPageHost<'_> {
 
         Ok(())
     }
+}
+
+fn is_existing_locale_override(error: &CdpError) -> bool {
+    matches!(error, CdpError::Chrome(details)
+        if details.code == -32000 && details.message == "Another locale override is already in effect")
+}
+
+/// Check the browser's Intl locale in Chromium's isolated world.
+async fn effective_locale_matches(page: &Page, locale: &str) -> Result<bool, CdpError> {
+    let context = page
+        .secondary_execution_context()
+        .await?
+        .ok_or_else(|| CdpError::msg("isolated locale context is unavailable"))?;
+    let requested = serde_json::to_string(&locale.replace('_', "-"))?;
+    let expression = format!(
+        "Intl.getCanonicalLocales({requested})[0] === Intl.NumberFormat().resolvedOptions().locale"
+    );
+    let params = EvaluateParams::builder()
+        .expression(expression)
+        .context_id(context)
+        .return_by_value(true)
+        .build()
+        .map_err(CdpError::msg)?;
+    Ok(page.evaluate(params).await?.into_value::<bool>()?)
+}
+
+/// Reacquire a previously shared override when its original owner has closed.
+pub(crate) async fn ensure_shared_locale(page: &Page, locale: &str) -> Result<(), CdpError> {
+    if effective_locale_matches(page, locale).await? {
+        return Ok(());
+    }
+    if let Err(error) = page
+        .emulate_locale(SetLocaleOverrideParams {
+            locale: Some(locale.to_owned()),
+        })
+        .await
+    {
+        if !is_existing_locale_override(&error)
+            || !effective_locale_matches(page, locale)
+                .await
+                .unwrap_or(false)
+        {
+            return Err(error);
+        }
+        return Ok(());
+    }
+    if !effective_locale_matches(page, locale).await? {
+        return Err(CdpError::msg(
+            "browser locale does not match requested locale",
+        ));
+    }
+    Ok(())
 }

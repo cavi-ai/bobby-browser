@@ -24,12 +24,13 @@ let session = client
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         },
         None,
     )
     .await?;
 client.delete_session(&session.id, None).await?;
-println!("{:?}", info.version);
+let _ = info;
 # Ok(()) }
 ```
 

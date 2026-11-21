@@ -1,0 +1,2740 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecoveryDecision",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "resumed"
+        },
+        "checkpointId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "attemptId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "checkpointId",
+        "attemptId",
+        "evidence"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "needsReconciliation"
+        },
+        "checkpointId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "attemptId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "checkpointId",
+        "attemptId",
+        "reason",
+        "evidence"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "restarted"
+        },
+        "checkpointId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lineage": {
+          "$ref": "#/$defs/RestartLineage"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "status",
+        "checkpointId",
+        "lineage"
+      ]
+    }
+  ],
+  "$defs": {
+    "Evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "executionPath"
+            },
+            "path": {
+              "$ref": "#/$defs/ExecutionPath"
+            },
+            "reason": {
+              "$ref": "#/$defs/ExecutionReason"
+            },
+            "stateVersion": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "elapsedMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finalUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "contentType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "redirectChain": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "reason",
+            "stateVersion",
+            "elapsedMs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "navigation"
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "title"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "inspection"
+            },
+            "selector": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "html": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "title",
+            "text"
+          ]
+        },
+        {
+          "description": "Result of a boundary submit that used `networkQuiet` or no expected\nstate as its postcondition. This classifies the settled page without\nrequiring the caller to predict confirmation copy or risk a second submit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "submitSettlement"
+            },
+            "outcome": {
+              "$ref": "#/$defs/SubmitSettlementOutcome"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "element"
+            },
+            "selector": {
+              "type": "string"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "selector"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "upload"
+            },
+            "selector": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sha256": {
+              "description": "The SHA-256 of each uploaded file's content, in `paths` order.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "selector",
+            "paths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "page"
+            },
+            "pageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pageId",
+            "url",
+            "title"
+          ]
+        },
+        {
+          "description": "Retained page-context generation after command bookkeeping.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pageGeneration"
+            },
+            "pageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "pageId",
+            "generation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pages"
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PageEvidence"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "popup"
+            },
+            "openerPageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "pageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "openerPageId",
+            "pageId",
+            "url",
+            "title"
+          ]
+        },
+        {
+          "description": "A popup closed during creation, or a handle's popup has since closed.\nThe opener remains the handle's target. A subsequent read-only retry\ncan carry this evidence on completion. A subsequent mutation that hits a\nclosed popup carries it on failure.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "popupClosed"
+            },
+            "popupPageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "openerPageId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "popupPageId",
+            "openerPageId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "download"
+            },
+            "filename": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "savedTo": {
+              "description": "The exact caller-supplied destination after it passed the configured\ndownloads-root policy. Absolute input is echoed as absolute; relative\ninput remains relative. The runtime never discovers or exposes a path\nthe caller did not already provide.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "filename",
+            "path",
+            "bytes",
+            "sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "configuration"
+            },
+            "name": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolution"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
+            "fingerprint": {
+              "$ref": "#/$defs/TargetFingerprint"
+            },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CandidateEvidence"
+              }
+            },
+            "bestMatchAuthorized": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "fingerprint",
+            "candidates",
+            "bestMatchAuthorized"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "wait"
+            },
+            "condition": {
+              "$ref": "#/$defs/WaitCondition"
+            },
+            "elapsedMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "observations": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "excludedClasses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "observed": {
+              "description": "What the satisfying poll actually read: the element text or value,\nthe URL, or the document ready state, depending on the condition.\n\nBounded by [`MAX_WAIT_OBSERVED_CHARS`]: a verification value, never\na page-text dump.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "condition",
+            "elapsedMs",
+            "observations"
+          ]
+        },
+        {
+          "description": "The session, workflow and page a screenshot was taken in, the page's\naddress and when it was taken.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "screenshot"
+            },
+            "artifactId": {
+              "type": "string"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "width": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "height": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "workflowId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "pageId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "capturedAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "kind",
+            "artifactId",
+            "mediaType",
+            "width",
+            "height",
+            "bytes",
+            "sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "browserExecution"
+            },
+            "engine": {
+              "type": "string"
+            },
+            "browserVersion": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            },
+            "interactionPath": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "engine",
+            "browserVersion",
+            "profileId",
+            "interactionPath"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "javaScriptResult"
+            },
+            "value": true,
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "accessibilitySnapshot"
+            },
+            "pageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AccessibilityNode"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "pageId",
+            "nodes",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "formSnapshot"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/FormSnapshot"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "formValidation"
+            },
+            "issues": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FormValidationIssue"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "issues"
+          ]
+        },
+        {
+          "description": "The one-time-code step the page is showing: where the code goes, how\nlong it is when the page says, and the page's own words about where it\nwas sent. Page-derived.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "codeEntry"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FormControlTarget"
+              }
+            },
+            "codeLength": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "destinationHint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "fields"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "controlAction"
+            },
+            "action": {
+              "$ref": "#/$defs/ControlActionEvidence"
+            }
+          },
+          "required": [
+            "kind",
+            "action"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "structuredExtraction"
+            },
+            "pageId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "value": true,
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "pageId",
+            "value",
+            "truncated"
+          ]
+        },
+        {
+          "description": "A challenge classification from `detectChallenge`: `Some` is a\ndetected challenge, `None` is a provably clean page. `confidence` is\nthe model's confidence in its answer either way — a caller gating a\nsolve spend on a clean answer needs it. `prior_kind` records the site\nprior that enriched the prompt when one existed — transparency, never\na blended answer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "challengeDetection"
+            },
+            "confidence": {
+              "type": "number",
+              "format": "float"
+            },
+            "detection": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChallengeDetection"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "priorKind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "confidence"
+          ]
+        },
+        {
+          "description": "The vision model's reading of the page after a landed submit.\n`message` is page-derived text the model quoted.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "outcomeReading"
+            },
+            "outcome": {
+              "$ref": "#/$defs/PageOutcome"
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome",
+            "confidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cookieState"
+            },
+            "pageId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "cookies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CookieRecord"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "cookies"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pdfArtifact"
+            },
+            "artifactId": {
+              "type": "string"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "artifactId",
+            "mediaType",
+            "bytes",
+            "sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "dialog"
+            },
+            "dialogType": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "dialogType",
+            "message",
+            "action"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "emulation"
+            },
+            "viewport": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ViewportSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "geolocation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GeolocationCoordinates"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "harArtifact"
+            },
+            "artifactId": {
+              "type": "string"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "entries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "artifactId",
+            "mediaType",
+            "bytes",
+            "sha256",
+            "entries"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "intentExecution"
+            },
+            "record": {
+              "$ref": "#/$defs/ExecutionRecord"
+            }
+          },
+          "required": [
+            "kind",
+            "record"
+          ]
+        },
+        {
+          "description": "Input timing the runtime synthesized rather than observed, emitted when\nthe session opted into `executionPolicy.humanize`. Lets `intent-engine`\nverify an effect against the timing actually issued. Carries no typed\ntext: action counts and durations only.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "humanization"
+            },
+            "engine": {
+              "type": "string"
+            },
+            "actions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "synthesizedMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "engine",
+            "actions",
+            "synthesizedMs"
+          ]
+        },
+        {
+          "description": "Result of resolving one named field of an `ExtractIntent`, emitted once\nper field in field order. `value: None` means unresolved, with the\nreason in `errorCode`; the rest of the extraction still runs.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "extraction"
+            },
+            "field": {
+              "type": "string"
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolutionPath": {
+              "$ref": "#/$defs/IntentResolutionPath"
+            },
+            "errorCode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorCode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "field",
+            "resolutionPath"
+          ]
+        }
+      ]
+    },
+    "ExecutionPath": {
+      "description": "Which strategy served a command: the direct-HTTP reader, or the live\nbrowser. The browser variants name the *strategy*, never an engine — a\nFirefox-companion run reports `browser`, and reporting `chromium` there\ncontradicted the `browserExecution` evidence sitting beside it. The old\nwire names still deserialize so recorded journals keep replaying.",
+      "type": "string",
+      "enum": [
+        "directHttp",
+        "browser",
+        "browserFallback"
+      ]
+    },
+    "ExecutionReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "eligibleStaticDocument",
+            "eligibleExplicitDownload",
+            "ineligibleCommand",
+            "semanticTargetRequired",
+            "javascriptRequired",
+            "unsupportedContentType",
+            "stateConflict",
+            "policyRequired"
+          ]
+        },
+        {
+          "description": "The page has mutated since load (a non-read-only command ran against\nit), so a whole-page read must come from the live DOM, not a refetch.",
+          "type": "string",
+          "const": "pageMutated"
+        }
+      ]
+    },
+    "SubmitSettlementOutcome": {
+      "type": "string",
+      "enum": [
+        "settled",
+        "validationRejected"
+      ]
+    },
+    "PageEvidence": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pageId",
+        "url",
+        "title"
+      ]
+    },
+    "TargetSpec": {
+      "type": "object",
+      "properties": {
+        "css": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "testId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accessibleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "framePath": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TargetSpec"
+          },
+          "default": []
+        },
+        "shadowPath": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TargetSpec"
+          },
+          "default": []
+        },
+        "ordinal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "allowBestMatch": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "TextMatch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "exact"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "contains"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "regex"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "TargetFingerprint": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "frame": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stableAttributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "pageId",
+        "stableAttributes"
+      ]
+    },
+    "CandidateEvidence": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "score": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "score",
+        "reasons"
+      ]
+    },
+    "WaitCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "element"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
+            "state": {
+              "$ref": "#/$defs/ElementState"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
+            "matcher": {
+              "$ref": "#/$defs/TextMatch"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "matcher"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "value"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
+            "matcher": {
+              "$ref": "#/$defs/TextMatch"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "matcher"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "url"
+            },
+            "matcher": {
+              "$ref": "#/$defs/TextMatch"
+            }
+          },
+          "required": [
+            "kind",
+            "matcher"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "document"
+            },
+            "ready": {
+              "$ref": "#/$defs/WaitUntil"
+            }
+          },
+          "required": [
+            "kind",
+            "ready"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "networkQuiet"
+            },
+            "idleMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "maxInFlight": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "ignoreUrlSubstrings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ignoreResourceTypes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/NetworkResourceType"
+              }
+            },
+            "ignoreLongLived": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "idleMs",
+            "maxInFlight"
+          ]
+        }
+      ]
+    },
+    "ElementState": {
+      "type": "string",
+      "enum": [
+        "attached",
+        "detached",
+        "visible",
+        "hidden",
+        "enabled",
+        "disabled"
+      ]
+    },
+    "WaitUntil": {
+      "type": "string",
+      "enum": [
+        "commit",
+        "domContentLoaded",
+        "interactive",
+        "networkIdle"
+      ]
+    },
+    "NetworkResourceType": {
+      "type": "string",
+      "enum": [
+        "Document",
+        "Stylesheet",
+        "Image",
+        "Media",
+        "Font",
+        "Script",
+        "TextTrack",
+        "XHR",
+        "Fetch",
+        "Prefetch",
+        "EventSource",
+        "WebSocket",
+        "Manifest",
+        "SignedExchange",
+        "Ping",
+        "CSPViolationReport",
+        "Preflight",
+        "FedCM",
+        "Other"
+      ]
+    },
+    "AccessibilityNode": {
+      "description": "One node in an `accessibilitySnapshot` result tree.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputType": {
+          "description": "Normalized native input type, used to distinguish file controls from buttons.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccessibilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "disabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "readOnly": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "invalid": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "checked": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "autocomplete": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Link destination, when the engine reports one for this node. Lets an\nagent feed `download_url` (or navigate) without an HTML round-trip.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valueMin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valueMax": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccessibilityNode"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AccessibilityTarget": {
+      "description": "Semantic target for accessibility-based commands (role + accessible name).",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "accessibleName": {
+          "type": "string"
+        },
+        "ordinal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "framePath": {
+          "description": "Frame hops from the main frame to the document holding this node;\nempty for main-frame nodes. Segments are the same role/name/ordinal\nshape `FormControlTarget.frame_path` resolves, so the target can be\npassed verbatim to `control_action`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticTargetSegment"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "accessibleName"
+      ]
+    },
+    "SemanticTargetSegment": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "accessibleName": {
+          "type": "string"
+        },
+        "ordinal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "accessibleName"
+      ]
+    },
+    "FormSnapshot": {
+      "description": "Semantic form observation returned by form-snapshot endpoints and evidence.",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "pageId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormDescriptor"
+          },
+          "maxItems": 64
+        },
+        "unownedControls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormControl"
+          },
+          "maxItems": 512
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "pageDerived": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "pageId",
+        "forms",
+        "unownedControls",
+        "truncated"
+      ]
+    },
+    "FormDescriptor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accessibleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormGroup"
+          }
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormControl"
+          }
+        },
+        "submitControlIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resetControlIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "validity": {
+          "$ref": "#/$defs/FormValidity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "groups",
+        "controls",
+        "submitControlIds",
+        "resetControlIds",
+        "validity"
+      ]
+    },
+    "FormControlTarget": {
+      "type": "object",
+      "properties": {
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "role": {
+          "type": "string"
+        },
+        "accessibleName": {
+          "type": "string"
+        },
+        "ordinal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "framePath": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticTargetSegment"
+          }
+        },
+        "shadowPath": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticTargetSegment"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "accessibleName"
+      ]
+    },
+    "FormGroup": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "controlIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "controlIds"
+      ]
+    },
+    "FormControl": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "formId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "controlKind": {
+          "$ref": "#/$defs/FormControlKind"
+        },
+        "accessibleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "Only serialized when it differs from `accessibleName` — the builder\ncollapses the label onto the accessible name at snapshot time, so a\nfresh empty form costs ~200 bytes per control instead of ~740.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placeholder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "autocomplete": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/FormControlState"
+        },
+        "constraints": {
+          "$ref": "#/$defs/FormControlConstraints"
+        },
+        "validity": {
+          "$ref": "#/$defs/FormControlValidity"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormOption"
+          }
+        },
+        "supportedOperations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormControlOperation"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "controlKind",
+        "state",
+        "validity",
+        "supportedOperations"
+      ]
+    },
+    "FormControlKind": {
+      "type": "string",
+      "enum": [
+        "text",
+        "email",
+        "password",
+        "search",
+        "number",
+        "checkbox",
+        "radio",
+        "switch",
+        "selectOne",
+        "selectMultiple",
+        "date",
+        "time",
+        "dateTimeLocal",
+        "range",
+        "file",
+        "contentEditable",
+        "combobox",
+        "listbox",
+        "submit",
+        "reset",
+        "other"
+      ]
+    },
+    "FormControlState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "empty"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "redacted"
+            },
+            "present": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "present"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "checked"
+            },
+            "checked": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "checked"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "selection"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "files"
+            },
+            "count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "names": {
+              "description": "Names of the files the control holds or, holding none, its widget\nshows.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "count"
+          ]
+        }
+      ]
+    },
+    "FormControlConstraints": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minLength": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxLength": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiple": {
+          "type": "boolean"
+        },
+        "accept": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FormControlValidity": {
+      "type": "object",
+      "properties": {
+        "willValidate": {
+          "description": "Always serialized: a bool whose default is `true` cannot use\n`serde(default)` + skip (absent would decode to `false`, flipping the\nmeaning on round-trip). `false` is rare but load-bearing.",
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormValidityFlag"
+          }
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "describedBy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "willValidate",
+        "valid"
+      ]
+    },
+    "FormValidityFlag": {
+      "type": "string",
+      "enum": [
+        "valueMissing",
+        "typeMismatch",
+        "patternMismatch",
+        "tooLong",
+        "tooShort",
+        "rangeUnderflow",
+        "rangeOverflow",
+        "stepMismatch",
+        "badInput",
+        "customError"
+      ]
+    },
+    "FormOption": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "groupLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "FormControlOperation": {
+      "type": "string",
+      "enum": [
+        "setText",
+        "setChecked",
+        "selectOne",
+        "selectMany",
+        "setFiles",
+        "clear",
+        "activate",
+        "passwordManagerFill"
+      ]
+    },
+    "FormValidity": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "invalidControlIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "invalidControlIds"
+      ]
+    },
+    "FormValidationIssue": {
+      "description": "Compact, value-free repair evidence for a control that rejected a form\nsubmission. Carries the semantic target and browser validity without the\nrest of the form snapshot.",
+      "type": "object",
+      "properties": {
+        "controlId": {
+          "type": "string"
+        },
+        "controlKind": {
+          "$ref": "#/$defs/FormControlKind"
+        },
+        "accessibleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validity": {
+          "$ref": "#/$defs/FormControlValidity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "controlId",
+        "controlKind",
+        "validity"
+      ]
+    },
+    "ControlActionEvidence": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/FormControlOperation"
+        },
+        "target": {
+          "$ref": "#/$defs/FormControlTarget"
+        },
+        "state": {
+          "$ref": "#/$defs/FormControlState"
+        },
+        "validity": {
+          "$ref": "#/$defs/FormControlValidity"
+        },
+        "nodeReplaced": {
+          "type": "boolean"
+        },
+        "revealedControls": {
+          "description": "Controls that appeared because of this action (conditional fields,\ne.g. a billing-cycle select revealed by a plan choice). Read this\nbefore re-snapshotting: the targets are passable to `control_action`\nverbatim.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevealedControl"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "target",
+        "state",
+        "validity",
+        "nodeReplaced"
+      ]
+    },
+    "RevealedControl": {
+      "description": "A form control that an action revealed (conditional field). Emitted on\n`ControlActionEvidence` so an agent learns about fields that did not\nexist at snapshot time without re-snapshotting the whole page.",
+      "type": "object",
+      "properties": {
+        "controlKind": {
+          "$ref": "#/$defs/FormControlKind"
+        },
+        "accessibleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "controlKind"
+      ]
+    },
+    "ChallengeDetection": {
+      "type": "object",
+      "properties": {
+        "challenge_type": {
+          "$ref": "#/$defs/ChallengeType"
+        },
+        "confidence": {
+          "type": "number",
+          "format": "float"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChallengeRegion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocking": {
+          "type": "boolean",
+          "default": false
+        },
+        "hints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChallengeDetectionHints"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "challenge_type",
+        "confidence"
+      ]
+    },
+    "ChallengeType": {
+      "type": "string",
+      "enum": [
+        "recaptchaV2Checkbox",
+        "recaptchaV3",
+        "textCaptcha",
+        "imageGridCaptcha",
+        "mfaCodeEntry"
+      ]
+    },
+    "ChallengeRegion": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "float"
+        },
+        "y": {
+          "type": "number",
+          "format": "float"
+        },
+        "width": {
+          "type": "number",
+          "format": "float"
+        },
+        "height": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "ChallengeDetectionHints": {
+      "type": "object",
+      "properties": {
+        "target_field_purpose": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instruction_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PageOutcome": {
+      "description": "What the page showed after a landed submit, as the vision model read it.",
+      "oneOf": [
+        {
+          "description": "A success or confirmation message.",
+          "type": "string",
+          "const": "confirmed"
+        },
+        {
+          "description": "An error, rejection or validation message.",
+          "type": "string",
+          "const": "rejected"
+        },
+        {
+          "description": "Neither.",
+          "type": "string",
+          "const": "noMessage"
+        }
+      ]
+    },
+    "CookieRecord": {
+      "description": "One cookie as returned by a cookie read on any engine.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "secure": {
+          "type": "boolean"
+        },
+        "httpOnly": {
+          "type": "boolean"
+        },
+        "sameSite": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresUnix": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value",
+        "domain",
+        "path",
+        "secure",
+        "httpOnly"
+      ]
+    },
+    "ViewportSize": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "GeolocationCoordinates": {
+      "type": "object",
+      "properties": {
+        "latitude": {
+          "type": "number",
+          "format": "double"
+        },
+        "longitude": {
+          "type": "number",
+          "format": "double"
+        },
+        "accuracy": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "latitude",
+        "longitude"
+      ]
+    },
+    "ExecutionRecord": {
+      "type": "object",
+      "properties": {
+        "intentKind": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolutionPath": {
+          "$ref": "#/$defs/IntentResolutionPath"
+        },
+        "planSummary": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateEvidence"
+          }
+        },
+        "waitElapsedMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "verification": {
+          "type": "string"
+        },
+        "artifactIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "visionProposalSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "intentKind",
+        "resolutionPath",
+        "planSummary",
+        "candidates",
+        "verification",
+        "artifactIds"
+      ]
+    },
+    "IntentResolutionPath": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "deterministic",
+            "visionFallback"
+          ]
+        },
+        {
+          "description": "Resolved from a cached proactive vision proposal.",
+          "type": "string",
+          "const": "visionPrefill"
+        },
+        {
+          "description": "Resolved from a label a verified vision answer stored on an earlier\nvisit, without a vision call.",
+          "type": "string",
+          "const": "context"
+        }
+      ]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalidRequest",
+        "notFound",
+        "deadlineExceeded",
+        "browserLaunchFailed",
+        "browserCommandFailed",
+        "verificationFailed",
+        "journalFailed",
+        "resourceExhausted",
+        "policyDenied",
+        "internal",
+        "targetNotFound",
+        "targetAmbiguous",
+        "frameNotFound",
+        "shadowRootUnavailable",
+        "targetDetached",
+        "targetObscured",
+        "targetOutOfBounds",
+        "waitConditionTimedOut",
+        "screenshotCaptureFailed",
+        "networkPolicyDenied",
+        "httpResponseTooLarge",
+        "httpTransferFailed",
+        "httpStateConflict",
+        "httpEquivalenceUnproven",
+        "intentCompileFailed",
+        "intentActionMismatch",
+        "obstructionSuspected",
+        "visionAssistDenied",
+        "visionAssistFailed",
+        "expectedStatePreSatisfied",
+        "boundaryAlreadyExecuted",
+        "verificationCodeRequired"
+      ]
+    },
+    "RestartLineage": {
+      "type": "object",
+      "properties": {
+        "workflowId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "abandonedAttemptId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "attemptId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflowId",
+        "abandonedAttemptId",
+        "attemptId",
+        "reason"
+      ]
+    }
+  }
+}

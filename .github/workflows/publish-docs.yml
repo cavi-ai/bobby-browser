@@ -12,6 +12,10 @@ on:
         description: Exact stable version to publish
         required: true
         type: string
+      commit:
+        description: Verified release commit
+        required: false
+        type: string
       dry_run:
         description: Build and verify without upload or dispatch
         required: false
@@ -46,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.commit || github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@v6
@@ -60,6 +65,7 @@ jobs:
         env:
           EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           PACKAGE_VERSION="$(node --input-type=module -e 'import { DOCUMENTED_VERSION } from "./scripts/docs/lib.mjs"; console.log(DOCUMENTED_VERSION)')"
           if [ "$GITHUB_EVENT_NAME" = "release" ]; then
@@ -80,10 +86,20 @@ jobs:
             echo "::error::requested version ${VERSION} does not match package sources of truth ${PACKAGE_VERSION}"
             exit 1
           fi
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            COMMIT="$(git rev-list -n 1 "$TAG")"
-          else
-            COMMIT="$(git rev-parse HEAD)"
+          COMMIT="$(git rev-parse HEAD)"
+          if [ -n "${INPUT_COMMIT:-}" ] && [ "$INPUT_COMMIT" != "$COMMIT" ]; then
+            echo "::error::documentation checkout does not match the requested commit"
+            exit 1
+          fi
+          if [ "$DRY_RUN" != "true" ]; then
+            if ! TAG_COMMIT="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"; then
+              echo "::error::release tag ${TAG} is missing"
+              exit 1
+            fi
+            if [ "$COMMIT" != "$TAG_COMMIT" ]; then
+              echo "::error::documentation checkout does not match the release tag"
+              exit 1
+            fi
           fi
           EPOCH="$(git show -s --format=%ct "$COMMIT")"
           if [[ ! "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || [[ ! "$EPOCH" =~ ^[0-9]+$ ]]; then

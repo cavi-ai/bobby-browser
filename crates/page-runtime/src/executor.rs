@@ -395,6 +395,20 @@ impl PageRuntime {
         }
         let used_browser = execution.used_browser;
         let mut evidence = execution.evidence;
+        if matches!(
+            &envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::ListPages(_))
+        ) {
+            let worker = lease_slot
+                .as_ref()
+                .expect("lease survives to context")
+                .worker();
+            let closed = worker_pool::tabs_or_default(worker.tabs())
+                .confirmed_closed_pages()
+                .await;
+            self.record_confirmed_closed(&envelope.session_id, &closed)
+                .await;
+        }
         self.record_execution_context(&envelope, &mut evidence)
             .await;
 
