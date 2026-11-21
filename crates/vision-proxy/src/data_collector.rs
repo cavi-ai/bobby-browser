@@ -135,7 +135,7 @@ impl VisionTrainingExample {
             journey: journey.map(|value| intent_engine::sanitize_corpus_label(&value)),
             step: step.map(|value| intent_engine::sanitize_corpus_label(&value)),
             error_message: error_message.map(|_| "[redacted]".into()),
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(types::WireTimestamp::now().rfc3339()),
             run_id: run_id.map(|value| intent_engine::sanitize_corpus_label(&value)),
             model_name: model_name.map(|value| intent_engine::sanitize_corpus_model(&value)),
             image_hash,

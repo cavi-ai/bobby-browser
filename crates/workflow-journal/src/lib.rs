@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -85,7 +85,7 @@ pub trait CommandJournal: Send + Sync {
 #[serde(rename_all = "camelCase")]
 pub struct JournalRecord {
     pub sequence: u64,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: types::WireTimestamp,
     pub command_id: CommandId,
     pub phase: CommandPhase,
     pub envelope: Option<CommandEnvelope>,

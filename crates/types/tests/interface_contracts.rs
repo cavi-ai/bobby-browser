@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use serde_json::json;
 use types::{
     Capability, CapabilitySet, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
@@ -12,7 +12,7 @@ fn request_context_and_errors_have_stable_wire_contracts() {
     let context = RequestContext::new_for_test(
         PrincipalId::from_uuid(Uuid::from_u128(0x10000000000000000000000000000001)),
         [Capability::SessionRead, Capability::PageWrite],
-        Utc::now() + Duration::seconds(30),
+        types::WireTimestamp::now() + Duration::from_secs(30),
     );
 
     let json = serde_json::to_value(&context).unwrap();
@@ -90,9 +90,9 @@ fn interface_inputs_reject_unsupported_values_before_dispatch() {
     let context = RequestContext::new_for_test(
         PrincipalId::from_uuid(Uuid::from_u128(0x10000000000000000000000000000001)),
         [Capability::SessionRead],
-        Utc::now(),
+        types::WireTimestamp::now(),
     );
-    assert!(context.validate_at(Utc::now()).is_err());
+    assert!(context.validate_at(types::WireTimestamp::now()).is_err());
 }
 
 #[test]

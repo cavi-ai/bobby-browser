@@ -4,12 +4,12 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use firefox_companion::selection::{
     build_enrolled_browser_selection, compose_worker_factory_with_pairing_observer,
 };
 use futures_util::{SinkExt, StreamExt};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -104,7 +104,7 @@ async fn workflow_start_reports_the_firefox_attachment_refusal_without_retrying(
                 Capability::PageWrite,
                 Capability::BrowserMutate,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();

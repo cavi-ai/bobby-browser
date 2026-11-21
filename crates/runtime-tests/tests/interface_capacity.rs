@@ -1,10 +1,10 @@
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
 use interface_core::{
     ArtifactBoundaryTestObserver, ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, Event,
     EventGapReason, EventStore, RuntimeInterface, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration;
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
@@ -182,7 +182,7 @@ async fn submit_capacity_as(
             attempt_id: AttemptId::new(),
             session_id: session,
             page_id: Some(page),
-            deadline: Utc::now() + ChronoDuration::seconds(10),
+            deadline: types::WireTimestamp::now() + SignedDuration::from_secs(10),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: types::WaitUntil::DomContentLoaded,
@@ -201,7 +201,7 @@ async fn production_listener_enforces_sixty_four_live_connections() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            Utc::now() + ChronoDuration::minutes(5),
+            types::WireTimestamp::now() + SignedDuration::from_mins(5),
         )
         .await
         .unwrap()
@@ -223,7 +223,7 @@ async fn production_listener_enforces_sixty_four_live_connections() {
         16,
         rejection_stats.clone(),
     ));
-    let request=format!("GET /v1/runtime HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nx-interface-version: {}\r\nx-correlation-id: {}\r\nx-deadline: {}\r\n\r\n",types::CURRENT_INTERFACE_VERSION,uuid::Uuid::new_v4(),(Utc::now()+ChronoDuration::seconds(30)).to_rfc3339());
+    let request=format!("GET /v1/runtime HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nx-interface-version: {}\r\nx-correlation-id: {}\r\nx-deadline: {}\r\n\r\n",types::CURRENT_INTERFACE_VERSION,uuid::Uuid::new_v4(),(types::WireTimestamp::now()+SignedDuration::from_secs(30)).rfc3339());
     let mut clients = Vec::new();
     for _ in 0..64 {
         let mut client = TcpStream::connect(address).await.unwrap();
@@ -311,7 +311,7 @@ async fn production_listener_enforces_sixty_four_live_connections() {
         .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
         .header(
             "x-deadline",
-            (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339(),
+            (types::WireTimestamp::now() + SignedDuration::from_secs(30)).rfc3339(),
         )
         .header("content-type", "application/json")
         .body(vec![
@@ -347,12 +347,15 @@ async fn concurrent_authenticated_artifact_readers_use_the_bounded_production_re
         .issue(
             principal.clone(),
             [Capability::ArtifactRead, Capability::ArtifactCapture],
-            Utc::now() + ChronoDuration::minutes(5),
+            types::WireTimestamp::now() + SignedDuration::from_mins(5),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let context = handle.context(Utc::now() + ChronoDuration::minutes(1), None);
+    let context = handle.context(
+        types::WireTimestamp::now() + SignedDuration::from_mins(1),
+        None,
+    );
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(32);
     recorder
         .record_authenticated_session(principal, session.clone())

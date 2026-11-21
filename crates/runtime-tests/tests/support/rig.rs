@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::journey_budget::{self, Meter, Usage};
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use interface_conformance::live::all_capabilities;
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use runtime_tests::{InstalledFirefoxConfig, InstalledFirefoxRuntime};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -277,7 +277,7 @@ impl Rig {
             .issue(
                 PrincipalId::from_uuid(uuid::Uuid::new_v4()),
                 capabilities,
-                Utc::now() + Duration::minutes(30),
+                types::WireTimestamp::now() + Duration::from_mins(30),
             )
             .await
             .expect("issue token")

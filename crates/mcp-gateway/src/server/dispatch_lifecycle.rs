@@ -66,7 +66,7 @@ impl Server {
                     if let Some(object) = value.as_object_mut() {
                         object.insert(
                             "credentialExpiresAt".to_owned(),
-                            json!(credential_expires_at.to_rfc3339()),
+                            json!(credential_expires_at.rfc3339()),
                         );
                     }
                     value

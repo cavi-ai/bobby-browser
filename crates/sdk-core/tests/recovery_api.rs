@@ -1,5 +1,5 @@
 use checkpoint_store::CheckpointStore;
-use chrono::Utc;
+
 use page_runtime::RecoveryCoordinator;
 use sdk_core::RuntimeService;
 use types::{
@@ -33,7 +33,7 @@ async fn runtime_service_exposes_durable_checkpoint_and_recovery_boundary() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
 
     assert!(runtime

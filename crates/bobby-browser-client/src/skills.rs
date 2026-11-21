@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{AttemptId, CheckpointId, CommandClass, CommandId, PageId, SessionId, WorkflowId};
@@ -619,7 +618,7 @@ impl Serialize for SkillEvidenceRef {
 pub struct SkillCheckpointProof {
     pub checkpoint_id: CheckpointId,
     pub session_id: SessionId,
-    pub verified_at: DateTime<Utc>,
+    pub verified_at: crate::WireTimestamp,
     pub attestation: SkillEvidenceRef,
 }
 
@@ -628,7 +627,7 @@ pub struct SkillCheckpointProof {
 struct SkillCheckpointProofWire {
     checkpoint_id: CheckpointId,
     session_id: SessionId,
-    verified_at: DateTime<Utc>,
+    verified_at: crate::WireTimestamp,
     attestation: SkillEvidenceRef,
 }
 
@@ -638,7 +637,7 @@ impl SkillCheckpointProof {
     pub fn new(
         checkpoint_id: CheckpointId,
         session_id: SessionId,
-        verified_at: DateTime<Utc>,
+        verified_at: crate::WireTimestamp,
         attestation: SkillEvidenceRef,
     ) -> Result<Self, String> {
         let proof = Self {
@@ -651,15 +650,15 @@ impl SkillCheckpointProof {
         Ok(proof)
     }
 
-    pub fn is_fresh_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_fresh_at(&self, now: crate::WireTimestamp) -> bool {
         now >= self.verified_at
-            && now.signed_duration_since(self.verified_at)
-                <= chrono::Duration::minutes(Self::MAX_AGE_MINUTES)
+            && now.duration_since(self.verified_at)
+                <= jiff::SignedDuration::from_mins(Self::MAX_AGE_MINUTES)
     }
 
     fn validate(&self) -> Result<(), String> {
         self.attestation.validate()?;
-        if !self.is_fresh_at(Utc::now()) {
+        if !self.is_fresh_at(crate::WireTimestamp::now()) {
             return Err("checkpoint proof is stale or from the future".into());
         }
         Ok(())
@@ -708,8 +707,8 @@ pub struct SkillIssuedDecision {
     pub command_identity: Option<SkillCommandIdentity>,
     pub decision: SkillDecision,
     pub checkpoint_proof: Option<SkillCheckpointProof>,
-    pub issued_at: DateTime<Utc>,
-    pub deadline: DateTime<Utc>,
+    pub issued_at: crate::WireTimestamp,
+    pub deadline: crate::WireTimestamp,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -721,8 +720,8 @@ struct SkillIssuedDecisionWire {
     command_identity: Option<SkillCommandIdentity>,
     decision: SkillDecision,
     checkpoint_proof: Option<SkillCheckpointProof>,
-    issued_at: DateTime<Utc>,
-    deadline: DateTime<Utc>,
+    issued_at: crate::WireTimestamp,
+    deadline: crate::WireTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -780,8 +779,8 @@ impl SkillIssuedDecision {
         session_id: SessionId,
         decision: SkillDecision,
         checkpoint_proof: Option<SkillCheckpointProof>,
-        issued_at: DateTime<Utc>,
-        deadline: DateTime<Utc>,
+        issued_at: crate::WireTimestamp,
+        deadline: crate::WireTimestamp,
     ) -> Result<Self, String> {
         Self::new_inner(
             reservation_id,
@@ -800,8 +799,8 @@ impl SkillIssuedDecision {
         command_identity: SkillCommandIdentity,
         decision: SkillDecision,
         checkpoint_proof: Option<SkillCheckpointProof>,
-        issued_at: DateTime<Utc>,
-        deadline: DateTime<Utc>,
+        issued_at: crate::WireTimestamp,
+        deadline: crate::WireTimestamp,
     ) -> Result<Self, String> {
         if command_identity.session_id != session_id {
             return Err("issued decision command identity belongs to another session".into());
@@ -823,8 +822,8 @@ impl SkillIssuedDecision {
         command_identity: Option<SkillCommandIdentity>,
         decision: SkillDecision,
         checkpoint_proof: Option<SkillCheckpointProof>,
-        issued_at: DateTime<Utc>,
-        deadline: DateTime<Utc>,
+        issued_at: crate::WireTimestamp,
+        deadline: crate::WireTimestamp,
     ) -> Result<Self, String> {
         let issued = Self {
             reservation_id,
@@ -839,7 +838,7 @@ impl SkillIssuedDecision {
         Ok(issued)
     }
 
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_active_at(&self, now: crate::WireTimestamp) -> bool {
         now >= self.issued_at && now <= self.deadline
     }
 
@@ -942,7 +941,7 @@ pub struct SkillSessionState {
     pub pending_issuance: Option<SkillIssuedDecision>,
     pub attempted_tactics: Vec<SkillTactic>,
     pub evidence: Vec<SkillEvidenceRef>,
-    pub deadline: DateTime<Utc>,
+    pub deadline: crate::WireTimestamp,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -958,7 +957,7 @@ struct SkillSessionStateWire {
     pending_issuance: Option<SkillIssuedDecision>,
     attempted_tactics: Vec<SkillTactic>,
     evidence: Vec<SkillEvidenceRef>,
-    deadline: DateTime<Utc>,
+    deadline: crate::WireTimestamp,
 }
 
 impl SkillSessionState {
@@ -975,7 +974,7 @@ impl SkillSessionState {
         pending_issuance: Option<SkillIssuedDecision>,
         attempted_tactics: Vec<SkillTactic>,
         evidence: Vec<SkillEvidenceRef>,
-        deadline: DateTime<Utc>,
+        deadline: crate::WireTimestamp,
     ) -> Result<Self, String> {
         let state = Self {
             schema_version: Self::SCHEMA_VERSION,
@@ -1103,13 +1102,16 @@ fn tactic_requires_checkpoint(tactic: SkillTactic) -> bool {
     )
 }
 
-fn issued_interval_ms(issued_at: DateTime<Utc>, deadline: DateTime<Utc>) -> Result<u64, String> {
-    let interval = deadline.signed_duration_since(issued_at);
-    if interval < chrono::Duration::zero() {
+fn issued_interval_ms(
+    issued_at: crate::WireTimestamp,
+    deadline: crate::WireTimestamp,
+) -> Result<u64, String> {
+    let interval = deadline.duration_since(issued_at);
+    if interval < jiff::SignedDuration::ZERO {
         return Err("issued decision is after the workflow deadline".into());
     }
     // Wire durations are whole milliseconds; sub-millisecond remainder is consistently floored.
-    u64::try_from(interval.num_milliseconds())
+    u64::try_from(interval.as_millis())
         .map_err(|_| "issued decision interval is not representable in milliseconds".into())
 }
 

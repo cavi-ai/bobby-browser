@@ -3,8 +3,8 @@ mod support;
 use std::sync::Arc;
 
 use cdp_gateway::{CdpConnection, CdpErrorCode, CdpEvent, CdpRequest, MethodRegistry};
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use serde_json::json;
 use types::{Capability, PageId, PrincipalId, SessionId, SessionState};
 
@@ -29,12 +29,12 @@ async fn connection(capabilities: impl IntoIterator<Item = Capability>) -> CdpCo
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             capabilities,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
         .expose_once();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     CdpConnection::new(
         authority.verify(&token).await.unwrap(),
         Arc::new(support::StaticRuntime {
@@ -59,12 +59,12 @@ async fn page_creating_connection() -> CdpConnection {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::PageWrite],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
         .expose_once();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     CdpConnection::new(
         authority.verify(&token).await.unwrap(),
         Arc::new(support::PageCreatingRuntime {
@@ -143,12 +143,12 @@ async fn client_initialization_accepts_any_pinned_puppeteer_utility_world_versio
                 Capability::PageWrite,
                 Capability::JavascriptEvaluate,
             ],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
         .expose_once();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let connection = CdpConnection::new(
         authority.verify(&token).await.unwrap(),
         Arc::new(support::PageCreatingRuntime {
@@ -214,7 +214,7 @@ async fn creating_a_target_without_a_runtime_session_names_where_sessions_come_f
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::PageWrite],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -249,7 +249,7 @@ async fn create_browser_context_is_registered_and_refuses_playwright_newpage() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::PageWrite],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

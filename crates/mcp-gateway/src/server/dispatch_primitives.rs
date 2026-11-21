@@ -22,10 +22,10 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let now = Utc::now();
+                let now = types::WireTimestamp::now();
                 if input.envelope.deadline <= now
                     || input.envelope.deadline
-                        > now + Duration::milliseconds(MAX_COMMAND_DEADLINE_MS)
+                        > now + Duration::from_millis(MAX_COMMAND_DEADLINE_MS)
                 {
                     return invalid_params_reason(id, "deadlineOutOfRange");
                 }

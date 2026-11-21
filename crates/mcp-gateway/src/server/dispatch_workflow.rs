@@ -154,7 +154,9 @@ impl Server {
                 {
                     return interface_error_response(id, interface_error);
                 }
-                let remaining = match (context.deadline - Utc::now()).to_std() {
+                let remaining = match std::time::Duration::try_from(
+                    context.deadline - types::WireTimestamp::now(),
+                ) {
                     Ok(remaining) => remaining,
                     Err(_) => return invalid_params_reason(id, "malformedArguments"),
                 };

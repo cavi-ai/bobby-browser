@@ -1,5 +1,5 @@
 use checkpoint_store::{CheckpointStore, CheckpointStoreError};
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use types::{
     AttemptId, CheckpointId, CommandClass, CommandId, CommandOutcome, PageId,
     RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt, RecoveryReceiptState,
@@ -25,7 +25,7 @@ fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint 
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }
 
@@ -116,7 +116,7 @@ fn recovery_receipt(checkpoint: &WorkflowCheckpoint) -> RecoveryReceipt {
         },
         SkillOutcome::failed(SkillFailure::DeadlineExceeded, Vec::new()).unwrap(),
         Vec::new(),
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .unwrap()
 }
@@ -658,7 +658,7 @@ async fn mismatched_workflow_identity_is_rejected_without_hiding_other_checkpoin
 
 fn skill_issuance(workflow_id: WorkflowId) -> SkillIssuedDecision {
     let session_id = SessionId::new();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let identity = SkillCommandIdentity::new(
         CommandId::new(),
         workflow_id.clone(),
@@ -685,7 +685,7 @@ fn skill_issuance(workflow_id: WorkflowId) -> SkillIssuedDecision {
         .unwrap(),
         None,
         now,
-        now + Duration::seconds(1),
+        now + Duration::from_secs(1),
     )
     .unwrap()
 }
@@ -1010,7 +1010,7 @@ async fn authority_digest_ignores_recovery_history_but_content_version_changes()
     drop(first);
 
     checkpoint.recovery_history.push(RecoveryRecord {
-        recorded_at: Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         decision: RecoveryDecision::Resumed {
             checkpoint_id: checkpoint.checkpoint_id.clone(),
             attempt_id: checkpoint.attempt_id.clone(),
@@ -1037,7 +1037,7 @@ async fn a_session_lists_its_own_workflows_newest_first_within_the_cap() {
         let mut entry = checkpoint(WorkflowId::new(), "https://example.test/step");
         entry.session_id = session.clone();
         // Deterministic ordering: no reliance on filesystem or clock ticks.
-        entry.created_at = Utc::now() + Duration::seconds(index);
+        entry.created_at = types::WireTimestamp::now() + Duration::from_secs(index);
         store.save(&entry).await.unwrap();
         expected.push(entry.workflow_id.clone());
     }
@@ -1163,7 +1163,7 @@ async fn listing_discovers_initially_rejected_checkpoints_after_in_place_repair(
         store.save(&healthy).await.unwrap();
         let mut repaired = checkpoint(WorkflowId::new(), "https://example.test/repaired");
         repaired.session_id = healthy.session_id.clone();
-        repaired.created_at = healthy.created_at + Duration::hours(1);
+        repaired.created_at = healthy.created_at + Duration::from_hours(1);
         let path = checkpoint_store::checkpoint_path(root.path(), &repaired.workflow_id);
         let bytes = serde_json::to_vec(&repaired).unwrap();
         let mut damaged = repaired.clone();
@@ -1273,7 +1273,7 @@ async fn listing_discovers_repairs_preserving_size_and_modified_time() {
     store.save(&healthy).await.unwrap();
     let mut repaired = healthy.clone();
     repaired.workflow_id = WorkflowId::new();
-    repaired.created_at += Duration::hours(1);
+    repaired.created_at += Duration::from_hours(1);
     let path = checkpoint_store::checkpoint_path(root.path(), &repaired.workflow_id);
     let bytes = serde_json::to_vec(&repaired).unwrap();
     let mut damaged = bytes.clone();
@@ -1375,7 +1375,7 @@ async fn listing_rebuilds_after_directory_update_preserving_modified_time() {
     let before = std::fs::metadata(root.path()).unwrap();
     let mut added = original.clone();
     added.workflow_id = WorkflowId::new();
-    added.created_at += Duration::hours(1);
+    added.created_at += Duration::from_hours(1);
     std::fs::write(
         checkpoint_store::checkpoint_path(root.path(), &added.workflow_id),
         serde_json::to_vec(&added).unwrap(),
@@ -1410,14 +1410,14 @@ async fn listing_reorders_rewrites_preserving_size_and_modified_time() {
     rewritten.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
     let mut newest = rewritten.clone();
     newest.workflow_id = WorkflowId::new();
-    newest.created_at += Duration::hours(1);
+    newest.created_at += Duration::from_hours(1);
     store.save(&rewritten).await.unwrap();
     store.save(&newest).await.unwrap();
     assert_eq!(
         store.list_for_session(&newest.session_id, 1).await.unwrap(),
         vec![newest.clone()]
     );
-    rewritten.created_at += Duration::hours(2);
+    rewritten.created_at += Duration::from_hours(2);
     rewrite_preserving_size_and_modified(
         &checkpoint_store::checkpoint_path(root.path(), &rewritten.workflow_id),
         &serde_json::to_vec(&rewritten).unwrap(),
@@ -1487,7 +1487,7 @@ async fn listing_refreshes_changed_files_before_applying_the_limit() {
     let directory_stamp = std::fs::metadata(root.path()).unwrap().modified().unwrap();
     let path = root.path().join(format!("{}.json", older.workflow_id.0));
     let metadata = std::fs::metadata(&path).unwrap();
-    older.created_at = newer.created_at + Duration::hours(1);
+    older.created_at = newer.created_at + Duration::from_hours(1);
     let bytes = serde_json::to_vec(&older).unwrap();
     assert_eq!(bytes.len() as u64, metadata.len());
     tokio::fs::write(&path, &bytes).await.unwrap();
@@ -1509,7 +1509,7 @@ async fn listing_refreshes_changed_files_before_applying_the_limit() {
 
     // Size changes also invalidate hints on filesystems with coarse timestamps.
     let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-    older.created_at = newer.created_at - Duration::hours(1);
+    older.created_at = newer.created_at - Duration::from_hours(1);
     older.current_url = "https://example.test/updated-checkpoint-with-a-longer-url".into();
     tokio::fs::write(&path, serde_json::to_vec(&older).unwrap())
         .await
@@ -1519,5 +1519,29 @@ async fn listing_refreshes_changed_files_before_applying_the_limit() {
     assert_eq!(
         store.list_for_session(&session, 1).await.unwrap()[0].workflow_id,
         newer.workflow_id
+    );
+}
+
+#[tokio::test]
+async fn legacy_chrono_authority_bytes_keep_their_digest() {
+    // Captured from Chrono 0.4.45 serialization of the pinned checkpoint layout.
+    const LEGACY: &str = r#"{"schemaVersion":1,"checkpointId":"00000000-0000-0000-0000-000000000001","workflowId":"00000000-0000-0000-0000-000000000002","attemptId":"00000000-0000-0000-0000-000000000003","sessionId":"00000000-0000-0000-0000-000000000004","pageId":"00000000-0000-0000-0000-000000000005","restartUrl":"https://example.test/start","currentUrl":"https://example.test/login","cursor":null,"boundaryCommandId":null,"recoveryClass":"replayable","invariants":[],"replayableInputs":[],"evidence":[],"recoveryHistory":[],"recoveryReceipts":[],"createdAt":"2025-01-02T03:04:05.123400Z"}"#;
+    let checkpoint: WorkflowCheckpoint = serde_json::from_str(LEGACY).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    tokio::fs::write(
+        checkpoint_store::checkpoint_path(root.path(), &checkpoint.workflow_id),
+        LEGACY,
+    )
+    .await
+    .unwrap();
+    let snapshot = store.lock_snapshot(&checkpoint.workflow_id).await.unwrap();
+    assert_eq!(
+        serde_json::to_string(snapshot.checkpoint()).unwrap(),
+        LEGACY
+    );
+    assert_eq!(
+        snapshot.digest(),
+        "03720138fbf3c864d936c847ac3611cca6c2fea8cfb1eaed075b34bdb8976f55"
     );
 }

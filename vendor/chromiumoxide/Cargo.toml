@@ -50,10 +50,10 @@ exclude = [
 [features]
 bytes = ["dep:bytes"]
 default = ["bytes"]
-fetcher = ["chromiumoxide_fetcher"]
-native-tls = ["chromiumoxide_fetcher/native-tls"]
-rustls = ["chromiumoxide_fetcher/rustls"]
-zip8 = ["chromiumoxide_fetcher/zip8"]
+fetcher = ["dep:anyhow", "dep:directories", "dep:windows-version", "dep:zip8", "reqwest/json", "tokio/io-util"]
+native-tls = ["reqwest/native-tls"]
+rustls = ["reqwest/rustls"]
+zip8 = ["dep:zip8"]
 
 [lib]
 name = "chromiumoxide"
@@ -150,8 +150,18 @@ optional = true
 [dependencies.chromiumoxide_cdp]
 version = "0.9"
 
-[dependencies.chromiumoxide_fetcher]
-version = "0.9"
+[dependencies.anyhow]
+version = "1"
+optional = true
+
+[dependencies.directories]
+version = "6"
+optional = true
+
+[dependencies.zip8]
+package = "zip"
+version = "9.6.1"
+features = ["deflate-flate2-zlib-rs"]
 optional = true
 default-features = false
 
@@ -207,8 +217,8 @@ version = "2"
 [dependencies.which]
 version = "8"
 
-[dev-dependencies.chrono]
-version = "0.4.1"
+[dev-dependencies.tempfile]
+version = "3"
 
 [dev-dependencies.proc-macro2]
 version = "1"
@@ -226,6 +236,10 @@ features = [
 
 [dev-dependencies.tracing-subscriber]
 version = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-version]
+version = "0.1"
+optional = true
 
 [target."cfg(windows)".dependencies.windows-registry]
 version = "0.100"

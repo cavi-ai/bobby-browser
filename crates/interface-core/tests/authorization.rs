@@ -3,11 +3,11 @@ use std::sync::{
     Arc,
 };
 
-use chrono::{Duration, Utc};
 use interface_core::{
     Authority, AuthorityStore, AuthorizationGuard, SessionOwnershipAuthority,
     SessionOwnershipRecordError, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration as Duration;
 use sha2::{Digest, Sha256};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, InterfaceErrorCode,
@@ -19,8 +19,8 @@ fn principal() -> PrincipalId {
     PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001"))
 }
 
-fn expiry() -> chrono::DateTime<Utc> {
-    Utc::now() + Duration::minutes(5)
+fn expiry() -> types::WireTimestamp {
+    types::WireTimestamp::now() + Duration::from_mins(5)
 }
 
 fn envelope() -> CommandEnvelope {
@@ -49,7 +49,7 @@ async fn expired_hash_enrollment_is_rejected_without_consuming_capacity() {
             token_hash,
             principal(),
             [Capability::SessionRead],
-            Utc::now() - Duration::seconds(1),
+            types::WireTimestamp::now() - Duration::from_secs(1),
         )
         .await
         .is_err());
@@ -69,13 +69,19 @@ async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state()
         .await
         .unwrap();
 
-    assert!(store.authenticate(bearer, Utc::now()).await.is_ok());
+    assert!(store
+        .authenticate(bearer, types::WireTimestamp::now())
+        .await
+        .is_ok());
     let wrong = store
-        .authenticate("different-authority-bearer-00001", Utc::now())
+        .authenticate(
+            "different-authority-bearer-00001",
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap_err();
     let malformed = store
-        .authenticate("not a bearer", Utc::now())
+        .authenticate("not a bearer", types::WireTimestamp::now())
         .await
         .unwrap_err();
     assert_eq!(wrong.code, InterfaceErrorCode::AuthenticationFailed);
@@ -85,7 +91,7 @@ async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state()
     store.revoke(&principal()).await.unwrap();
     assert_eq!(
         store
-            .authenticate(bearer, Utc::now())
+            .authenticate(bearer, types::WireTimestamp::now())
             .await
             .unwrap_err()
             .code,
@@ -100,7 +106,7 @@ async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state()
     );
 
     let expiring = AuthorityStore::with_capacity(1);
-    let expires_at = Utc::now() + Duration::minutes(1);
+    let expires_at = types::WireTimestamp::now() + Duration::from_mins(1);
     let expired_handle = expiring
         .enroll_hash(
             token_hash,
@@ -112,13 +118,13 @@ async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state()
         .unwrap();
     assert_eq!(
         expiring
-            .authenticate(bearer, expires_at + Duration::seconds(1))
+            .authenticate(bearer, expires_at + Duration::from_secs(1))
             .await
             .unwrap_err()
             .code,
         InterfaceErrorCode::AuthenticationFailed
     );
-    assert!(!expired_handle.is_valid_at(expires_at + Duration::seconds(1)));
+    assert!(!expired_handle.is_valid_at(expires_at + Duration::from_secs(1)));
 }
 
 #[tokio::test]
@@ -147,13 +153,13 @@ async fn token_verification_is_scoped_and_raw_token_is_never_retained() {
 #[tokio::test]
 async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
     let store = AuthorityStore::in_memory();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let live_principal = principal();
     let live = store
         .issue(
             live_principal.clone(),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -163,7 +169,7 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
         .issue(
             PrincipalId::from_uuid(uuid!("20000000-0000-0000-0000-000000000002")),
             [Capability::SessionRead],
-            now + Duration::seconds(1),
+            now + Duration::from_secs(1),
         )
         .await
         .unwrap()
@@ -173,7 +179,7 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
         .issue(
             live_principal.clone(),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -183,7 +189,7 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
 
     let unknown = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let malformed = "not+a+url-safe-token";
-    let validation_time = now + Duration::seconds(2);
+    let validation_time = now + Duration::from_secs(2);
     let errors = [unknown, malformed, expired.as_str(), revoked.as_str()]
         .into_iter()
         .map(|token| async {
@@ -217,12 +223,12 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
 #[tokio::test]
 async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records() {
     let store = AuthorityStore::with_capacity(1);
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     store
         .issue(
             principal(),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap();
@@ -230,7 +236,7 @@ async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records()
         .issue(
             PrincipalId::from_uuid(uuid!("30000000-0000-0000-0000-000000000003")),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap_err();
@@ -241,7 +247,7 @@ async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records()
         .issue(
             PrincipalId::from_uuid(uuid!("30000000-0000-0000-0000-000000000003")),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .is_ok());
@@ -251,7 +257,7 @@ async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records()
         .issue(
             principal(),
             [Capability::SessionRead],
-            now - Duration::seconds(1),
+            now - Duration::from_secs(1),
         )
         .await
         .is_err());
@@ -259,7 +265,7 @@ async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records()
         .issue(
             PrincipalId::from_uuid(uuid!("40000000-0000-0000-0000-000000000004")),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .is_ok());
@@ -351,7 +357,7 @@ async fn deadline_is_rejected_before_capability_and_dispatch() {
         .expose_once()
         .to_owned();
     let authority = store.verify(&token).await.unwrap();
-    let expired = authority.context(Utc::now() - Duration::seconds(1), None);
+    let expired = authority.context(types::WireTimestamp::now() - Duration::from_secs(1), None);
     let runtime = RecordingRuntime::default();
     let api = AuthorizationGuard::new(authority);
 

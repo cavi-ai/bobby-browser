@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use broker::StartupCredential;
-use chrono::{DateTime, Duration, Utc};
 use clap::ValueEnum;
+use jiff::SignedDuration as Duration;
 use types::{Capability, CapabilityPreset, PrincipalId};
 use uuid::Uuid;
 
@@ -78,7 +78,7 @@ pub struct BootstrapMaterial {
     bearer: String,
     principal_id: PrincipalId,
     capabilities_csv: String,
-    expires_at: DateTime<Utc>,
+    expires_at: types::WireTimestamp,
     preset: BootstrapPreset,
 }
 
@@ -108,7 +108,7 @@ impl BootstrapMaterial {
         &self.capabilities_csv
     }
 
-    pub fn expires_at(&self) -> DateTime<Utc> {
+    pub fn expires_at(&self) -> types::WireTimestamp {
         self.expires_at
     }
 
@@ -140,7 +140,9 @@ pub fn generate_bootstrap_for_preset(
         .map(|capability| capability.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let expires_at = Utc::now() + ttl;
+    let expires_at = types::WireTimestamp::now()
+        .checked_add(ttl)
+        .ok_or_else(|| anyhow!("bootstrap TTL exceeds supported range"))?;
     Ok(BootstrapMaterial {
         bearer,
         principal_id,
@@ -167,7 +169,7 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
         material.bearer(),
         material.principal_id().as_uuid(),
         material.capabilities_csv(),
-        material.expires_at().to_rfc3339(),
+        material.expires_at().rfc3339(),
     );
     write_private_file(path, contents.as_bytes())
         .with_context(|| format!("failed to write bootstrap env to {}", path.display()))
@@ -192,15 +194,13 @@ pub fn rotate_expired_bootstrap(path: &Path, ttl: Duration) -> Result<RotateRepo
             path.display()
         )
     })?;
-    let expires_at = DateTime::parse_from_rfc3339(expires_at)
-        .with_context(|| {
-            format!(
-                "bootstrap env {} has invalid expiry {expires_at}",
-                path.display()
-            )
-        })?
-        .with_timezone(&Utc);
-    if expires_at > Utc::now() {
+    let expires_at = types::WireTimestamp::parse_rfc3339(expires_at).with_context(|| {
+        format!(
+            "bootstrap env {} has invalid expiry {expires_at}",
+            path.display()
+        )
+    })?;
+    if expires_at > types::WireTimestamp::now() {
         return Ok(RotateReport { rotated: false });
     }
     let existing = fields.capabilities.unwrap_or_default();
@@ -284,14 +284,12 @@ pub fn load_startup_from_env_file(path: &Path) -> Result<StartupCredential> {
         .map(|value| parse_capability(value.trim()))
         .collect::<Result<Vec<_>>>()
         .with_context(|| format!("bootstrap env {} has invalid capabilities", path.display()))?;
-    let expires_at = DateTime::parse_from_rfc3339(&expires_at)
-        .with_context(|| {
-            format!(
-                "bootstrap env {} has invalid expiry {expires_at}",
-                path.display()
-            )
-        })?
-        .with_timezone(&Utc);
+    let expires_at = types::WireTimestamp::parse_rfc3339(&expires_at).with_context(|| {
+        format!(
+            "bootstrap env {} has invalid expiry {expires_at}",
+            path.display()
+        )
+    })?;
     StartupCredential::new(bearer, principal_id, capabilities, expires_at).with_context(|| {
         format!(
             "bootstrap env {} contains invalid startup credential",
@@ -332,7 +330,11 @@ where
         return Ok(ResolveOutcome::FromFile(credential));
     }
     if is_loopback_host(host) {
-        let material = generate_bootstrap(Duration::days(DEFAULT_TTL_DAYS))?;
+        let material = generate_bootstrap(Duration::from_hours(
+            (DEFAULT_TTL_DAYS)
+                .checked_mul(24)
+                .expect("duration overflow"),
+        ))?;
         write_bootstrap_env(bootstrap_path, &material, false)?;
         let credential = startup_from_material(&material)?;
         return Ok(ResolveOutcome::Generated {
@@ -672,11 +674,21 @@ fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_bootstrap_ttl_returns_error() {
+        assert!(generate_bootstrap(Duration::from_secs(400_000_000_000)).is_err());
+    }
+
     use tempfile::tempdir;
 
     #[test]
     fn generate_bootstrap_meets_bearer_rules() {
-        let material = generate_bootstrap(chrono::Duration::days(DEFAULT_TTL_DAYS)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(
+            (DEFAULT_TTL_DAYS)
+                .checked_mul(24)
+                .expect("duration overflow"),
+        ))
+        .unwrap();
         assert!(material.bearer().len() >= 32);
         assert!(!material.capabilities_csv().contains("authority:admin"));
         assert!(material.capabilities_csv().contains("session:read"));
@@ -689,9 +701,11 @@ mod tests {
 
     #[test]
     fn agent_preset_omits_authority_admin() {
-        let material =
-            generate_bootstrap_for_preset(chrono::Duration::days(1), BootstrapPreset::Agent)
-                .unwrap();
+        let material = generate_bootstrap_for_preset(
+            jiff::SignedDuration::from_hours(24),
+            BootstrapPreset::Agent,
+        )
+        .unwrap();
         assert!(!material.capabilities_csv().contains("authority:admin"));
         assert!(material.capabilities_csv().contains("intent:execute"));
         assert!(material.capabilities_csv().contains("context:read"));
@@ -715,7 +729,8 @@ mod tests {
             BootstrapPreset::Openshell,
         ] {
             let material =
-                generate_bootstrap_for_preset(chrono::Duration::days(1), preset).unwrap();
+                generate_bootstrap_for_preset(jiff::SignedDuration::from_hours(24), preset)
+                    .unwrap();
             let expected = preset
                 .capability_preset()
                 .capabilities()
@@ -759,16 +774,18 @@ mod tests {
     fn agent_heal_never_adds_authority_admin() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material =
-            generate_bootstrap_for_preset(chrono::Duration::days(1), BootstrapPreset::Agent)
-                .unwrap();
+        let material = generate_bootstrap_for_preset(
+            jiff::SignedDuration::from_hours(24),
+            BootstrapPreset::Agent,
+        )
+        .unwrap();
         // Stale agent set missing context:read and without authority:admin.
         let stale = "session:read,session:write,page:read,page:write,browser:mutate,intent:execute,vision:assist,artifact:read,artifact:capture,recovery:read,recovery:write";
         let contents = format!(
             "# bobby-bootstrap-preset: agent\n{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
             material.bearer(),
             material.principal_id().as_uuid(),
-            material.expires_at().to_rfc3339(),
+            material.expires_at().rfc3339(),
         );
         write_private_file(&path, contents.as_bytes()).unwrap();
         let report = ensure_unrestricted_bootstrap(&path).unwrap();
@@ -803,7 +820,7 @@ mod tests {
     fn write_refuses_existing_without_force() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &material, false).unwrap();
         let err = write_bootstrap_env(&path, &material, false).unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -813,9 +830,9 @@ mod tests {
     fn write_force_overwrites_and_load_succeeds() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let first = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let first = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &first, false).unwrap();
-        let second = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let second = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &second, true).unwrap();
         load_startup_from_env_file(&path).unwrap();
     }
@@ -834,7 +851,7 @@ mod tests {
             0o644
         );
 
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &material, true).unwrap();
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -852,7 +869,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_bearer() {
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         let rendered = format!("{material:?}");
         assert!(!rendered.contains(material.bearer()));
         assert!(rendered.contains("REDACTED"));
@@ -873,9 +890,9 @@ mod tests {
     fn resolve_prefers_process_env() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let file_material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let file_material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &file_material, false).unwrap();
-        let env_material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let env_material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         let env_cred = broker::StartupCredential::new(
             env_material.bearer().to_string(),
             env_material.principal_id().clone(),
@@ -891,7 +908,7 @@ mod tests {
     fn resolve_loads_file_when_env_missing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &material, false).unwrap();
         let outcome = resolve_startup_credential_with("127.0.0.1", &path, || {
             Err(broker::StartupCredentialError::MissingInput)
@@ -928,7 +945,7 @@ mod tests {
     fn resolve_errors_on_invalid_env() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         write_bootstrap_env(&path, &material, false).unwrap();
         let err = resolve_startup_credential_with("127.0.0.1", &path, || {
             Err(broker::StartupCredentialError::InvalidPrincipal)
@@ -963,14 +980,14 @@ mod tests {
     fn heal_bootstrap_env_file_rewrites_once() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         // Write a deliberately stale capability set while keeping other fields.
         let stale = "authority:admin,session:read,session:write,page:read,page:write,browser:mutate,file:upload,file:download,artifact:read,artifact:capture,recovery:read,recovery:write";
         let contents = format!(
             "{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
             material.bearer(),
             material.principal_id().as_uuid(),
-            material.expires_at().to_rfc3339(),
+            material.expires_at().rfc3339(),
         );
         write_private_file(&path, contents.as_bytes()).unwrap();
 
@@ -1001,13 +1018,13 @@ mod tests {
     fn ensure_unrestricted_bootstrap_heals_file_before_load() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         let stale = "session:read,session:write,page:read,page:write,browser:mutate,artifact:read,artifact:capture,recovery:read,recovery:write,authority:admin";
         let contents = format!(
             "{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
             material.bearer(),
             material.principal_id().as_uuid(),
-            material.expires_at().to_rfc3339(),
+            material.expires_at().rfc3339(),
         );
         write_private_file(&path, contents.as_bytes()).unwrap();
 
@@ -1022,13 +1039,13 @@ mod tests {
     fn heal_preserves_export_prefix_style() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         let stale = "session:read,session:write,page:read,page:write,browser:mutate,artifact:read,artifact:capture,recovery:read,recovery:write,authority:admin";
         let contents = format!(
             "export {ENV_TOKEN}={}\nexport {ENV_PRINCIPAL}={}\nexport {ENV_CAPABILITIES}={stale}\nexport {ENV_EXPIRES_AT}={}\n",
             material.bearer(),
             material.principal_id().as_uuid(),
-            material.expires_at().to_rfc3339(),
+            material.expires_at().rfc3339(),
         );
         write_private_file(&path, contents.as_bytes()).unwrap();
         let report = heal_bootstrap_env_file(&path).unwrap();
@@ -1047,13 +1064,13 @@ mod tests {
     fn read_accepts_export_prefixed_keys() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bootstrap.env");
-        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let material = generate_bootstrap(jiff::SignedDuration::from_hours(24)).unwrap();
         let contents = format!(
             "export {ENV_TOKEN}={}\nexport {ENV_PRINCIPAL}={}\nexport {ENV_CAPABILITIES}={}\nexport {ENV_EXPIRES_AT}={}\n",
             material.bearer(),
             material.principal_id().as_uuid(),
             material.capabilities_csv(),
-            material.expires_at().to_rfc3339(),
+            material.expires_at().rfc3339(),
         );
         write_private_file(&path, contents.as_bytes()).unwrap();
         load_startup_from_env_file(&path).unwrap();

@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+
 use interface_core::{AuthorityStore, RuntimeInterface};
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -209,14 +209,17 @@ async fn rig(death: Death) -> Rig {
                 Capability::PageWrite,
                 Capability::BrowserMutate,
             ],
-            Utc::now() + chrono::Duration::minutes(10),
+            types::WireTimestamp::now() + jiff::SignedDuration::from_mins(10),
         )
         .await
         .unwrap()
         .expose_once();
     let handle = authority.verify(&token).await.unwrap();
     let api = AuthenticatedRuntime::new(runtime, handle.clone());
-    let context = handle.context(Utc::now() + chrono::Duration::minutes(5), None);
+    let context = handle.context(
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
+        None,
+    );
     let session = api
         .create_session(
             context.clone(),
@@ -256,7 +259,7 @@ fn observe_envelope(rig: &Rig) -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id: rig.session.clone(),
         page_id: Some(rig.page.clone()),
-        deadline: Utc::now() + chrono::Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
             AccessibilitySnapshotCommand {
                 max_nodes: Some(32),

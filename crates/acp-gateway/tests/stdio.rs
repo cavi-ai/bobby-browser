@@ -26,7 +26,7 @@ fn bootstrap_env() -> Vec<(String, String)> {
         ),
         (
             "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT".into(),
-            (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            (types::WireTimestamp::now() + jiff::SignedDuration::from_hours(1)).rfc3339(),
         ),
     ]
 }
@@ -284,7 +284,7 @@ fn context_and_recovery_operations_return_structured_results() {
         "evidence": [],
         "recoveryHistory": [],
         "recoveryReceipts": [],
-        "createdAt": chrono::Utc::now().to_rfc3339(),
+        "createdAt": types::WireTimestamp::now().rfc3339(),
     });
     let checkpoint_prompt = serde_json::json!({
         "operation": "checkpointSave",

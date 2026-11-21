@@ -25,9 +25,9 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{v1::ConnectionTo, Agent, Client, Lines, Result as AcpResult};
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use intent_engine::vision_gate_closed;
 use interface_core::{CapabilityHandle, InterfaceResult, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use sdk_core::AuthenticatedRuntime;
 use tokio::sync::Mutex;
 use types::{
@@ -496,7 +496,7 @@ impl AcpServer {
         // process enrolled. Requests carry no idempotency key; each prompt
         // step mints its own command id.
         self.capability_handle
-            .context(Utc::now() + Duration::minutes(5), None)
+            .context(types::WireTimestamp::now() + Duration::from_mins(5), None)
     }
 
     /// Serve stdin/stdout until the client disconnects.
@@ -1271,7 +1271,7 @@ fn envelope(
         attempt_id: AttemptId::new(),
         session_id: runtime_session.clone(),
         page_id: Some(page.clone()),
-        deadline: Utc::now() + Duration::seconds(60),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(60),
         command,
     }
 }
@@ -1432,7 +1432,7 @@ mod tests {
             if self.block_create.load(std::sync::atomic::Ordering::Acquire) {
                 self.create_release.notified().await;
             }
-            let now = Utc::now();
+            let now = types::WireTimestamp::now();
             let id = SessionId::new();
             self.created
                 .lock()
@@ -1632,7 +1632,7 @@ mod tests {
                     Capability::IntentExecute,
                     Capability::VisionAssist,
                 ],
-                Utc::now() + Duration::minutes(5),
+                types::WireTimestamp::now() + Duration::from_mins(5),
             )
             .await
             .unwrap()

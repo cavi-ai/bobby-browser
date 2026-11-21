@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use jiff::SignedDuration;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CreateSessionRequest, DetectChallengeHints,
     DetectChallengeIntent, ExecutionPolicy, IntentCommand, NavigateCommand, OpenPageRequest,
@@ -18,7 +18,7 @@ use crate::v1_client;
 
 /// Extra slack on top of the solve budget for navigation, session setup,
 /// and the model's own latency on the terminal reassessment.
-const DEADLINE_SLACK: ChronoDuration = ChronoDuration::seconds(90);
+const DEADLINE_SLACK: SignedDuration = SignedDuration::from_secs(90);
 
 pub struct VisionSolveOptions {
     pub purpose: String,
@@ -96,7 +96,7 @@ pub fn detect(options: VisionDetectOptions) -> Result<()> {
                 timeout_ms: 30_000,
             })),
             options.timeout_ms,
-        );
+        )?;
         let outcome = submit(ClientView::from(&options), &envelope)?;
         if outcome["status"] != "completed" {
             bail!("navigate to {url} failed: {}", outcome_message(&outcome));
@@ -114,7 +114,7 @@ pub fn detect(options: VisionDetectOptions) -> Result<()> {
             },
         })),
         options.timeout_ms,
-    );
+    )?;
     let outcome = submit(ClientView::from(&options), &envelope)?;
     if outcome["status"] != "completed" {
         bail!("detect failed: {}", outcome_message(&outcome));
@@ -174,7 +174,7 @@ pub fn solve(options: VisionSolveOptions) -> Result<()> {
                 timeout_ms: 30_000,
             })),
             options.timeout_ms,
-        );
+        )?;
         let outcome = submit(ClientView::from(&options), &envelope)?;
         if outcome["status"] != "completed" {
             bail!("navigate to {url} failed: {}", outcome_message(&outcome));
@@ -192,7 +192,7 @@ pub fn solve(options: VisionSolveOptions) -> Result<()> {
             },
         })),
         options.timeout_ms,
-    );
+    )?;
     let outcome = submit(ClientView::from(&options), &envelope)?;
     if outcome["status"] == "completed" {
         let evidence = outcome["evidence"].as_array().map_or(0, Vec::len);
@@ -245,17 +245,24 @@ fn envelope(
     page_id: &PageId,
     command: RuntimeCommand,
     timeout_ms: u64,
-) -> CommandEnvelope {
-    CommandEnvelope {
+) -> Result<CommandEnvelope> {
+    let timeout = i64::try_from(timeout_ms).context("timeout exceeds supported range")?;
+    let duration = SignedDuration::from_millis(timeout)
+        .checked_add(DEADLINE_SLACK)
+        .context("timeout exceeds supported range")?;
+    let deadline = types::WireTimestamp::now()
+        .checked_add(duration)
+        .context("timeout exceeds supported range")?;
+    Ok(CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + ChronoDuration::milliseconds(timeout_ms as i64) + DEADLINE_SLACK,
+        deadline,
         command,
-    }
+    })
 }
 
 /// The three fields the HTTP helpers actually use, shared by the solve
@@ -303,8 +310,14 @@ fn post<T: serde::Serialize>(
             body: Some(serde_json::to_value(body)?),
             idempotency_key: None,
         },
-        Duration::from_millis(client.timeout_ms) + Duration::from_secs(90),
-        ChronoDuration::milliseconds(client.timeout_ms as i64) + DEADLINE_SLACK,
+        Duration::from_millis(client.timeout_ms)
+            .checked_add(Duration::from_secs(90))
+            .context("timeout exceeds supported range")?,
+        SignedDuration::from_millis(
+            i64::try_from(client.timeout_ms).context("timeout exceeds supported range")?,
+        )
+        .checked_add(DEADLINE_SLACK)
+        .context("timeout exceeds supported range")?,
     )?;
     if !response.status.is_success() {
         bail!("POST {path} -> {}: {}", response.status, response.body);

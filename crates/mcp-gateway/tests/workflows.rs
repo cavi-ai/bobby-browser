@@ -3,8 +3,8 @@
 
 use std::{path::Path, sync::Arc};
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -20,7 +20,7 @@ async fn server(dir: &Path) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000031")),
             vec![Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();

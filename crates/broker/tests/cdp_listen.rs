@@ -89,7 +89,7 @@ async fn cdp_listener_binds_runtime_for_an_issued_principal() {
         .issue(
             principal,
             vec![types::Capability::SessionRead],
-            chrono::Utc::now() + chrono::Duration::minutes(10),
+            types::WireTimestamp::now() + jiff::SignedDuration::from_mins(10),
         )
         .await
         .expect("principal bearer issues")

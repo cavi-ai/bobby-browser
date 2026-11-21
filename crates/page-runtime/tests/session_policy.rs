@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use page_runtime::{PageRuntime, SessionGate, VisionGate};
 use tokio::sync::Mutex;
 use types::{
@@ -183,7 +183,7 @@ async fn envelope_for(runtime: &PageRuntime, session_id: SessionId) -> CommandEn
         attempt_id: types::AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
             url: "https://example.test/".into(),
             wait_until: WaitUntil::DomContentLoaded,

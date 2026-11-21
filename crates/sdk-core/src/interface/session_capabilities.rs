@@ -93,7 +93,7 @@ impl AuthenticatedRuntime {
         Ok(SessionCapabilities {
             schema_version: SessionCapabilities::SCHEMA_VERSION,
             session_id: id,
-            observed_at: Utc::now(),
+            observed_at: types::WireTimestamp::now(),
             engine: support.map(|s| s.engine_name().into()),
             connection,
             features,

@@ -1275,7 +1275,7 @@ async fn cleanup_workflow(
         .cleanup(
             || {
                 handle.capability.context(
-                    Utc::now() + Duration::seconds(CLEANUP_DEADLINE_SECONDS),
+                    types::WireTimestamp::now() + Duration::from_secs(CLEANUP_DEADLINE_SECONDS),
                     None,
                 )
             },
@@ -1714,14 +1714,14 @@ mod tests {
                     types::Capability::SessionWrite,
                     types::Capability::PageWrite,
                 ],
-                Utc::now() + Duration::hours(1),
+                types::WireTimestamp::now() + Duration::from_hours(1),
             )
             .await
             .unwrap();
         let handle = authority.verify(&token.expose_once()).await.unwrap();
-        let original = handle.context(Utc::now() - Duration::seconds(1), None);
+        let original = handle.context(types::WireTimestamp::now() - Duration::from_secs(1), None);
         let original_correlation = original.correlation_id.clone();
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let session = types::SessionState {
             id: types::SessionId::new(),
             profile: "expired-request".into(),
@@ -1772,8 +1772,8 @@ mod tests {
         let contexts = runtime.delete_contexts.lock().await;
         assert_eq!(contexts.len(), 1);
         let cleanup = &contexts[0];
-        assert!(cleanup.deadline > Utc::now() + Duration::seconds(25));
-        assert!(cleanup.deadline <= Utc::now() + Duration::seconds(31));
+        assert!(cleanup.deadline > types::WireTimestamp::now() + Duration::from_secs(25));
+        assert!(cleanup.deadline <= types::WireTimestamp::now() + Duration::from_secs(31));
         assert_eq!(cleanup.principal_id, *handle.principal_id());
         assert_ne!(cleanup.correlation_id, original_correlation);
         for capability in [
@@ -1868,12 +1868,12 @@ mod tests {
             .issue(
                 types::PrincipalId::from_uuid(uuid::Uuid::from_u128(703)),
                 types::Capability::ALL.iter().copied(),
-                Utc::now() + Duration::hours(1),
+                types::WireTimestamp::now() + Duration::from_hours(1),
             )
             .await
             .unwrap();
         let handle = authority.verify(&token.expose_once()).await.unwrap();
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let session = types::SessionState {
             id: types::SessionId(uuid::Uuid::from_u128(704)),
             profile: "terminal-response-cancellation".into(),
@@ -1920,12 +1920,9 @@ mod tests {
                 .await
                 .expect("workflow_start answered")
         });
-        tokio::time::timeout(
-            Duration::seconds(5).to_std().unwrap(),
-            gate.wait_until_entered(),
-        )
-        .await
-        .expect("terminal response entered artifact enumeration");
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_entered())
+            .await
+            .expect("terminal response entered artifact enumeration");
 
         server
             .handle_message(json!({
@@ -1933,7 +1930,7 @@ mod tests {
                 "params":{"requestId":9}
             }))
             .await;
-        let response = tokio::time::timeout(Duration::seconds(5).to_std().unwrap(), request)
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
             .await
             .expect("cancelled terminal response completed")
             .unwrap();
@@ -1945,7 +1942,7 @@ mod tests {
             "{response}"
         );
 
-        tokio::time::timeout(Duration::seconds(5).to_std().unwrap(), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if !events
                     .lock()
@@ -1998,12 +1995,12 @@ mod tests {
             .issue(
                 types::PrincipalId::from_uuid(uuid::Uuid::from_u128(705)),
                 types::Capability::ALL.iter().copied(),
-                Utc::now() + Duration::hours(1),
+                types::WireTimestamp::now() + Duration::from_hours(1),
             )
             .await
             .unwrap();
         let handle = authority.verify(&token.expose_once()).await.unwrap();
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let session = types::SessionState {
             id: types::SessionId(uuid::Uuid::from_u128(706)),
             profile: "direct-cleanup-reply".into(),
@@ -2037,7 +2034,7 @@ mod tests {
         let supervisor = tokio::spawn(supervise_start(
             runtime.clone(),
             CleanupHandle::untracked(handle.clone()),
-            handle.context(Utc::now() + Duration::minutes(1), None),
+            handle.context(types::WireTimestamp::now() + Duration::from_mins(1), None),
             reservation,
             types::CreateSessionRequest {
                 profile: "direct-cleanup-reply".into(),
@@ -2096,18 +2093,15 @@ mod tests {
                 )
                 .await
         });
-        tokio::time::timeout(
-            Duration::seconds(5).to_std().unwrap(),
-            gate.wait_until_entered(),
-        )
-        .await
-        .expect("post-ready failure response entered resource enumeration");
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_entered())
+            .await
+            .expect("post-ready failure response entered resource enumeration");
         response.abort();
         assert!(response.await.unwrap_err().is_cancelled());
         gate.release();
         drop(reservation);
 
-        tokio::time::timeout(Duration::seconds(5).to_std().unwrap(), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if !events
                     .lock()
@@ -2157,12 +2151,12 @@ mod tests {
             .issue(
                 types::PrincipalId::from_uuid(uuid::Uuid::from_u128(708)),
                 types::Capability::ALL.iter().copied(),
-                Utc::now() + Duration::hours(1),
+                types::WireTimestamp::now() + Duration::from_hours(1),
             )
             .await
             .unwrap();
         let handle = authority.verify(&token.expose_once()).await.unwrap();
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let session = types::SessionState {
             id: types::SessionId(uuid::Uuid::from_u128(709)),
             profile: "publication-generation-reply".into(),
@@ -2217,12 +2211,9 @@ mod tests {
                 .await
                 .expect("workflow_start answered")
         });
-        tokio::time::timeout(
-            Duration::seconds(5).to_std().unwrap(),
-            gate.wait_until_entered(),
-        )
-        .await
-        .expect("success response entered resource enumeration");
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_entered())
+            .await
+            .expect("success response entered resource enumeration");
         server
             .handle_message(json!({
                 "jsonrpc":"2.0","id":2,"method":"initialize",
@@ -2237,19 +2228,13 @@ mod tests {
             .await;
         gate.release();
 
-        tokio::time::timeout(
-            Duration::seconds(5).to_std().unwrap(),
-            gate.wait_until_entered(),
-        )
-        .await
-        .expect("supervisor-lost fallback entered resource enumeration");
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_entered())
+            .await
+            .expect("supervisor-lost fallback entered resource enumeration");
         gate.release();
-        tokio::time::timeout(
-            Duration::seconds(5).to_std().unwrap(),
-            gate.wait_until_entered(),
-        )
-        .await
-        .expect("publication generation failure entered resource enumeration");
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_entered())
+            .await
+            .expect("publication generation failure entered resource enumeration");
 
         server
             .handle_message(json!({
@@ -2257,7 +2242,7 @@ mod tests {
                 "params":{"requestId":12}
             }))
             .await;
-        let response = tokio::time::timeout(Duration::seconds(5).to_std().unwrap(), request)
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
             .await
             .expect("cancelled publication-generation response completed")
             .unwrap();
@@ -2273,7 +2258,7 @@ mod tests {
             "no handle response was delivered"
         );
 
-        tokio::time::timeout(Duration::seconds(5).to_std().unwrap(), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if !events
                     .lock()

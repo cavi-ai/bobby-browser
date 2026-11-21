@@ -8,7 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 config.workspace = true
 tokio.workspace = true
 tracing.workspace = true

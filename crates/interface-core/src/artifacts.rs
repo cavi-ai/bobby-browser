@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use artifact_store::{ArtifactRecord, ArtifactStore};
-use chrono::Utc;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use types::{
@@ -352,7 +352,7 @@ fn authenticated_for(
     ctx: &RequestContext,
     capability: Capability,
 ) -> bool {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     ctx.validate_at(now).is_ok()
         && !handle.is_invalid_at(now)
         && ctx.principal_id == *handle.principal_id()

@@ -12,7 +12,7 @@
 //! `AbortHandle`; the handler future is dropped and the outcome requires reconciliation.
 
 use async_trait::async_trait;
-use chrono::Utc;
+
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
@@ -128,7 +128,7 @@ impl JobScheduler {
             decision: input.decision,
             evidence_sha256: input.evidence_sha256,
             actor: actor.clone(),
-            resolved_at: Utc::now(),
+            resolved_at: types::WireTimestamp::now(),
             provenance: "operatorAttested".into(),
         };
         let mut snapshot = job.clone();
@@ -465,7 +465,7 @@ impl JobScheduler {
                                 success: false,
                                 output: None,
                                 error: Some("job timeout".to_string()),
-                                completed_at: Utc::now(),
+                                completed_at: types::WireTimestamp::now(),
                             },
                             true,
                         )
@@ -547,7 +547,7 @@ impl JobScheduler {
     /// `get_job` answers from, so without a bound it grew for the life of
     /// the process. Pending/Running jobs are never pruned.
     async fn prune_terminal(&self, registry: &mut HashMap<JobId, Job>) {
-        let mut terminal: Vec<(JobId, Option<chrono::DateTime<chrono::Utc>>)> = registry
+        let mut terminal: Vec<(JobId, Option<types::WireTimestamp>)> = registry
             .iter()
             .filter(|(_, job)| {
                 matches!(
@@ -767,7 +767,7 @@ impl JobScheduler {
                     success: false,
                     output: None,
                     error: Some(format!("no handler registered for job: {}", job.name)),
-                    completed_at: Utc::now(),
+                    completed_at: types::WireTimestamp::now(),
                 };
             }
         };
@@ -778,7 +778,7 @@ impl JobScheduler {
                 success: true,
                 output: Some(output),
                 error: None,
-                completed_at: Utc::now(),
+                completed_at: types::WireTimestamp::now(),
             },
             Ok(_) => JobResult {
                 job_id: job_id.clone(),
@@ -788,14 +788,14 @@ impl JobScheduler {
                     "job output exceeds {} bytes",
                     self.config.max_output_bytes
                 )),
-                completed_at: Utc::now(),
+                completed_at: types::WireTimestamp::now(),
             },
             Err(e) => JobResult {
                 job_id: job_id.clone(),
                 success: false,
                 output: None,
                 error: Some(e),
-                completed_at: Utc::now(),
+                completed_at: types::WireTimestamp::now(),
             },
         }
     }

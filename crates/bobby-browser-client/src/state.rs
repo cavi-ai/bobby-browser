@@ -1,6 +1,5 @@
 //! Session and page runtime state returned by `/v1` endpoints.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{ExecutionPolicy, PageId, SessionId};
@@ -310,8 +309,8 @@ pub struct SessionState {
     pub profile: String,
     pub proxy: Option<String>,
     pub page_ids: Vec<PageId>,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: DateTime<Utc>,
+    pub created_at: crate::WireTimestamp,
+    pub last_used_at: crate::WireTimestamp,
     pub execution_policy: ExecutionPolicy,
     /// Set at creation by `CreateSessionRequest::zigzagzig`: page-bound
     /// commands run under the ZigZagZig recovery ladder. Recorded
@@ -395,7 +394,7 @@ pub struct SessionFeatureAvailability {
 pub struct SessionCapabilities {
     pub schema_version: u16,
     pub session_id: SessionId,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: crate::WireTimestamp,
     pub engine: Option<String>,
     pub connection: SessionConnectionState,
     pub features: Vec<SessionFeatureAvailability>,

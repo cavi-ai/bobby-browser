@@ -3,8 +3,8 @@ use std::sync::{
     Arc,
 };
 
-use chrono::{Duration, Utc};
 use interface_core::{canonical_sha256, IdempotencyReservation, IdempotencyStore};
+use jiff::SignedDuration as Duration;
 use tokio::sync::Barrier;
 use types::{
     AttemptId, CommandError, CommandId, CommandOutcome, CorrelationId, ErrorCode, ErrorLayer,
@@ -174,7 +174,7 @@ async fn durable_mutations_append_without_rewriting_unrelated_entries() {
                     "10000000-0000-0000-0000-000000000001"
                 } else { "10000000-0000-0000-0000-000000000002" }),
                 "key": format!("old-{index}"), "operation": InterfaceOperation::SubmitCommand,
-                "canonicalSha256": vec![0; 32], "expiresAt": Utc::now() + Duration::hours(1),
+                "canonicalSha256": vec![0; 32], "expiresAt": types::WireTimestamp::now() + Duration::from_hours(1),
                 "lastUsed": index + 1, "state": {"kind": "retained", "value": CommandId::new()}
             })
         })
@@ -207,7 +207,11 @@ async fn durable_mutations_append_without_rewriting_unrelated_entries() {
         "new writes use the versioned log"
     );
     store
-        .finish(permit, completed(CommandId::new()), Utc::now())
+        .finish(
+            permit,
+            completed(CommandId::new()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     let finished = std::fs::read(&path).unwrap();
@@ -245,7 +249,11 @@ async fn doctor_downgrade_preserves_current_keys_and_source_bytes() {
     };
     let command_id = CommandId::new();
     store
-        .finish(done, completed(command_id.clone()), Utc::now())
+        .finish(
+            done,
+            completed(command_id.clone()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     let IdempotencyReservation::Acquired(pending) = reserve(
@@ -344,7 +352,11 @@ async fn log_damage_is_preserved_and_never_downgraded_or_replayed() {
         panic!("acquire");
     };
     store
-        .finish(permit, completed(CommandId::new()), Utc::now())
+        .finish(
+            permit,
+            completed(CommandId::new()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     drop(store);
@@ -399,7 +411,7 @@ async fn unresolved_restoration_never_expires_or_admits_a_retry() {
     let owner = principal("10000000-0000-0000-0000-000000000001");
     let original = serde_json::json!({"schemaVersion":1,"entries":[{
         "principalId":owner, "key":"lost-authority", "operation":InterfaceOperation::SubmitCommand,
-        "canonicalSha256":vec![0;32], "expiresAt":Utc::now()+Duration::minutes(1),
+        "canonicalSha256":vec![0;32], "expiresAt":types::WireTimestamp::now()+Duration::from_mins(1),
         "lastUsed":1, "state":{"kind":"retained","value":CommandId::new()}
     }]});
     std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
@@ -427,8 +439,8 @@ async fn unresolved_restoration_never_expires_or_admits_a_retry() {
             key("lost-authority"),
             InterfaceOperation::SubmitCommand,
             [0; 32],
-            Utc::now() + Duration::hours(1),
-            Utc::now() + Duration::hours(2),
+            types::WireTimestamp::now() + Duration::from_hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(2),
             CorrelationId::new(),
         )
         .await
@@ -511,7 +523,7 @@ async fn online_compaction_keeps_uncertain_keys_and_the_published_writer() {
     };
     let id = CommandId::new();
     store
-        .finish(permit, completed(id.clone()), Utc::now())
+        .finish(permit, completed(id.clone()), types::WireTimestamp::now())
         .await
         .unwrap();
     drop(store);
@@ -664,7 +676,7 @@ async fn durable_key_replays_after_reopen_without_storing_page_evidence() {
                     html: None,
                 }],
             },
-            Utc::now(),
+            types::WireTimestamp::now(),
         )
         .await
         .unwrap();
@@ -769,7 +781,7 @@ async fn a_different_request_under_an_uncertain_key_must_reconcile_not_conflict(
     assert_eq!(error.code, InterfaceErrorCode::IdempotencyConflict);
     assert!(error.reconciliation_required, "{error:?}");
 
-    let retained = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let retained = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let retained_key = key("order-43");
     let IdempotencyReservation::Acquired(permit) = reserve(
         &retained,
@@ -783,7 +795,11 @@ async fn a_different_request_under_an_uncertain_key_must_reconcile_not_conflict(
         panic!("new key replayed");
     };
     retained
-        .finish(permit, reconciliation(CommandId::new()), Utc::now())
+        .finish(
+            permit,
+            reconciliation(CommandId::new()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     let error = reserve(
@@ -810,7 +826,11 @@ async fn a_different_request_under_an_uncertain_key_must_reconcile_not_conflict(
         panic!("new key replayed");
     };
     retained
-        .finish(permit, completed(CommandId::new()), Utc::now())
+        .finish(
+            permit,
+            completed(CommandId::new()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     let error = reserve(
@@ -934,7 +954,7 @@ async fn completed_durable_key_expires_but_unresolved_key_does_not() {
         .finish(
             completed_permit,
             completed(CommandId::new()),
-            Utc::now() - Duration::minutes(16),
+            types::WireTimestamp::now() - Duration::from_mins(16),
         )
         .await
         .unwrap();
@@ -987,7 +1007,7 @@ async fn reserve(
     digest: [u8; 32],
     correlation_id: CorrelationId,
 ) -> Result<IdempotencyReservation, InterfaceError> {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     store
         .reserve(
             principal,
@@ -995,7 +1015,7 @@ async fn reserve(
             InterfaceOperation::SubmitCommand,
             digest,
             now,
-            now + Duration::seconds(5),
+            now + Duration::from_secs(5),
             correlation_id,
         )
         .await
@@ -1030,7 +1050,7 @@ async fn counted_dispatch(
             calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             case.store
-                .finish(permit, outcome.clone(), Utc::now())
+                .finish(permit, outcome.clone(), types::WireTimestamp::now())
                 .await?;
             Ok(outcome)
         }
@@ -1039,7 +1059,7 @@ async fn counted_dispatch(
 
 #[tokio::test]
 async fn committed_success_replays_and_conflicts_preserve_request_correlation() {
-    let store = IdempotencyStore::with_global_capacity(8, 16, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(8, 16, Duration::from_mins(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let key = key("same-request");
     let digest = canonical_sha256(&serde_json::json!({"value": 1})).unwrap();
@@ -1058,7 +1078,11 @@ async fn committed_success_replays_and_conflicts_preserve_request_correlation() 
         IdempotencyReservation::Replay(_) => panic!("first request must reserve"),
     };
     store
-        .finish(permit, completed(command_id.clone()), Utc::now())
+        .finish(
+            permit,
+            completed(command_id.clone()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
 
@@ -1092,7 +1116,7 @@ async fn committed_success_replays_and_conflicts_preserve_request_correlation() 
 
 #[tokio::test]
 async fn uncertain_outcome_is_a_tombstone_while_explicitly_retryable_outcome_releases() {
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let uncertain_key = key("uncertain");
     let uncertain_digest = canonical_sha256(&"uncertain").unwrap();
@@ -1111,7 +1135,11 @@ async fn uncertain_outcome_is_a_tombstone_while_explicitly_retryable_outcome_rel
         IdempotencyReservation::Replay(_) => unreachable!(),
     };
     store
-        .finish(permit, reconciliation(command_id.clone()), Utc::now())
+        .finish(
+            permit,
+            reconciliation(command_id.clone()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -1152,7 +1180,7 @@ async fn uncertain_outcome_is_a_tombstone_while_explicitly_retryable_outcome_rel
                 command_id: CommandId::new(),
                 error: command_error(true),
             },
-            Utc::now(),
+            types::WireTimestamp::now(),
         )
         .await
         .unwrap();
@@ -1172,7 +1200,7 @@ async fn uncertain_outcome_is_a_tombstone_while_explicitly_retryable_outcome_rel
 
 #[tokio::test]
 async fn same_key_and_digest_concurrent_callers_dispatch_once() {
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let key = key("concurrent-same");
     let digest = canonical_sha256(&"same").unwrap();
@@ -1210,7 +1238,7 @@ async fn same_key_and_digest_concurrent_callers_dispatch_once() {
 
 #[tokio::test]
 async fn different_digest_concurrent_callers_conflict_before_second_dispatch() {
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let key = key("concurrent-conflict");
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1252,7 +1280,7 @@ async fn different_digest_concurrent_callers_conflict_before_second_dispatch() {
 
 #[tokio::test]
 async fn global_bound_refuses_safety_relevant_entries_even_after_ttl() {
-    let store = IdempotencyStore::with_global_capacity(2, 2, Duration::milliseconds(20));
+    let store = IdempotencyStore::with_global_capacity(2, 2, Duration::from_millis(20));
     let first_principal = principal("10000000-0000-0000-0000-000000000001");
     let second_principal = principal("20000000-0000-0000-0000-000000000002");
     for (principal, key_value) in [(first_principal, "first"), (second_principal, "second")] {
@@ -1271,7 +1299,11 @@ async fn global_bound_refuses_safety_relevant_entries_even_after_ttl() {
             IdempotencyReservation::Replay(_) => unreachable!(),
         };
         store
-            .finish(permit, reconciliation(CommandId::new()), Utc::now())
+            .finish(
+                permit,
+                reconciliation(CommandId::new()),
+                types::WireTimestamp::now(),
+            )
             .await
             .unwrap();
     }
@@ -1304,12 +1336,12 @@ async fn global_bound_refuses_safety_relevant_entries_even_after_ttl() {
 
 #[tokio::test]
 async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
-    let store = IdempotencyStore::with_global_capacity(1, 1, Duration::milliseconds(1));
+    let store = IdempotencyStore::with_global_capacity(1, 1, Duration::from_millis(1));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let idempotency_key = key("durable-uncertain");
     let digest = canonical_sha256(&"durable-uncertain").unwrap();
     let command_id = CommandId::new();
-    let started_at = Utc::now();
+    let started_at = types::WireTimestamp::now();
     let permit = match store
         .reserve(
             principal.clone(),
@@ -1317,7 +1349,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
             InterfaceOperation::SubmitCommand,
             digest,
             started_at,
-            started_at + Duration::hours(2),
+            started_at + Duration::from_hours(2),
             CorrelationId::new(),
         )
         .await
@@ -1331,7 +1363,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
         .await
         .unwrap();
 
-    let much_later = started_at + Duration::hours(1);
+    let much_later = started_at + Duration::from_hours(1);
     assert!(matches!(
         store
             .reserve(
@@ -1340,7 +1372,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
                 InterfaceOperation::SubmitCommand,
                 digest,
                 much_later,
-                much_later + Duration::minutes(1),
+                much_later + Duration::from_mins(1),
                 CorrelationId::new(),
             )
             .await
@@ -1382,7 +1414,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
             InterfaceOperation::SubmitCommand,
             canonical_sha256(&"blocked-by-safety").unwrap(),
             much_later,
-            much_later + Duration::minutes(1),
+            much_later + Duration::from_mins(1),
             CorrelationId::new(),
         )
         .await
@@ -1397,7 +1429,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
                 InterfaceOperation::SubmitCommand,
                 digest,
                 much_later,
-                much_later + Duration::minutes(1),
+                much_later + Duration::from_mins(1),
                 CorrelationId::new(),
             )
             .await
@@ -1408,7 +1440,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
 
 #[tokio::test]
 async fn per_principal_bound_refuses_safety_state_without_blocking_another_principal() {
-    let store = IdempotencyStore::with_global_capacity(1, 2, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(1, 2, Duration::from_mins(5));
     let first_principal = principal("10000000-0000-0000-0000-000000000001");
     let digest = canonical_sha256(&"first").unwrap();
     let permit = match reserve(
@@ -1425,7 +1457,11 @@ async fn per_principal_bound_refuses_safety_state_without_blocking_another_princ
         IdempotencyReservation::Replay(_) => unreachable!(),
     };
     store
-        .finish(permit, reconciliation(CommandId::new()), Utc::now())
+        .finish(
+            permit,
+            reconciliation(CommandId::new()),
+            types::WireTimestamp::now(),
+        )
         .await
         .unwrap();
 
@@ -1533,7 +1569,7 @@ fn the_digest_still_distinguishes_different_values() {
 
 #[tokio::test]
 async fn a_dropped_permit_releases_its_reservation_instead_of_wedging_the_key() {
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let principal = principal("10000000-0000-0000-0000-000000000701");
     let key = key("dropped-permit");
     let digest = canonical_sha256(&serde_json::json!({"value": 1})).unwrap();

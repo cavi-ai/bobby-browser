@@ -22,8 +22,8 @@ pub struct PageImpact {
 pub struct SessionImpact {
     pub session_id: SessionId,
     pub profile: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_used_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: types::WireTimestamp,
+    pub last_used_at: types::WireTimestamp,
     pub pages: Vec<PageImpact>,
     pub recoverable_workflows: Vec<WorkflowId>,
 }

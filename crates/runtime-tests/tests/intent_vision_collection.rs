@@ -15,8 +15,8 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent,
@@ -131,7 +131,7 @@ async fn open_fixture(runtime: &RuntimeService, url: &str) -> (SessionId, PageId
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: WaitUntil::Interactive,
@@ -164,7 +164,7 @@ async fn reopen_page(runtime: &RuntimeService, session_id: &SessionId, url: &str
             attempt_id: AttemptId::new(),
             session_id: session_id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: WaitUntil::Interactive,
@@ -193,7 +193,7 @@ async fn submit_intent(
                 attempt_id: AttemptId::new(),
                 session_id: session_id.clone(),
                 page_id: Some(page_id.clone()),
-                deadline: Utc::now() + Duration::seconds(60),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(60),
                 command: RuntimeCommand::Intent(command),
             },
             true,

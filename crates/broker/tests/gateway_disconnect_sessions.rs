@@ -111,8 +111,8 @@ async fn connection_with_a_session(rig: &Rig) -> Socket {
 }
 
 async fn listed_sessions(rig: &Rig) -> usize {
-    let deadline = (chrono::Utc::now() + chrono::Duration::minutes(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let deadline =
+        (types::WireTimestamp::now() + jiff::SignedDuration::from_mins(1)).rfc3339_millis();
     let request = format!(
         "GET /v1/sessions HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer {}\r\n\
          x-interface-version: {}\r\nx-correlation-id: 00000000-0000-4000-8000-000000000002\r\n\

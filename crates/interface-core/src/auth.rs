@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Utc};
+
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
@@ -22,7 +22,7 @@ struct AuthorityRecord {
     token_hash: [u8; 32],
     principal_id: PrincipalId,
     capabilities: CapabilitySet,
-    expires_at: DateTime<Utc>,
+    expires_at: types::WireTimestamp,
     revoked: Arc<AtomicBool>,
 }
 
@@ -68,7 +68,7 @@ impl AuthorityStore {
         &self,
         principal_id: PrincipalId,
         capabilities: impl IntoIterator<Item = Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<IssuedToken, InterfaceError> {
         let mut token_bytes = [0_u8; 32];
         getrandom::fill(&mut token_bytes).map_err(|_| authentication_error())?;
@@ -88,9 +88,9 @@ impl AuthorityStore {
         token_hash: [u8; 32],
         principal_id: PrincipalId,
         capabilities: impl IntoIterator<Item = Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError> {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         if expires_at <= now {
             return Err(authentication_error());
         }
@@ -112,7 +112,7 @@ impl AuthorityStore {
     }
 
     pub async fn verify(&self, bearer: &str) -> Result<CapabilityHandle, InterfaceError> {
-        self.authenticate(bearer, Utc::now()).await
+        self.authenticate(bearer, types::WireTimestamp::now()).await
     }
 }
 
@@ -121,7 +121,7 @@ impl Authority for AuthorityStore {
     async fn authenticate(
         &self,
         bearer: &str,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError> {
         const MAX_AUTHENTICATION_INPUT_BYTES: usize = 4096;
         let input_within_bound = bearer.len() <= MAX_AUTHENTICATION_INPUT_BYTES;
@@ -161,7 +161,7 @@ impl Authority for AuthorityStore {
         &self,
         principal: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<IssuedToken, InterfaceError> {
         AuthorityStore::issue(self, principal, capabilities, expires_at).await
     }
@@ -176,7 +176,7 @@ pub trait Authority: Send + Sync {
     async fn authenticate(
         &self,
         bearer: &str,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError>;
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError>;
 
@@ -184,7 +184,7 @@ pub trait Authority: Send + Sync {
         &self,
         _principal: PrincipalId,
         _capabilities: Vec<Capability>,
-        _expires_at: DateTime<Utc>,
+        _expires_at: types::WireTimestamp,
     ) -> Result<IssuedToken, InterfaceError> {
         Err(InterfaceError {
             code: InterfaceErrorCode::UnsupportedOperation,
@@ -229,12 +229,16 @@ impl fmt::Debug for IssuedToken {
 pub struct CapabilityHandle {
     principal_id: PrincipalId,
     capabilities: CapabilitySet,
-    expires_at: DateTime<Utc>,
+    expires_at: types::WireTimestamp,
     revoked: Arc<AtomicBool>,
 }
 
 impl CapabilityHandle {
-    pub fn context(&self, deadline: DateTime<Utc>, key: Option<IdempotencyKey>) -> RequestContext {
+    pub fn context(
+        &self,
+        deadline: types::WireTimestamp,
+        key: Option<IdempotencyKey>,
+    ) -> RequestContext {
         RequestContext {
             interface_version: types::InterfaceVersion::CURRENT,
             correlation_id: CorrelationId::new(),
@@ -261,7 +265,7 @@ impl CapabilityHandle {
         self.capabilities.contains(capability)
     }
 
-    pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_valid_at(&self, now: types::WireTimestamp) -> bool {
         !self.is_invalid_at(now)
     }
 
@@ -273,11 +277,11 @@ impl CapabilityHandle {
     /// dead server. Reporting the instant is the difference between "renew the
     /// credential" and an unexplained disconnect. Expiry is not a secret — it
     /// carries no bearer material.
-    pub fn expires_at(&self) -> DateTime<Utc> {
+    pub fn expires_at(&self) -> types::WireTimestamp {
         self.expires_at
     }
 
-    pub(crate) fn is_invalid_at(&self, now: DateTime<Utc>) -> bool {
+    pub(crate) fn is_invalid_at(&self, now: types::WireTimestamp) -> bool {
         self.expires_at <= now || self.revoked.load(Ordering::Acquire)
     }
 }
@@ -331,7 +335,7 @@ fn resource_exhausted_error() -> InterfaceError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use jiff::SignedDuration as Duration;
     use types::{Capability, PrincipalId};
     use uuid::Uuid;
 
@@ -345,7 +349,7 @@ mod tests {
                 [7; 32],
                 PrincipalId::from_uuid(Uuid::nil()),
                 [Capability::SessionRead],
-                Utc::now() - Duration::seconds(1),
+                types::WireTimestamp::now() - Duration::from_secs(1),
             )
             .await
             .is_err());

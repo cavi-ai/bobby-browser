@@ -1,5 +1,5 @@
 use checkpoint_store::{CheckpointStore, CheckpointStoreError, LockedCheckpointSnapshot};
-use chrono::Utc;
+
 use std::sync::Arc;
 use thiserror::Error;
 use types::{
@@ -406,7 +406,7 @@ impl RecoveryCoordinator {
             }
         };
         checkpoint.recovery_history.push(RecoveryRecord {
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             decision: decision.clone(),
         });
         verified.snapshot.save_if_unchanged(&checkpoint).await?;
@@ -486,7 +486,7 @@ impl RecoveryCoordinator {
             evidence,
         };
         checkpoint.recovery_history.push(RecoveryRecord {
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             decision: decision.clone(),
         });
         verified.snapshot.save_if_unchanged(&checkpoint).await?;
@@ -547,7 +547,7 @@ impl RecoveryCoordinator {
             ));
         }
         checkpoint.recovery_history.push(RecoveryRecord {
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             decision: decision.clone(),
         });
         verified.snapshot.save_if_unchanged(&checkpoint).await?;

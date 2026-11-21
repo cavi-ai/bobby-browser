@@ -76,6 +76,7 @@ pub use crate::fetcher::{BrowserFetcher, BrowserFetcherOptions};
 pub use crate::handler::Handler;
 pub use crate::page::Page;
 
+pub mod async_process;
 pub mod auth;
 pub mod browser;
 pub mod cmd;
@@ -84,10 +85,7 @@ pub mod detection;
 pub mod element;
 pub mod error;
 #[cfg(feature = "fetcher")]
-pub mod fetcher {
-    pub use chromiumoxide_fetcher::*;
-}
-pub mod async_process;
+pub mod fetcher;
 pub mod handler;
 pub mod js;
 pub mod keys;

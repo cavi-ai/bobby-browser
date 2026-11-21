@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use broker::testing::{app_with_admin, context_headers, issue_bearer};
-use chrono::{Duration, SecondsFormat, Utc};
+use jiff::SignedDuration as Duration;
 use tower::ServiceExt;
 use types::{
     AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand,
@@ -15,8 +15,7 @@ use uuid::uuid;
 async fn admin_issues_and_revokes_a_principal() {
     let (app, _authority, admin_bearer) = app_with_admin(8).await;
     let principal = uuid!("10000000-0000-0000-0000-000000000051");
-    let expires_at =
-        (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expires_at = (types::WireTimestamp::now() + Duration::from_mins(10)).rfc3339_millis();
 
     let issue_body = serde_json::json!({
         "principalId": principal,
@@ -39,10 +38,10 @@ async fn admin_issues_and_revokes_a_principal() {
         serde_json::json!(["session:read", "session:write"])
     );
     let response_expiry =
-        chrono::DateTime::parse_from_rfc3339(json["expiresAt"].as_str().expect("expiresAt string"))
+        types::WireTimestamp::parse_rfc3339(json["expiresAt"].as_str().expect("expiresAt string"))
             .expect("valid response expiry");
     let requested_expiry =
-        chrono::DateTime::parse_from_rfc3339(&expires_at).expect("valid requested expiry");
+        types::WireTimestamp::parse_rfc3339(&expires_at).expect("valid requested expiry");
     assert_eq!(response_expiry, requested_expiry);
     let issued_bearer = json["bearer"].as_str().unwrap().to_owned();
 
@@ -88,8 +87,7 @@ async fn principal_issuance_and_revocation_emit_audit_events() {
     let sink = observability::test_support::CaptureSink::install();
     let (app, _authority, admin_bearer) = app_with_admin(8).await;
     let principal = uuid!("10000000-0000-0000-0000-000000000061");
-    let expires_at =
-        (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expires_at = (types::WireTimestamp::now() + Duration::from_mins(10)).rfc3339_millis();
 
     let issue_body = serde_json::json!({
         "principalId": principal,
@@ -148,8 +146,7 @@ async fn bearer_token_never_appears_in_any_emitted_record() {
 #[tokio::test]
 async fn issuance_is_bounded() {
     let (app, _authority, admin_bearer) = app_with_admin(8).await;
-    let valid_expiry =
-        (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let valid_expiry = (types::WireTimestamp::now() + Duration::from_mins(10)).rfc3339_millis();
 
     let issue = |principal: uuid::Uuid,
                  capabilities: serde_json::Value,
@@ -204,7 +201,7 @@ async fn issuance_is_bounded() {
 
     // (d) expiries beyond the max token TTL are rejected.
     let far_future_expiry =
-        (Utc::now() + Duration::days(365 * 100)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        (types::WireTimestamp::now() + Duration::from_hours(876000)).rfc3339_millis();
     let response = issue(
         uuid!("10000000-0000-0000-0000-000000000064"),
         serde_json::json!(["session:read"]),
@@ -324,7 +321,7 @@ fn inspect_envelope(session_id: SessionId) -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(PageId::new()),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
     }
 }
@@ -414,7 +411,7 @@ fn upload_files_envelope(session_id: SessionId) -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(PageId::new()),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(UploadFilesCommand {
             selector: "input[type=file]".into(),
             target: None,

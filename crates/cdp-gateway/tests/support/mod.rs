@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+
 use interface_core::{InterfaceResult, RuntimeInterface};
 use tokio::sync::Notify;
 use types::{
@@ -168,7 +168,7 @@ impl RuntimeInterface for AutoSessionRuntime {
         _: RequestContext,
         request: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let session = SessionState {
             id: SessionId::new(),
             profile: request.profile,

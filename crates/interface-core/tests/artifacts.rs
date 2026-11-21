@@ -9,11 +9,11 @@ use std::{
 };
 
 use artifact_store::{ArtifactRecord, ArtifactStore};
-use chrono::{Duration, Utc};
 use interface_core::{
     ArtifactBoundaryTestObserver, ArtifactOwnershipLimits, ArtifactPersistenceTestAction,
     ArtifactReader, ArtifactReference, Authority, AuthorityStore, SessionOwnershipAuthority,
 };
+use jiff::SignedDuration as Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use types::{Capability, InterfaceErrorCode, PageId, PrincipalId, RequestContext, SessionId};
@@ -125,15 +125,15 @@ async fn identity(
         .issue(
             principal,
             [Capability::ArtifactRead, Capability::ArtifactCapture],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
     let handle = authority
-        .authenticate(&issued.expose_once(), Utc::now())
+        .authenticate(&issued.expose_once(), types::WireTimestamp::now())
         .await
         .unwrap();
-    let context = handle.context(Utc::now() + Duration::minutes(5), None);
+    let context = handle.context(types::WireTimestamp::now() + Duration::from_mins(5), None);
     (handle, context)
 }
 

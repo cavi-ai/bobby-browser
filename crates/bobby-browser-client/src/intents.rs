@@ -15,7 +15,6 @@ use crate::commands::{
     MAX_INTENT_PURPOSE_BYTES,
 };
 use crate::ids::{AttemptId, CommandId, PageId, SessionId, WorkflowId};
-use chrono::{DateTime, Utc};
 
 /// Meta that every intent envelope carries. Mirrors the TypeScript SDK's
 /// `IntentEnvelopeMeta`.
@@ -27,7 +26,7 @@ pub struct IntentEnvelopeMeta {
     pub session_id: SessionId,
     pub page_id: Option<PageId>,
     /// RFC-3339 deadline stamped on the envelope.
-    pub deadline: DateTime<Utc>,
+    pub deadline: crate::WireTimestamp,
 }
 
 /// Throws the Rust equivalent of the TS SDK's `assertIntentPurpose`: an
@@ -365,7 +364,7 @@ mod tests {
             attempt_id: AttemptId::new(),
             session_id: SessionId::new(),
             page_id: Some(PageId::new()),
-            deadline: Utc::now(),
+            deadline: crate::WireTimestamp::now(),
         }
     }
 

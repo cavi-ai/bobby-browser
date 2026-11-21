@@ -31,12 +31,12 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
- "chrono",
  "config",
  "futures-util",
  "gateway-transport",
  "intent-engine",
  "interface-core",
+ "jiff",
  "sdk-core",
  "serde",
  "serde_json",
@@ -582,7 +582,6 @@ dependencies = [
  "base64 0.23.1",
  "broker",
  "checkpoint-store",
- "chrono",
  "clap",
  "close_fds",
  "companion-core",
@@ -597,6 +596,7 @@ dependencies = [
  "hex",
  "intent-engine",
  "interface-core",
+ "jiff",
  "libc",
  "mcp-gateway",
  "node-registry",
@@ -628,9 +628,9 @@ name = "bobby-browser-client"
 version = "0.26.0"
 dependencies = [
  "axum",
- "chrono",
  "futures-util",
  "hex",
+ "jiff",
  "reqwest",
  "schemars 1.2.3",
  "serde",
@@ -647,13 +647,13 @@ dependencies = [
 name = "bobby-chromiumoxide"
 version = "0.9.1"
 dependencies = [
+ "anyhow",
  "async-tungstenite",
  "base64 0.23.1",
  "bytes",
  "chromiumoxide_cdp",
- "chromiumoxide_fetcher",
  "chromiumoxide_types",
- "chrono",
+ "directories",
  "dunce",
  "fnv",
  "futures",
@@ -664,6 +664,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -671,6 +672,8 @@ dependencies = [
  "url",
  "which",
  "windows-registry",
+ "windows-version",
+ "zip",
 ]
 
 [[package]]
@@ -714,13 +717,13 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "cdp-gateway",
- "chrono",
  "config",
  "futures-util",
  "gateway-transport",
  "getrandom 0.4.3",
  "hex",
  "interface-core",
+ "jiff",
  "mcp-gateway",
  "network-engine",
  "observability",
@@ -839,12 +842,12 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "chrono",
  "config",
  "futures-util",
  "hex",
  "interface-conformance",
  "interface-core",
+ "jiff",
  "sdk-core",
  "serde",
  "serde_json",
@@ -887,9 +890,9 @@ dependencies = [
 name = "checkpoint-store"
 version = "0.26.0"
 dependencies = [
- "chrono",
  "durable-file",
  "hex",
+ "jiff",
  "libc",
  "serde_json",
  "sha2",
@@ -911,23 +914,6 @@ dependencies = [
  "chromiumoxide_types",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "chromiumoxide_fetcher"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edd2cc8c9431726edce9f5ceb3ca1b711dde0f818cd6fb34808a00556ce73135"
-dependencies = [
- "anyhow",
- "directories",
- "reqwest",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
- "windows-version",
- "zip 8.6.0",
 ]
 
 [[package]]
@@ -963,10 +949,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -1147,9 +1131,9 @@ dependencies = [
 name = "context-store"
 version = "0.26.0"
 dependencies = [
- "chrono",
  "durable-file",
  "hex",
+ "jiff",
  "libc",
  "psl",
  "serde",
@@ -1717,7 +1701,6 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "behavioral-engine",
- "chrono",
  "companion-core",
  "companion-protocol",
  "config",
@@ -1726,6 +1709,7 @@ dependencies = [
  "fingerprinting",
  "futures-util",
  "hex",
+ "jiff",
  "libc",
  "serde",
  "serde_json",
@@ -1738,7 +1722,7 @@ dependencies = [
  "url",
  "uuid",
  "worker-pool",
- "zip 9.6.1",
+ "zip",
 ]
 
 [[package]]
@@ -2456,10 +2440,10 @@ dependencies = [
  "async-trait",
  "axum",
  "broker",
- "chrono",
  "config",
  "hex",
  "interface-core",
+ "jiff",
  "mcp-gateway",
  "sdk-core",
  "serde",
@@ -2481,10 +2465,10 @@ dependencies = [
  "artifact-store",
  "async-trait",
  "base64 0.23.1",
- "chrono",
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "jiff",
  "rustix",
  "serde",
  "serde_json",
@@ -2862,7 +2846,6 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "checkpoint-store",
- "chrono",
  "config",
  "dom-engine",
  "firefox-companion",
@@ -2870,6 +2853,7 @@ dependencies = [
  "gateway-transport",
  "hex",
  "interface-core",
+ "jiff",
  "jsonschema",
  "network-engine",
  "observability",
@@ -3372,12 +3356,12 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "checkpoint-store",
- "chrono",
  "companion-protocol",
  "context-store",
  "dom-engine",
  "hex",
  "intent-engine",
+ "jiff",
  "jsonschema",
  "libc",
  "network-engine",
@@ -4027,7 +4011,6 @@ dependencies = [
  "broker",
  "cdp-gateway",
  "checkpoint-store",
- "chrono",
  "companion-core",
  "companion-protocol",
  "config",
@@ -4039,6 +4022,7 @@ dependencies = [
  "intent-engine",
  "interface-conformance",
  "interface-core",
+ "jiff",
  "libc",
  "mcp-gateway",
  "network-engine",
@@ -4063,7 +4047,7 @@ dependencies = [
  "uuid",
  "worker-pool",
  "workflow-journal",
- "zip 9.6.1",
+ "zip",
 ]
 
 [[package]]
@@ -4231,8 +4215,8 @@ version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
- "chrono",
  "dyn-clone",
+ "jiff",
  "ref-cast",
  "schemars_derive",
  "serde",
@@ -4279,13 +4263,13 @@ dependencies = [
  "artifact-store",
  "async-trait",
  "checkpoint-store",
- "chrono",
  "config",
  "context-store",
  "dom-engine",
  "hex",
  "intent-engine",
  "interface-core",
+ "jiff",
  "network-engine",
  "node-registry",
  "observability",
@@ -4486,9 +4470,9 @@ name = "session-manager"
 version = "0.26.0"
 dependencies = [
  "async-trait",
- "chrono",
  "companion-protocol",
  "config",
+ "jiff",
  "tokio",
  "tracing",
  "types",
@@ -4592,7 +4576,7 @@ name = "skill-runtime"
 version = "0.26.0"
 dependencies = [
  "async-trait",
- "chrono",
+ "jiff",
  "serde_json",
  "thiserror",
  "tokio",
@@ -4764,7 +4748,7 @@ name = "task-scheduler"
 version = "0.26.0"
 dependencies = [
  "async-trait",
- "chrono",
+ "jiff",
  "network-engine",
  "rand 0.10.3",
  "serde",
@@ -5377,12 +5361,6 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
-
-[[package]]
-name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
@@ -5403,8 +5381,8 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 name = "types"
 version = "0.26.0"
 dependencies = [
- "chrono",
  "hex",
+ "jiff",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -5521,8 +5499,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "chrono",
  "intent-engine",
+ "jiff",
  "reqwest",
  "serde",
  "serde_json",
@@ -5911,13 +5889,13 @@ dependencies = [
  "base64 0.23.1",
  "behavioral-engine",
  "bobby-chromiumoxide",
- "chrono",
  "companion-protocol",
  "config",
  "dom-engine",
  "fingerprinting",
  "futures",
  "hex",
+ "jiff",
  "js-engine",
  "libc",
  "network-engine",
@@ -5945,9 +5923,9 @@ version = "0.26.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
- "chrono",
  "durable-file",
  "futures",
+ "jiff",
  "libc",
  "ring",
  "same-file",
@@ -6097,19 +6075,6 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap 2.14.1",
- "memchr",
- "typed-path 0.12.3",
-]
-
-[[package]]
-name = "zip"
 version = "9.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953a376f4930ed5af88e1e65948385f76866b45e7f75b21ac275327d0eeb9b46"
@@ -6122,7 +6087,7 @@ dependencies = [
  "libc",
  "memchr",
  "nix",
- "typed-path 0.13.0",
+ "typed-path",
  "windows-sys 0.61.2",
  "zeroize",
 ]

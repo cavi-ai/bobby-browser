@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, NodeConfig, NodeKind, ServerConfig, StorageConfig};
 use intent_engine::{VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
@@ -47,7 +47,7 @@ fn intent_envelope(
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(command),
     }
 }
@@ -146,7 +146,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: fixture.base_url(),
                 wait_until: WaitUntil::Interactive,
@@ -248,7 +248,7 @@ async fn stuck_locate_records_a_real_local_vision_proposal() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: fixture.base_url(),
                 wait_until: WaitUntil::Interactive,
@@ -382,7 +382,7 @@ async fn stuck_locate_without_a_named_node(runtime: &RuntimeService) -> CommandO
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: fixture.base_url(),
                 wait_until: WaitUntil::Interactive,

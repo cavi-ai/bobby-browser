@@ -3,14 +3,14 @@ mod support;
 use std::sync::Arc;
 
 use cdp_gateway::{CdpConnection, CdpGateway, CdpRequest, MethodRegistry};
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use serde_json::json;
 use types::{Capability, PageId, PrincipalId, SessionId, SessionState};
 
 #[tokio::test]
 async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let page_a = PageId::new();
     let page_b = PageId::new();
     let runtime = Arc::new(support::StaticRuntime {
@@ -42,7 +42,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -94,7 +94,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
 
 #[tokio::test]
 async fn json_list_auto_session_returns_a_page_before_websocket() {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let runtime = support::AutoSessionRuntime::empty();
     let authority = Arc::new(AuthorityStore::in_memory());
     let token = authority
@@ -105,7 +105,7 @@ async fn json_list_auto_session_returns_a_page_before_websocket() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -124,7 +124,7 @@ async fn json_list_auto_session_returns_a_page_before_websocket() {
 
 #[tokio::test]
 async fn page_target_info_uses_verified_navigation_title() {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let runtime = Arc::new(support::NavigatingRuntime {
         sessions: vec![SessionState {
             id: SessionId::new(),
@@ -147,7 +147,7 @@ async fn page_target_info_uses_verified_navigation_title() {
                 Capability::PageRead,
                 Capability::PageWrite,
             ],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()

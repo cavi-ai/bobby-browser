@@ -4403,6 +4403,24 @@ impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
 
 #[async_trait]
 impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
+    async fn current_url(&self, page_id: &PageId) -> Option<String> {
+        let context = self.context(page_id).await.ok()?;
+        let tree = tokio::time::timeout(
+            Duration::from_millis(500),
+            self.transport.send(
+                "browsingContext.getTree",
+                json!({"root": context, "maxDepth": 0}),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        tree.pointer("/contexts/0/url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+    }
+
     async fn pin_target(&self, page_id: &PageId, target: &TargetSpec) -> TargetSpec {
         if target.css.is_some() {
             return target.clone();
@@ -6216,7 +6234,7 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
             )
         })?;
         let context = self.context(page_id).await?;
-        let captured_at = chrono::Utc::now();
+        let captured_at = types::WireTimestamp::now();
         let url = self
             .transport
             .send(

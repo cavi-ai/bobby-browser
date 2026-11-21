@@ -1,4 +1,3 @@
-use chrono::{TimeZone, Utc};
 use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
@@ -29,7 +28,7 @@ fn test_envelope(command: PrimitiveCommand) -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: Some(PageId::new()),
-        deadline: Utc::now() + chrono::Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_mins(1),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -342,7 +341,9 @@ fn command_envelope_uses_stable_camel_case_json() {
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(types::NavigateCommand {
             url: "https://example.com".into(),
             wait_until: WaitUntil::Interactive,
@@ -392,7 +393,9 @@ fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command()
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(
             types::DownloadUrlCommand {
                 url: "https://alice:pw@example.com/file?token=signed#secret".into(),
@@ -919,7 +922,9 @@ fn follow_runtime_command_envelope_golden_json() {
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
             purpose: "Details".into(),
             hints: IntentHints::default(),
@@ -1025,7 +1030,9 @@ fn dismiss_obstruction_runtime_command_envelope_golden_json() {
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
             DismissObstructionIntent {
                 purpose: "Cookie notice close button".into(),
@@ -1130,7 +1137,9 @@ fn extract_runtime_command_envelope_golden_json() {
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Intent(IntentCommand::Extract(ExtractIntent {
             purpose: "Profile summary".into(),
             fields: vec![ExtractField {
@@ -1243,7 +1252,7 @@ fn runtime_command_envelope_accepts_intent_and_primitive() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + chrono::Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Search".into(),
             hints: IntentHints::default(),
@@ -1265,7 +1274,9 @@ fn locate_runtime_command_envelope_golden_json() {
         attempt_id: AttemptId(uuid(3)),
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
-        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        deadline: "2026-07-16T12:00:00Z"
+            .parse::<types::WireTimestamp>()
+            .unwrap(),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Continue".into(),
             hints: IntentHints::default(),

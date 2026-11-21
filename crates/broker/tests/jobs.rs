@@ -364,7 +364,7 @@ async fn resolution_requires_owner_admin_capability_and_bounded_evidence() {
                 types::Capability::JobCancel,
                 types::Capability::AuthorityAdmin,
             ],
-            chrono::Utc::now() + chrono::Duration::minutes(10),
+            types::WireTimestamp::now() + jiff::SignedDuration::from_mins(10),
         )
         .await
         .unwrap()

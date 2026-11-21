@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Utc};
+
 use interface_core::{Authority, CapabilityHandle, IssuedToken};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,7 +25,7 @@ struct PersistedRecord {
     token_hash_hex: String,
     principal_id: PrincipalId,
     capabilities: Vec<Capability>,
-    expires_at: DateTime<Utc>,
+    expires_at: types::WireTimestamp,
     revoked: bool,
 }
 
@@ -67,7 +67,7 @@ impl PersistentAuthority {
         };
 
         let mut records = loaded;
-        compact(&mut records, Utc::now());
+        compact(&mut records, types::WireTimestamp::now());
 
         for (index, record) in records.iter().enumerate() {
             let hash = decode_hash(&record.token_hash_hex)?;
@@ -114,7 +114,7 @@ impl PersistentAuthority {
     /// a cloned snapshot after releasing the lock lets disk writes land out of commit
     /// order, silently reverting a mutation such as a revoke on the next reload.
     async fn persist(&self, records: &mut Vec<PersistedRecord>) -> Result<(), InterfaceError> {
-        compact(records, Utc::now());
+        compact(records, types::WireTimestamp::now());
         let json = serde_json::to_vec_pretty(records.as_slice()).map_err(|_| internal_error())?;
 
         let tmp_path = self.path.with_extension("json.tmp");
@@ -160,7 +160,7 @@ impl PersistentAuthority {
 /// Drops any record revoked or expired as of `now`. The live `AuthorityStore`, not this
 /// file, is the runtime source of truth, so retaining dead records only grows the file
 /// without bound.
-fn compact(records: &mut Vec<PersistedRecord>, now: DateTime<Utc>) {
+fn compact(records: &mut Vec<PersistedRecord>, now: types::WireTimestamp) {
     records.retain(|record| !record.revoked && record.expires_at > now);
 }
 
@@ -169,7 +169,7 @@ impl Authority for PersistentAuthority {
     async fn authenticate(
         &self,
         bearer: &str,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError> {
         self.inner.authenticate(bearer, now).await
     }
@@ -190,7 +190,7 @@ impl Authority for PersistentAuthority {
         &self,
         principal: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<IssuedToken, InterfaceError> {
         let mut token_bytes = [0_u8; 32];
         getrandom::fill(&mut token_bytes).map_err(|_| internal_error())?;
@@ -242,7 +242,7 @@ fn internal_error() -> InterfaceError {
 mod tests {
     use super::*;
     use crate::auth::StartupCredential;
-    use chrono::Duration;
+    use jiff::SignedDuration as Duration;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -252,7 +252,7 @@ mod tests {
             "persist-fixture-bearer-0123456789abcdef01".to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
             vec![Capability::AuthorityAdmin, Capability::SessionRead],
-            Utc::now() + Duration::minutes(30),
+            types::WireTimestamp::now() + Duration::from_mins(30),
         )
         .unwrap()
     }
@@ -270,7 +270,7 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(101)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap()
@@ -281,8 +281,11 @@ mod tests {
         let reloaded = PersistentAuthority::open(reloaded_enrolled, path)
             .await
             .unwrap();
-        let handle = reloaded.authenticate(&bearer, Utc::now()).await.unwrap();
-        assert!(handle.is_valid_at(Utc::now()));
+        let handle = reloaded
+            .authenticate(&bearer, types::WireTimestamp::now())
+            .await
+            .unwrap();
+        assert!(handle.is_valid_at(types::WireTimestamp::now()));
     }
 
     #[tokio::test]
@@ -299,7 +302,7 @@ mod tests {
             .issue(
                 principal.clone(),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap()
@@ -311,7 +314,10 @@ mod tests {
         let reloaded = PersistentAuthority::open(reloaded_enrolled, path)
             .await
             .unwrap();
-        assert!(reloaded.authenticate(&bearer, Utc::now()).await.is_err());
+        assert!(reloaded
+            .authenticate(&bearer, types::WireTimestamp::now())
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -328,7 +334,7 @@ mod tests {
             .issue(
                 principal,
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::milliseconds(50),
+                types::WireTimestamp::now() + Duration::from_millis(50),
             )
             .await
             .unwrap()
@@ -343,7 +349,10 @@ mod tests {
         let reloaded = PersistentAuthority::open(reloaded_enrolled, path.clone())
             .await
             .unwrap();
-        assert!(reloaded.authenticate(&bearer, Utc::now()).await.is_err());
+        assert!(reloaded
+            .authenticate(&bearer, types::WireTimestamp::now())
+            .await
+            .is_err());
 
         // Loading must not rewrite the file; persistence only happens on issue()/revoke().
         let bytes_after = tokio::fs::read(&path).await.unwrap();
@@ -363,7 +372,7 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(104)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap()
@@ -395,7 +404,7 @@ mod tests {
             .issue(
                 target_principal.clone(),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap()
@@ -409,17 +418,17 @@ mod tests {
             authority.issue(
                 PrincipalId::from_uuid(Uuid::from_u128(202)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             ),
             authority.issue(
                 PrincipalId::from_uuid(Uuid::from_u128(203)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             ),
             authority.issue(
                 PrincipalId::from_uuid(Uuid::from_u128(204)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             ),
         );
         revoke_result.unwrap();
@@ -431,11 +440,14 @@ mod tests {
 
         // In-memory truth.
         assert!(authority
-            .authenticate(&target_bearer, Utc::now())
+            .authenticate(&target_bearer, types::WireTimestamp::now())
             .await
             .is_err());
         for bearer in &other_bearers {
-            assert!(authority.authenticate(bearer, Utc::now()).await.is_ok());
+            assert!(authority
+                .authenticate(bearer, types::WireTimestamp::now())
+                .await
+                .is_ok());
         }
 
         drop(authority);
@@ -447,13 +459,16 @@ mod tests {
             .unwrap();
         for bearer in &other_bearers {
             assert!(
-                reloaded.authenticate(bearer, Utc::now()).await.is_ok(),
+                reloaded
+                    .authenticate(bearer, types::WireTimestamp::now())
+                    .await
+                    .is_ok(),
                 "concurrently issued principals must survive reload"
             );
         }
         assert!(
             reloaded
-                .authenticate(&target_bearer, Utc::now())
+                .authenticate(&target_bearer, types::WireTimestamp::now())
                 .await
                 .is_err(),
             "revoked principal must not resurrect after reload"
@@ -472,7 +487,7 @@ mod tests {
         let path = dir.path().join("authority.json");
 
         // Seed more live records than the store will have room for.
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let mut seed_records = Vec::new();
         let mut bearers = Vec::new();
         for index in 0..3u128 {
@@ -483,7 +498,7 @@ mod tests {
                 token_hash_hex: hex::encode(hash),
                 principal_id: PrincipalId::from_uuid(Uuid::from_u128(600 + index)),
                 capabilities: vec![Capability::SessionRead],
-                expires_at: now + Duration::minutes(10),
+                expires_at: now + Duration::from_mins(10),
                 revoked: false,
             });
         }
@@ -500,7 +515,11 @@ mod tests {
 
         let mut authenticated = 0;
         for bearer in &bearers {
-            if authority.authenticate(bearer, Utc::now()).await.is_ok() {
+            if authority
+                .authenticate(bearer, types::WireTimestamp::now())
+                .await
+                .is_ok()
+            {
                 authenticated += 1;
             }
         }
@@ -524,7 +543,7 @@ mod tests {
             .issue(
                 principal.clone(),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap()
@@ -560,7 +579,7 @@ mod tests {
             .issue(
                 short_lived,
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::milliseconds(50),
+                types::WireTimestamp::now() + Duration::from_millis(50),
             )
             .await
             .unwrap()
@@ -578,7 +597,7 @@ mod tests {
             .issue(
                 long_lived,
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap();
@@ -603,7 +622,7 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(501)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap();

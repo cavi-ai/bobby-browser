@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, ControlAction, CreateSessionRequest,
@@ -46,7 +46,7 @@ async fn submit(
             attempt_id: AttemptId::new(),
             session_id: session_id.clone(),
             page_id: Some(page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command,
         })
         .await
@@ -214,7 +214,7 @@ async fn typed_values_never_reach_the_context_store() {
                 types::Capability::SessionWrite,
                 types::Capability::SessionRead,
             ],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -230,7 +230,7 @@ async fn typed_values_never_reach_the_context_store() {
                 types::Capability::SessionWrite,
                 types::Capability::SessionRead,
             ],
-            Utc::now() + Duration::minutes(1),
+            types::WireTimestamp::now() + Duration::from_mins(1),
         ),
         session.id.clone(),
     )

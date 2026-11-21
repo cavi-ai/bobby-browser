@@ -299,7 +299,7 @@ pub(in crate::doctor) fn record_jobs_queue(
             idempotency_key: None,
         },
         Duration::from_secs(1),
-        chrono::Duration::seconds(5),
+        jiff::SignedDuration::from_secs(5),
     ) {
         Ok(response) if response.status.as_u16() == 401 => {
             report.warn(

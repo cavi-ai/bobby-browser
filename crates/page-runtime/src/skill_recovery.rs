@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skill_runtime::{SkillStateStore, SkillStateStoreError, SkillTrigger, SkillZigZagZig};
@@ -495,7 +494,8 @@ impl SkillRecoveryCoordinator {
         let mut skills = self.skills.lock().await;
         let before = skills.clone();
         let identity = issued_command_identity(envelope)?;
-        let decision = skills.next_decision_for_command(trigger, identity, Utc::now())?;
+        let decision =
+            skills.next_decision_for_command(trigger, identity, types::WireTimestamp::now())?;
         let issued = skills.session_state().clone();
         let pending = issued
             .pending_issuance

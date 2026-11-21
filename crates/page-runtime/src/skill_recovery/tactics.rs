@@ -230,12 +230,10 @@ pub(super) fn tactic_budget(
     }
 }
 
-pub(super) fn remaining_duration(
-    deadline: chrono::DateTime<Utc>,
-) -> Result<Duration, CommandError> {
+pub(super) fn remaining_duration(deadline: types::WireTimestamp) -> Result<Duration, CommandError> {
     let millis = deadline
-        .signed_duration_since(Utc::now())
-        .num_milliseconds();
+        .duration_since(types::WireTimestamp::now())
+        .as_millis();
     if millis <= 0 {
         Err(deadline_error("command deadline has elapsed"))
     } else {
@@ -372,7 +370,9 @@ impl SkillRecoveryCoordinator {
                 })
             }
             SkillTactic::FreshGhostSession => {
-                self.workers.release_session(&envelope.session_id).await?;
+                self.workers
+                    .invalidate_session(&envelope.session_id)
+                    .await?;
                 Ok(PreparedOwnedTactic::Recovery {
                     checkpoint: Box::new(checkpoint),
                     effect: SkillTacticEffect::SessionReplaced,
@@ -724,7 +724,9 @@ impl SkillRecoveryCoordinator {
                     .verify_unchanged()
                     .await
                     .map_err(recovery_coordinator_error)?;
-                self.workers.release_session(&envelope.session_id).await?;
+                self.workers
+                    .invalidate_session(&envelope.session_id)
+                    .await?;
                 let recovered = self
                     .recovery
                     .recover_locked(verified, false)

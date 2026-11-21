@@ -16,7 +16,7 @@ hex = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 config.workspace = true
 behavioral-engine.workspace = true
 dom-engine.workspace = true

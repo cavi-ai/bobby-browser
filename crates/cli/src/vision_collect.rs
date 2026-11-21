@@ -131,7 +131,7 @@ impl JourneyTrainingExample {
             journey: intent_engine::sanitize_corpus_label(&journey),
             step: intent_engine::sanitize_corpus_label(&step),
             error_message: error_message.map(|_| "[redacted]".into()),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: types::WireTimestamp::now().rfc3339(),
             run_id: intent_engine::sanitize_corpus_label(&run_id),
             model_name: intent_engine::sanitize_corpus_model(&model_name),
             image_hash,

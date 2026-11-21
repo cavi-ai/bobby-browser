@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -123,7 +123,7 @@ async fn agent_run(root: &Path, url: &str) -> Vec<Call> {
         .issue(
             types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             CAPABILITIES,
-            Utc::now() + Duration::minutes(10),
+            types::WireTimestamp::now() + Duration::from_mins(10),
         )
         .await
         .unwrap()
@@ -165,7 +165,7 @@ async fn agent_run(root: &Path, url: &str) -> Vec<Call> {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: WaitUntil::Interactive,

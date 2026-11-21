@@ -67,15 +67,14 @@ jobs:
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
 
-      - name: Cache cargo
+      - name: Cache Cargo sources
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          key: ${{ runner.os }}-cargo-test-sources-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-sources-
 
       # The runner image already carries Chrome's libraries; skipping apt keeps
       # a slow package mirror out of the job.

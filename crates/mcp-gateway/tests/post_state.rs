@@ -8,8 +8,8 @@ mod common;
 
 use std::sync::atomic::Ordering;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use serde_json::{json, Value};
 use types::{Capability, PrincipalId};
@@ -23,7 +23,7 @@ async fn live_with_capabilities(capabilities: Vec<Capability>) -> LiveServer {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000c2")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("issue capability token");

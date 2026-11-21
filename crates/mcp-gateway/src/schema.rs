@@ -5188,7 +5188,7 @@ fn validate_string(schema: &Value, value: &str, pointer: &str) -> Validated {
         return Err(SchemaViolation::at(pointer, "format"));
     }
     if schema.get("format") == Some(&json!("date-time"))
-        && chrono::DateTime::parse_from_rfc3339(value).is_err()
+        && types::WireTimestamp::parse_rfc3339(value).is_err()
     {
         return Err(SchemaViolation::at(pointer, "format"));
     }

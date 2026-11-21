@@ -164,7 +164,7 @@ pub struct JobResult {
     pub success: bool,
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
-    pub completed_at: chrono::DateTime<chrono::Utc>,
+    pub completed_at: types::WireTimestamp,
 }
 
 /// Statistics about the scheduler.

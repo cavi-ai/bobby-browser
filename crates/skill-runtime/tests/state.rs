@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use skill_runtime::{
     SkillBrowserEngine, SkillCapability, SkillEvidenceRef, SkillProfile, SkillSessionState,
     SkillStateStore, SkillStateStoreError, SkillTactic,
@@ -18,7 +18,7 @@ fn state() -> SkillSessionState {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     )
     .unwrap()
 }

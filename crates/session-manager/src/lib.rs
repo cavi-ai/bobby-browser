@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio::sync::RwLock;
 use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
 use worker_pool::{choose_session_engine, WorkerPool};
@@ -42,7 +41,7 @@ impl SessionManager {
     }
 
     pub async fn create(&self, req: CreateSessionRequest) -> Result<SessionState, RuntimeError> {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         // Godmode: a zigzagzig session forces every capability on — the
         // ladder escalates into vision solving, so the session must be
         // allowed to use what the ladder reaches for.
@@ -162,8 +161,10 @@ impl SessionManager {
         let session = guard
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
-        session.page_ids.push(page_id);
-        session.last_used_at = Utc::now();
+        if !session.page_ids.contains(&page_id) {
+            session.page_ids.push(page_id);
+        }
+        session.last_used_at = types::WireTimestamp::now();
         Ok(())
     }
 
@@ -173,7 +174,7 @@ impl SessionManager {
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
         session.page_ids.retain(|candidate| candidate != page_id);
-        session.last_used_at = Utc::now();
+        session.last_used_at = types::WireTimestamp::now();
         Ok(())
     }
 }

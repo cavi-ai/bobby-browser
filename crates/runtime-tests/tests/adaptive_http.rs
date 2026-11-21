@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use artifact_store::{ArtifactError, ArtifactStore};
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use session_manager::SessionManager;
 use types::{
@@ -82,7 +82,7 @@ fn envelope(
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -375,7 +375,7 @@ async fn adaptive_http() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     runtime
         .checkpoint(checkpoint, vec![cookie_command_id])

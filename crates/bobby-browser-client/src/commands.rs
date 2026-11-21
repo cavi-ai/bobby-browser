@@ -1,6 +1,5 @@
 //! Command envelopes, primitives, intents, and session create/open requests.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,7 +22,7 @@ pub struct CommandEnvelope {
     pub attempt_id: AttemptId,
     pub session_id: SessionId,
     pub page_id: Option<PageId>,
-    pub deadline: DateTime<Utc>,
+    pub deadline: crate::WireTimestamp,
     pub command: RuntimeCommand,
 }
 

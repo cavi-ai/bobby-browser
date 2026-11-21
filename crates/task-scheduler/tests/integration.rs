@@ -138,7 +138,7 @@ fn job_complete_sets_completed() {
         success: true,
         output: Some(serde_json::json!({"ok": true})),
         error: None,
-        completed_at: chrono::Utc::now(),
+        completed_at: types::WireTimestamp::now(),
     };
     job.complete(result);
     assert_eq!(job.status, JobStatus::Completed);
@@ -308,7 +308,7 @@ fn job_queue_complete_job() {
         success: true,
         output: None,
         error: None,
-        completed_at: chrono::Utc::now(),
+        completed_at: types::WireTimestamp::now(),
     };
     queue.complete_job(&id, result).unwrap();
 
@@ -1484,7 +1484,7 @@ fn contradictory_job_events_require_reconciliation_without_blocking_new_work() {
                 drop(store);
                 job.status = status.clone();
                 if status == JobStatus::Resolved {
-                    let time = chrono::Utc::now();
+                    let time = types::WireTimestamp::now();
                     job.completed_at = Some(time);
                     job.resolution = Some(types::JobResolutionReceipt {
                         job_id: job.id.0.clone(),
@@ -1498,7 +1498,7 @@ fn contradictory_job_events_require_reconciliation_without_blocking_new_work() {
                 let record = task_scheduler::JournalRecord {
                     schema_version: task_scheduler::JOURNAL_SCHEMA_VERSION,
                     sequence: 1,
-                    recorded_at: chrono::Utc::now(),
+                    recorded_at: types::WireTimestamp::now(),
                     event,
                     job: job.clone(),
                 };
@@ -1566,7 +1566,7 @@ fn damaged_job_history_never_replays_an_older_pending_record() {
                 .unwrap();
             if unsupported_schema {
                 let record = serde_json::json!({"schemaVersion":99,"sequence":u64::MAX,
-                    "recordedAt":chrono::Utc::now(),"event":"started","job":job});
+                    "recordedAt":types::WireTimestamp::now(),"event":"started","job":job});
                 writeln!(file, "{record}").unwrap();
             } else {
                 writeln!(file, "damaged started transition").unwrap();
@@ -1723,7 +1723,7 @@ fn inspection_preserves_large_records_blank_lines_and_damaged_tail() {
     let mut record = task_scheduler::JournalRecord {
         schema_version: 1,
         sequence: 0,
-        recorded_at: chrono::Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         event: JobEvent::Submitted,
         job,
     };
@@ -2040,9 +2040,9 @@ fn oversized_journal_retains_newest_terminal_jobs() {
         // paying the per-record fsync of real submits.
         let mut text = String::new();
         for index in 0..4_200_u64 {
-            let created_at = chrono::DateTime::from_timestamp(index as i64, 0)
+            let created_at = types::WireTimestamp::from_parts(index as i64, 0)
                 .unwrap()
-                .to_rfc3339();
+                .rfc3339();
             let job = serde_json::json!({
                 "id": format!("job-{index}"),
                 "name": "echo",
@@ -2308,10 +2308,10 @@ fn malformed_stored_resolution_is_degraded_before_hydration() {
     runtime().block_on(async {
         let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
         let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal).with_owner(owner.clone());
-        let time = chrono::Utc::now();
+        let time = types::WireTimestamp::now();
         job.status = JobStatus::Resolved; job.completed_at = Some(time);
         job.resolution = Some(types::JobResolutionReceipt { job_id: job.id.0.clone(), actor: owner, resolved_at: time, decision: types::JobResolutionDecision::EffectAbsent, evidence_sha256: "a".repeat(64), provenance: "operatorAttested".into() });
-        for (field, value) in [("evidenceSha256", serde_json::json!("bad")), ("provenance", serde_json::json!("runtimeVerified")), ("jobId", serde_json::json!(JobId::new().0)), ("actor", serde_json::json!(uuid::Uuid::new_v4())), ("resolvedAt", serde_json::json!(time + chrono::Duration::seconds(1))), ("status", serde_json::json!("pending")), ("resolution", serde_json::Value::Null)] {
+        for (field, value) in [("evidenceSha256", serde_json::json!("bad")), ("provenance", serde_json::json!("runtimeVerified")), ("jobId", serde_json::json!(JobId::new().0)), ("actor", serde_json::json!(uuid::Uuid::new_v4())), ("resolvedAt", serde_json::json!(time + jiff::SignedDuration::from_secs(1))), ("status", serde_json::json!("pending")), ("resolution", serde_json::Value::Null)] {
             let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("jobs.jsonl");
             let mut record = serde_json::json!({"schemaVersion":1,"sequence":0,"recordedAt":time,"event":"resolved","job":job});
             if field == "status" || field == "resolution" { record["job"][field] = value; } else { record["job"]["resolution"][field] = value; }
@@ -2440,7 +2440,7 @@ async fn online_compaction_keeps_appending_to_the_published_journal() {
             &task_scheduler::JournalRecord {
                 schema_version: 1,
                 sequence,
-                recorded_at: chrono::Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 event: JobEvent::Submitted,
                 job: job.clone(),
             },

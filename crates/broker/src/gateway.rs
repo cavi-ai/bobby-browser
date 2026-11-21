@@ -75,7 +75,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+
 use futures_util::{SinkExt, StreamExt};
 
 pub(crate) async fn connect(
@@ -98,7 +98,11 @@ pub(crate) async fn connect(
     let Some(bearer) = bearer else {
         return ProtocolError::authentication().into_response();
     };
-    let handle = match state.authority.authenticate(bearer, Utc::now()).await {
+    let handle = match state
+        .authority
+        .authenticate(bearer, types::WireTimestamp::now())
+        .await
+    {
         Ok(handle) => handle,
         Err(error) => return ProtocolError::from(error).into_response(),
     };
@@ -228,7 +232,10 @@ async fn bridge_socket(
         async move {
             match message {
                 Ok(Message::Text(text)) => {
-                    match authority.authenticate(&bearer, Utc::now()).await {
+                    match authority
+                        .authenticate(&bearer, types::WireTimestamp::now())
+                        .await
+                    {
                         Ok(_) => Some(Ok(text.to_string())),
                         Err(_) => Some(Err(axum::Error::new(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,

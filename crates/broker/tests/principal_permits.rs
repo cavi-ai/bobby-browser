@@ -121,8 +121,8 @@ async fn http_status(rig: &Rig, request: &str) -> u16 {
 }
 
 fn long_poll(rig: &Rig) -> String {
-    let deadline = (chrono::Utc::now() + chrono::Duration::minutes(2))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let deadline =
+        (types::WireTimestamp::now() + jiff::SignedDuration::from_mins(2)).rfc3339_millis();
     format!(
         "GET /v1/events?after=0&limit=1 HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer {}\r\n\
          x-interface-version: {}\r\nx-correlation-id: 00000000-0000-4000-8000-000000000001\r\n\

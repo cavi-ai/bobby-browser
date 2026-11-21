@@ -1,4 +1,4 @@
-use chrono::{Duration as ChronoDuration, Utc};
+use jiff::SignedDuration;
 use reqwest::{Client, Method};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -73,6 +73,15 @@ pub struct BrowserRuntimeClient {
     http: Client,
     default_timeout: Duration,
     max_artifact_bytes: u64,
+}
+
+fn request_deadline(timeout: Duration) -> Result<crate::WireTimestamp, ClientError> {
+    let duration = SignedDuration::try_from(timeout).unwrap_or(SignedDuration::from_secs(30));
+    crate::WireTimestamp::now()
+        .checked_add(duration)
+        .ok_or_else(|| {
+            ClientError::Protocol("request timeout exceeds supported deadline range".into())
+        })
 }
 
 impl BrowserRuntimeClient {
@@ -408,8 +417,7 @@ impl BrowserRuntimeClient {
     ) -> Result<(), ClientError> {
         let options = options.unwrap_or_default();
         let timeout = options.timeout.unwrap_or(self.default_timeout);
-        let deadline =
-            Utc::now() + ChronoDuration::from_std(timeout).unwrap_or(ChronoDuration::seconds(30));
+        let deadline = request_deadline(timeout)?;
         let correlation = options
             .correlation_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -421,7 +429,7 @@ impl BrowserRuntimeClient {
             .header("authorization", format!("Bearer {}", self.bearer_token))
             .header("x-interface-version", CURRENT_INTERFACE_VERSION)
             .header("x-correlation-id", correlation)
-            .header("x-deadline", deadline.to_rfc3339());
+            .header("x-deadline", deadline.rfc3339());
         if let Some(key) = options.idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -476,8 +484,7 @@ impl BrowserRuntimeClient {
     {
         let options = options.unwrap_or_default();
         let timeout = options.timeout.unwrap_or(self.default_timeout);
-        let deadline =
-            Utc::now() + ChronoDuration::from_std(timeout).unwrap_or(ChronoDuration::seconds(30));
+        let deadline = request_deadline(timeout)?;
         let correlation = options
             .correlation_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -489,7 +496,7 @@ impl BrowserRuntimeClient {
             .header("authorization", format!("Bearer {}", self.bearer_token))
             .header("x-interface-version", CURRENT_INTERFACE_VERSION)
             .header("x-correlation-id", correlation)
-            .header("x-deadline", deadline.to_rfc3339());
+            .header("x-deadline", deadline.rfc3339());
         if let Some(key) = options.idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -535,8 +542,7 @@ impl BrowserRuntimeClient {
     ) -> Result<(Vec<u8>, (String, Option<u64>)), ClientError> {
         let options = options.unwrap_or_default();
         let timeout = options.timeout.unwrap_or(self.default_timeout);
-        let deadline =
-            Utc::now() + ChronoDuration::from_std(timeout).unwrap_or(ChronoDuration::seconds(30));
+        let deadline = request_deadline(timeout)?;
         let correlation = options
             .correlation_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -547,7 +553,7 @@ impl BrowserRuntimeClient {
             .header("authorization", format!("Bearer {}", self.bearer_token))
             .header("x-interface-version", CURRENT_INTERFACE_VERSION)
             .header("x-correlation-id", correlation)
-            .header("x-deadline", deadline.to_rfc3339())
+            .header("x-deadline", deadline.rfc3339())
             .send()
             .await
             .map_err(|error| {
@@ -809,6 +815,14 @@ fn normalize_base_url(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_request_deadline_returns_error() {
+        assert!(matches!(
+            request_deadline(Duration::from_secs(400_000_000_000)),
+            Err(ClientError::Protocol(_))
+        ));
+    }
+
     use crate::{
         AttemptId, CheckpointId, CommandId, JobId, JobPriority, JobStatus, SubmitJobRequest,
     };
@@ -1150,7 +1164,7 @@ mod tests {
             (JobId::new(), "operatorAttested", false),
             (id.clone(), "runtimeVerified", false),
         ] {
-            let (base, mut rx) = capture_uri("/v1/jobs/{job}/resolution", axum::Json(json!({"jobId":job_id,"decision":"effectAbsent","evidenceSha256":"a".repeat(64),"actor":Uuid::new_v4(),"resolvedAt":Utc::now(),"provenance":provenance}))).await;
+            let (base, mut rx) = capture_uri("/v1/jobs/{job}/resolution", axum::Json(json!({"jobId":job_id,"decision":"effectAbsent","evidenceSha256":"a".repeat(64),"actor":Uuid::new_v4(),"resolvedAt":crate::WireTimestamp::now(),"provenance":provenance}))).await;
             let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
             assert_eq!(
                 client.resolve_job(&id, &input, None).await.is_ok(),

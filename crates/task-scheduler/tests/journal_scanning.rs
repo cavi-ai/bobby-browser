@@ -71,7 +71,7 @@ fn inspection_and_recovery_do_not_allocate_a_whole_journal_buffer() {
             &JournalRecord {
                 schema_version: 1,
                 sequence,
-                recorded_at: chrono::Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 event: JobEvent::Submitted,
                 job: job.clone(),
             },

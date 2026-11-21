@@ -100,7 +100,7 @@ impl ContextPromotion {
                         &site,
                         "solveChallenge",
                         success,
-                        day_since_epoch(chrono::Utc::now()),
+                        day_since_epoch(jiff::Timestamp::now()),
                     )
                     .await;
                 continue;
@@ -196,7 +196,7 @@ impl ContextPromotion {
         // an exact one — while more-verified and more-recent entries win the
         // match they tied on. Full ties (same match, same record) still
         // refuse, so iteration order stays irrelevant.
-        let today = day_since_epoch(chrono::Utc::now());
+        let today = day_since_epoch(jiff::Timestamp::now());
         let controls = site_context
             .pages
             .values()
@@ -385,7 +385,7 @@ fn validation_weight(control: &context_store::ControlContext, today: u32) -> f32
 fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {
     if success {
         stats.success_count = stats.success_count.saturating_add(1);
-        stats.last_verified_day = Some(day_since_epoch(chrono::Utc::now()));
+        stats.last_verified_day = Some(day_since_epoch(jiff::Timestamp::now()));
         stats.source = Some(source);
     } else {
         stats.failure_count = stats.failure_count.saturating_add(1);

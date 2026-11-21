@@ -1,7 +1,7 @@
 //! Versioned, checksummed idempotency log and explicit legacy conversion.
 
 use super::{canonical_sha256, DurableEntry, DurableLock, DurableSnapshot, DurableState};
-use chrono::Utc;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -128,7 +128,10 @@ pub(super) fn validate(entries: &[DurableEntry]) -> Result<(), &'static str> {
             _ => {}
         }
         // Expired successes cannot authorize replay, but unresolved keys never expire.
-        if entry.expires_at.is_some_and(|at| at <= Utc::now()) {
+        if entry
+            .expires_at
+            .is_some_and(|at| at <= types::WireTimestamp::now())
+        {
             continue;
         }
         if !keys.insert((entry.principal_id.clone(), entry.key.clone())) {

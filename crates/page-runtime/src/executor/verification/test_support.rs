@@ -33,7 +33,7 @@ impl Fixture {
                 attempt_id: AttemptId::new(),
                 session_id,
                 page_id: Some(types::PageId::new()),
-                deadline: chrono::Utc::now() + chrono::Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                     InspectCommand::default(),
                 )),

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandPhase, PrimitiveCommand, RuntimeCommand,
     SessionId, TypeTextCommand, WorkflowId,
@@ -8,7 +7,7 @@ use workflow_journal::{CommandJournal, JournalKey, JournalRecord, JsonlJournal, 
 fn typed_record(command_id: &CommandId, value: &str) -> JournalRecord {
     JournalRecord {
         sequence: 0,
-        recorded_at: Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: command_id.clone(),
         phase: CommandPhase::Accepted,
         envelope: Some(CommandEnvelope {
@@ -18,7 +17,7 @@ fn typed_record(command_id: &CommandId, value: &str) -> JournalRecord {
             attempt_id: AttemptId::new(),
             session_id: SessionId::new(),
             page_id: None,
-            deadline: Utc::now() + chrono::Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand {
                 selector: "#field".into(),
                 target: None,

@@ -11,9 +11,9 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::{Duration, Utc};
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use interface_core::{AuthorizationGuard, CapabilityHandle, EventStore, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use sdk_core::AuthenticatedRuntime;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -615,7 +615,8 @@ impl Server {
     }
 
     fn request_context(&self) -> types::RequestContext {
-        self.handle.context(Utc::now() + Duration::minutes(1), None)
+        self.handle
+            .context(types::WireTimestamp::now() + Duration::from_mins(1), None)
     }
 
     /// Read newline-delimited JSON-RPC from `input` and write responses to
@@ -798,7 +799,10 @@ impl Server {
         }
         let capabilities = self
             .handle
-            .context(chrono::Utc::now() + chrono::Duration::minutes(1), None)
+            .context(
+                types::WireTimestamp::now() + jiff::SignedDuration::from_mins(1),
+                None,
+            )
             .capabilities;
         let mut tools = Vec::new();
         let mut descriptors = crate::catalog::DESCRIPTORS.iter().collect::<Vec<_>>();
@@ -1060,7 +1064,9 @@ impl Server {
                 Err(interface_error) => interface_error_response(id, interface_error),
             };
         }
-        let context = self.handle.context(Utc::now() + Duration::minutes(1), None);
+        let context = self
+            .handle
+            .context(types::WireTimestamp::now() + Duration::from_mins(1), None);
         let operation = required_operation(&call.name).expect("availability checked above");
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
@@ -1614,7 +1620,7 @@ impl Server {
         }
         let capabilities = self
             .handle
-            .context(Utc::now() + Duration::minutes(1), None)
+            .context(types::WireTimestamp::now() + Duration::from_mins(1), None)
             .capabilities;
         required_capabilities(name).is_some_and(|required| {
             required
@@ -2398,7 +2404,7 @@ fn command_envelope(
         let budget_ms = wait_ms
             .saturating_add(DEFAULT_COMMAND_TIMEOUT_MS)
             .min(MAX_COMMAND_DEADLINE_MS as u64);
-        let needed = Utc::now() + Duration::milliseconds(budget_ms as i64);
+        let needed = types::WireTimestamp::now() + Duration::from_millis(budget_ms as i64);
         context.deadline = context.deadline.max(needed);
     }
     let deadline = context.deadline;
@@ -2663,7 +2669,7 @@ mod tests {
 
     #[test]
     fn an_envelope_outlasts_the_wait_its_command_asks_for() {
-        let short = Utc::now() + Duration::seconds(60);
+        let short = types::WireTimestamp::now() + Duration::from_secs(60);
         let context = || {
             types::RequestContext::new_for_test(
                 types::PrincipalId::from_uuid(uuid::Uuid::from_u128(704)),
@@ -2680,7 +2686,7 @@ mod tests {
         };
         let session = types::SessionId::new();
         let page = types::PageId::new();
-        let before = Utc::now();
+        let before = types::WireTimestamp::now();
         let (context_out, envelope) = intent_envelope(
             context(),
             session.clone(),
@@ -2688,7 +2694,7 @@ mod tests {
             None,
             wait(120_000),
         );
-        assert!(envelope.deadline >= before + Duration::milliseconds(120_000));
+        assert!(envelope.deadline >= before + Duration::from_millis(120_000));
         assert_eq!(context_out.deadline, envelope.deadline);
         let (_, envelope) =
             intent_envelope(context(), session.clone(), page.clone(), None, wait(1_000));
@@ -2700,7 +2706,7 @@ mod tests {
             }}))
             .expect("wait_for command");
         let (_, envelope) = primitive_envelope(context(), session, Some(page), None, wait_for);
-        assert!(envelope.deadline >= before + Duration::milliseconds(90_000));
+        assert!(envelope.deadline >= before + Duration::from_millis(90_000));
         let (_, envelope) = intent_envelope(
             context(),
             types::SessionId::new(),
@@ -2708,7 +2714,10 @@ mod tests {
             None,
             wait(300_000),
         );
-        assert!(envelope.deadline <= Utc::now() + Duration::milliseconds(MAX_COMMAND_DEADLINE_MS));
+        assert!(
+            envelope.deadline
+                <= types::WireTimestamp::now() + Duration::from_millis(MAX_COMMAND_DEADLINE_MS)
+        );
     }
 
     #[test]

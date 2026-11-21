@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use config::AppConfig;
+use jiff::SignedDuration as Duration;
 use node_registry::NodeRegistry;
 use observability::OperationalMetrics;
 use page_runtime::{
@@ -296,7 +296,7 @@ impl RuntimeService {
                 profile_id,
                 config.context.limits,
                 config.context.ttl_days,
-                context_store::day_since_epoch(Utc::now()),
+                context_store::day_since_epoch(jiff::Timestamp::now()),
             )
             .await
             {
@@ -588,10 +588,33 @@ impl RuntimeService {
     pub async fn open_page(&self, req: OpenPageRequest) -> Result<PageState, RuntimeError> {
         self.sessions.get(&req.session_id).await?;
         let page = self.pages.open_browser(req.session_id).await?;
-        self.sessions
-            .add_page(&page.session_id, page.id.clone())
-            .await?;
+        self.sync_live_page(&page.session_id, &page.id).await?;
         Ok(page)
+    }
+
+    async fn sync_live_page(
+        &self,
+        session_id: &types::SessionId,
+        page_id: &types::PageId,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .pages
+            .get(page_id)
+            .await
+            .is_ok_and(|page| &page.session_id == session_id)
+        {
+            return Ok(());
+        }
+        self.sessions.add_page(session_id, page_id.clone()).await?;
+        if !self
+            .pages
+            .get(page_id)
+            .await
+            .is_ok_and(|page| &page.session_id == session_id)
+        {
+            self.sessions.remove_page(session_id, page_id).await?;
+        }
+        Ok(())
     }
 
     pub async fn form_snapshot(
@@ -678,7 +701,7 @@ impl RuntimeService {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: chrono::Utc::now(),
+            created_at: types::WireTimestamp::now(),
         };
         let saved = recovery
             .save_verified(checkpoint, evidence)
@@ -834,9 +857,25 @@ impl RuntimeService {
             collect_training_data: self.collect_training_data,
             vision_node,
         };
-        let closed_page = match &envelope.command {
+        enum PageLifecycleSync {
+            OpenPage,
+            ClickAndWaitForPopup,
+            ListPages,
+            ClosePage(types::PageId),
+        }
+        let session_id = envelope.session_id.clone();
+        let page_sync = match &envelope.command {
+            RuntimeCommand::Primitive(PrimitiveCommand::OpenPage(_)) => {
+                Some(PageLifecycleSync::OpenPage)
+            }
+            RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(_)) => {
+                Some(PageLifecycleSync::ClickAndWaitForPopup)
+            }
+            RuntimeCommand::Primitive(PrimitiveCommand::ListPages(_)) => {
+                Some(PageLifecycleSync::ListPages)
+            }
             RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
-                Some((envelope.session_id.clone(), command.page_id.clone()))
+                Some(PageLifecycleSync::ClosePage(command.page_id.clone()))
             }
             _ => None,
         };
@@ -862,9 +901,35 @@ impl RuntimeService {
         } else {
             self.pages.execute_with_session_gate(envelope, gate).await
         };
-        if matches!(outcome, CommandOutcome::Completed { .. }) {
-            if let Some((session_id, page_id)) = closed_page {
-                let _ = self.sessions.remove_page(&session_id, &page_id).await;
+        if let CommandOutcome::Completed { ref evidence, .. } = outcome {
+            match page_sync {
+                Some(PageLifecycleSync::OpenPage) => {
+                    for item in evidence {
+                        if let Evidence::Page { page_id, .. } = item {
+                            let _ = self.sync_live_page(&session_id, page_id).await;
+                        }
+                    }
+                }
+                Some(PageLifecycleSync::ClickAndWaitForPopup) => {
+                    for item in evidence {
+                        if let Evidence::Popup { page_id, .. } = item {
+                            let _ = self.sync_live_page(&session_id, page_id).await;
+                        }
+                    }
+                }
+                Some(PageLifecycleSync::ListPages) => {
+                    for item in evidence {
+                        if let Evidence::Pages { pages } = item {
+                            for page in pages {
+                                let _ = self.sync_live_page(&session_id, &page.page_id).await;
+                            }
+                        }
+                    }
+                }
+                Some(PageLifecycleSync::ClosePage(page_id)) => {
+                    let _ = self.sessions.remove_page(&session_id, &page_id).await;
+                }
+                None => {}
             }
         }
         outcome
@@ -914,7 +979,7 @@ impl RuntimeService {
                             types::SkillCheckpointProof::new(
                                 checkpoint.checkpoint_id.clone(),
                                 envelope.session_id.clone(),
-                                chrono::Utc::now(),
+                                types::WireTimestamp::now(),
                                 attestation,
                             )
                             .ok()
@@ -1082,6 +1147,14 @@ impl RuntimeService {
             _ => WaitUntil::Interactive,
         };
         let timeout_ms = req.timeout_ms.unwrap_or(30_000);
+        let timeout = i64::try_from(timeout_ms).map_err(|_| {
+            RuntimeError::InvalidRequest("navigation timeout exceeds supported range".into())
+        })?;
+        let deadline = types::WireTimestamp::now()
+            .checked_add(Duration::from_millis(timeout))
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest("navigation timeout exceeds supported range".into())
+            })?;
         let envelope = CommandEnvelope {
             schema_version: CommandEnvelope::SCHEMA_VERSION,
             command_id: CommandId::new(),
@@ -1089,7 +1162,7 @@ impl RuntimeService {
             attempt_id: AttemptId::new(),
             session_id: page.session_id,
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::milliseconds(timeout_ms as i64),
+            deadline,
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: req.url,
                 wait_until,

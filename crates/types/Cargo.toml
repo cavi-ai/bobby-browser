@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 hex = { workspace = true }
-chrono.workspace = true
+jiff.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 url.workspace = true

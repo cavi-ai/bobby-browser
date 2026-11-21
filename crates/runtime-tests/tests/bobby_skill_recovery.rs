@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
 use companion_protocol::BrowserEngine;
+use jiff::SignedDuration as Duration;
 use page_runtime::{RecoveryCoordinator, RecoveryPreflightObserver, SkillRecoveryCoordinator};
 use skill_runtime::{SkillStateStore, SkillZigZagZig};
 use tokio::sync::{Mutex, Notify};
@@ -271,11 +271,10 @@ fn driver_error(message: &str) -> CommandError {
     }
 }
 
-async fn wait_past(deadline: chrono::DateTime<Utc>) {
-    let remaining = deadline
-        .signed_duration_since(Utc::now())
-        .to_std()
-        .unwrap_or_default();
+async fn wait_past(deadline: types::WireTimestamp) {
+    let remaining =
+        std::time::Duration::try_from(deadline.duration_since(types::WireTimestamp::now()))
+            .unwrap_or_default();
     tokio::time::sleep(remaining + std::time::Duration::from_millis(100)).await;
 }
 
@@ -283,7 +282,7 @@ fn proof(
     checkpoint_id: CheckpointId,
     session_id: SessionId,
     checkpoint_digest: &str,
-    verified_at: chrono::DateTime<Utc>,
+    verified_at: types::WireTimestamp,
 ) -> SkillCheckpointProof {
     SkillCheckpointProof::new(
         checkpoint_id,
@@ -300,7 +299,7 @@ fn strategy_state(
     attempted_tactics: Vec<SkillTactic>,
     effective_profile: Option<SkillProfile>,
     checkpoint_digest: &str,
-    proof_verified_at: chrono::DateTime<Utc>,
+    proof_verified_at: types::WireTimestamp,
 ) -> SkillSessionState {
     SkillSessionState::new(
         session_id.clone(),
@@ -317,7 +316,7 @@ fn strategy_state(
         None,
         attempted_tactics,
         Vec::new(),
-        Utc::now() + Duration::seconds(5),
+        types::WireTimestamp::now() + Duration::from_secs(5),
     )
     .unwrap()
 }
@@ -348,7 +347,7 @@ fn checkpoint(
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }
 
@@ -363,7 +362,7 @@ async fn fixture_with_proof_verified_at(
     mutation_delay_ms: u64,
     finalization_failures: usize,
     journal_failures_to_inject: usize,
-    proof_verified_at: chrono::DateTime<Utc>,
+    proof_verified_at: types::WireTimestamp,
 ) -> (
     SkillRecoveryCoordinator,
     CommandEnvelope,
@@ -487,7 +486,7 @@ async fn fixture_with_proof_verified_at(
         attempt_id,
         session_id,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: types::RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
             InspectCommand::default(),
         )),
@@ -541,7 +540,7 @@ async fn fixture(
         mutation_delay_ms,
         finalization_failures,
         journal_failures_to_inject,
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .await
 }
@@ -1332,7 +1331,7 @@ async fn committed_receipt_settles_adapted_success_after_deadline_and_proof_expi
             0,
             0,
             1,
-            Utc::now() - Duration::minutes(15) + Duration::seconds(2),
+            types::WireTimestamp::now() - Duration::from_mins(15) + Duration::from_secs(2),
         )
         .await;
 
@@ -1395,7 +1394,7 @@ async fn committed_receipt_settles_terminal_failure_after_deadline_and_proof_exp
             80,
             0,
             1,
-            Utc::now() - Duration::minutes(15) + Duration::seconds(2),
+            types::WireTimestamp::now() - Duration::from_mins(15) + Duration::from_secs(2),
         )
         .await;
 

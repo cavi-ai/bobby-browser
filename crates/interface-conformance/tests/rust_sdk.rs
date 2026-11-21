@@ -74,7 +74,7 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(20),
             command: RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(ClosePageCommand {
                 page_id: page.id.clone(),
             })),
@@ -113,7 +113,7 @@ async fn run_rust_sample(
         attempt_id: attempt.clone(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(20),
         command: RuntimeCommand::Primitive(command),
     };
     observed.push("command.navigate");
@@ -199,7 +199,7 @@ async fn run_rust_sample(
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: chrono::Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     runtime
         .checkpoint(context(), popup_checkpoint, inspect_evidence.clone())
@@ -266,7 +266,7 @@ async fn run_rust_sample(
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: chrono::Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let saved_checkpoint = runtime
         .checkpoint(context(), checkpoint.clone(), inspect_evidence.clone())
@@ -359,9 +359,10 @@ async fn run_rust_sample(
     let denied_runtime =
         sdk_core::AuthenticatedRuntime::new(harness.service.clone(), denied_handle.clone());
     let denied = denied_runtime
-        .runtime_info(
-            denied_handle.context(chrono::Utc::now() + chrono::Duration::seconds(10), None),
-        )
+        .runtime_info(denied_handle.context(
+            types::WireTimestamp::now() + jiff::SignedDuration::from_secs(10),
+            None,
+        ))
         .await
         .unwrap_err();
     assert_eq!(denied.required_capability, Some(Capability::SessionRead));

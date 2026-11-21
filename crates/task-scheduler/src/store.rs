@@ -1,7 +1,7 @@
 //! Durable and in-memory job stores.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ impl JobEvent {
 pub struct JournalRecord {
     pub schema_version: u16,
     pub sequence: u64,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: types::WireTimestamp,
     pub event: JobEvent,
     pub job: Job,
 }
@@ -133,7 +133,7 @@ impl JobStore for MemoryJobStore {
 
     async fn prune_terminal(&self, retained: usize) -> Result<(), StoreError> {
         let mut jobs = self.jobs.lock().await;
-        let mut terminal: Vec<(JobId, Option<DateTime<Utc>>)> = jobs
+        let mut terminal: Vec<(JobId, Option<types::WireTimestamp>)> = jobs
             .iter()
             .filter(|(_, job)| {
                 matches!(
@@ -180,7 +180,7 @@ async fn compact_journal<'a>(
             let record = JournalRecord {
                 schema_version: JOURNAL_SCHEMA_VERSION,
                 sequence: sequence as u64,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 event: JobEvent::from_status(&job.status),
                 job: job.clone(),
             };
@@ -335,7 +335,7 @@ impl JournalJobStore {
             let record = JournalRecord {
                 schema_version: JOURNAL_SCHEMA_VERSION,
                 sequence: writer.next_sequence,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 event,
                 job: job.clone(),
             };

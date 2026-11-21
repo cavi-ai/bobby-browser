@@ -416,7 +416,7 @@ pub struct ScreenshotOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub captured_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub captured_at: Option<crate::WireTimestamp>,
 }
 
 /// Upper bound on [`Evidence::Wait`]'s `observed` value, in characters.
@@ -518,12 +518,10 @@ pub enum Evidence {
         url: String,
         title: String,
     },
-    /// A handle-resolved call found its bound page no longer open (a popup
-    /// the handle was following, since closed) and fell back to the opener
-    /// the earlier `click_and_wait_for_popup` recorded. `popup_page_id` is
-    /// the page that is now gone; `opener_page_id` is the page the handle is
-    /// bound to going forward. Carried on a completed read-only retry, or
-    /// on the original `failed` outcome when the call was mutating.
+    /// A popup closed during creation, or a handle's popup has since closed.
+    /// The opener remains the handle's target. A subsequent read-only retry
+    /// can carry this evidence on completion. A subsequent mutation that hits a
+    /// closed popup carries it on failure.
     PopupClosed {
         popup_page_id: PageId,
         opener_page_id: PageId,

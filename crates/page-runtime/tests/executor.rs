@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, ClickModifier, CommandClass, CommandEnvelope,
@@ -747,7 +747,7 @@ async fn upload_and_confirm_returns_upload_and_confirmation_evidence() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1082,7 +1082,7 @@ fn envelope(session: SessionId, page: PageId, command: PrimitiveCommand) -> Comm
         attempt_id: AttemptId::new(),
         session_id: session,
         page_id: Some(page),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -1095,7 +1095,7 @@ fn intent_envelope(session: SessionId, page: PageId, command: IntentCommand) -> 
         attempt_id: AttemptId::new(),
         session_id: session,
         page_id: Some(page),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Intent(command),
     }
 }
@@ -1331,7 +1331,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1409,7 +1409,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1501,7 +1501,7 @@ async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1769,7 +1769,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1848,7 +1848,7 @@ async fn expected_state_pre_satisfied_is_failed_not_needs_reconciliation() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1896,7 +1896,10 @@ async fn boundary_target_detached_revives_and_fails_not_needs_reconciliation() {
 
 #[tokio::test]
 async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
-    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let url = format!(
+        "{}?private=value#section",
+        http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await
+    );
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
     runtime
         .set_url(&page, url.clone(), "interactive")
@@ -1920,6 +1923,10 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
             ..
         }
     )));
+    assert_eq!(
+        runtime.get(&page).await.unwrap().url.as_deref(),
+        Some(url.as_str())
+    );
     // A mutating command taints the page.
     let click = runtime
         .execute(envelope(
@@ -2962,7 +2969,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
     let journal = Arc::new(RecoveryJournal {
         records: vec![JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::ResultPrepared,
             envelope: None,
@@ -3050,7 +3057,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
     let records = vec![
         JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::Accepted,
             envelope: Some(command.journal_safe()),
@@ -3059,7 +3066,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         },
         JournalRecord {
             sequence: 1,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::ResultPrepared,
             envelope: None,
@@ -3717,7 +3724,7 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
             include_html: false,
         }),
     );
-    request.deadline = Utc::now() + Duration::milliseconds(200);
+    request.deadline = types::WireTimestamp::now() + Duration::from_millis(200);
 
     let outcome = tokio::time::timeout(StdDuration::from_secs(2), runtime.execute(request))
         .await
@@ -3889,7 +3896,7 @@ async fn archived_history_never_authorizes_recovery_evidence_or_session_ownershi
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: id.clone(),
                 phase: if completed {
                     CommandPhase::Completed
@@ -3938,7 +3945,7 @@ async fn archived_history_never_authorizes_recovery_evidence_or_session_ownershi
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: fresh.clone(),
                 phase: CommandPhase::Accepted,
                 envelope: None,
@@ -4002,4 +4009,400 @@ async fn cookie_support_does_not_enable_http_routing() {
     let events = events.lock().await;
     assert!(events.contains(&"browser:inspect".to_string()));
     assert!(!events.contains(&"http:state".to_string()));
+}
+
+struct LifecycleTestWorker {
+    id: WorkerId,
+    profile: PathBuf,
+    listed_pages: Arc<Mutex<Vec<PageEvidence>>>,
+    current_url_value: Arc<Mutex<Option<String>>>,
+    current_url_calls: Arc<std::sync::atomic::AtomicUsize>,
+    click_opens_dialog: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl BrowserWorker for LifecycleTestWorker {
+    fn worker_id(&self) -> WorkerId {
+        self.id.clone()
+    }
+    fn profile_dir(&self) -> &Path {
+        &self.profile
+    }
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+    fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for LifecycleTestWorker {
+    async fn open_page(&self, _page_id: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+    async fn list_pages(&self, _: &types::ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Pages {
+            pages: self.listed_pages.lock().await.clone(),
+        }])
+    }
+    async fn close_page_command(
+        &self,
+        cmd: &types::ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Page {
+            page_id: cmd.page_id.clone(),
+            url: String::new(),
+            title: String::new(),
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for LifecycleTestWorker {
+    async fn navigate(
+        &self,
+        _: &PageId,
+        command: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Navigation {
+            url: command.url.clone(),
+            title: "Navigated".into(),
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for LifecycleTestWorker {
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Inspection {
+            selector: None,
+            url: "https://app.example.test/inspected".into(),
+            title: "Inspected".into(),
+            text: "ok".into(),
+            html: None,
+        }])
+    }
+
+    async fn current_url(&self, _: &PageId) -> Option<String> {
+        self.current_url_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.current_url_value.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for LifecycleTestWorker {
+    async fn click(
+        &self,
+        _: &PageId,
+        cmd: &types::ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let mut evidence = vec![Evidence::Element {
+            selector: cmd.selector.clone(),
+            text: None,
+        }];
+        if self
+            .click_opens_dialog
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            evidence.push(Evidence::Configuration {
+                name: "dialogOpened".into(),
+                value: "alert".into(),
+            });
+        }
+        Ok(evidence)
+    }
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &types::TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl worker_pool::EventsEngine for LifecycleTestWorker {
+    async fn click_and_wait_for_popup(
+        &self,
+        opener: &PageId,
+        _: &types::ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Popup {
+            opener_page_id: opener.clone(),
+            page_id: PageId::new(),
+            url: "https://popup.example.test/auth".into(),
+            title: "Popup".into(),
+        }])
+    }
+}
+
+struct LifecycleTestFactory {
+    worker: Arc<LifecycleTestWorker>,
+}
+
+#[async_trait]
+impl worker_pool::WorkerFactory for LifecycleTestFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(self.worker.clone())
+    }
+}
+
+#[tokio::test]
+async fn list_pages_registers_discovered_pages_without_pruning_or_resurrecting_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let listed_pages = Arc::new(Mutex::new(Vec::<PageEvidence>::new()));
+    let worker = Arc::new(LifecycleTestWorker {
+        id: WorkerId::new(),
+        profile: root.path().to_path_buf(),
+        listed_pages: listed_pages.clone(),
+        current_url_value: Arc::new(Mutex::new(None)),
+        current_url_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        click_opens_dialog: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let pool = Arc::new(WorkerPool::new(
+        4,
+        Arc::new(LifecycleTestFactory { worker }),
+    ));
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = page_runtime::PageRuntime::new(journal, pool);
+
+    let session_a = SessionId::new();
+    let session_b = SessionId::new();
+    let page_a = runtime.open_browser(session_a.clone()).await.unwrap();
+    let other_page_a = runtime.open_browser(session_a.clone()).await.unwrap();
+    let popup_id = PageId::new();
+
+    runtime
+        .set_url(
+            &page_a.id,
+            "https://app.example.test/fresh".into(),
+            "complete",
+        )
+        .await
+        .unwrap();
+    // ListPages returns popup_id (new) and omits other_page_a (must NOT prune).
+    *listed_pages.lock().await = vec![
+        PageEvidence {
+            page_id: page_a.id.clone(),
+            url: "https://app.example.test/opener".into(),
+            title: "Opener".into(),
+        },
+        PageEvidence {
+            page_id: popup_id.clone(),
+            url: "https://app.example.test/popup".into(),
+            title: "Popup".into(),
+        },
+    ];
+    let outcome = runtime
+        .execute(envelope(
+            session_a.clone(),
+            page_a.id.clone(),
+            PrimitiveCommand::ListPages(types::ListPagesCommand),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    let existing = runtime.get(&page_a.id).await.unwrap();
+    assert_eq!(
+        existing.url.as_deref(),
+        Some("https://app.example.test/fresh")
+    );
+    assert_eq!(existing.ready_state, "complete");
+    let discovered = runtime.get(&popup_id).await.unwrap();
+    assert_eq!(discovered.session_id, session_a);
+    assert_eq!(
+        discovered.url.as_deref(),
+        Some("https://app.example.test/popup")
+    );
+    assert!(
+        runtime.get(&other_page_a.id).await.is_ok(),
+        "absent page must not be pruned on ListPages"
+    );
+
+    // Session B listing page_a must NOT steal ownership from Session A.
+    let _page_b = runtime.open_browser(session_b.clone()).await.unwrap();
+    let outcome = runtime
+        .execute(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session_b.clone(),
+            page_id: None,
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(
+                types::ListPagesCommand,
+            )),
+        })
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(runtime.get(&page_a.id).await.unwrap().session_id, session_a);
+
+    // Close popup_id; a subsequent stale ListPages must NOT resurrect it.
+    let outcome = runtime
+        .execute(envelope(
+            session_a.clone(),
+            popup_id.clone(),
+            PrimitiveCommand::ClosePage(types::ClosePageCommand {
+                page_id: popup_id.clone(),
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert!(runtime.get(&popup_id).await.is_err());
+
+    let outcome = runtime
+        .execute(envelope(
+            session_a.clone(),
+            page_a.id.clone(),
+            PrimitiveCommand::ListPages(types::ListPagesCommand),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert!(
+        runtime.get(&popup_id).await.is_err(),
+        "closed page must not be resurrected by stale ListPages"
+    );
+}
+
+#[tokio::test]
+async fn url_syncs_from_evidence_and_current_url_while_ignoring_popup_and_dialog() {
+    let root = tempfile::tempdir().unwrap();
+    let current_url_value = Arc::new(Mutex::new(Some(
+        "https://app.example.test/after-click".to_string(),
+    )));
+    let current_url_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let click_opens_dialog = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = Arc::new(LifecycleTestWorker {
+        id: WorkerId::new(),
+        profile: root.path().to_path_buf(),
+        listed_pages: Arc::new(Mutex::new(Vec::new())),
+        current_url_value: current_url_value.clone(),
+        current_url_calls: current_url_calls.clone(),
+        click_opens_dialog: click_opens_dialog.clone(),
+    });
+    let pool = Arc::new(WorkerPool::new(
+        4,
+        Arc::new(LifecycleTestFactory { worker }),
+    ));
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = page_runtime::PageRuntime::new(journal, pool);
+
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    runtime
+        .set_url(
+            &page.id,
+            "https://app.example.test/start".into(),
+            "interactive",
+        )
+        .await
+        .unwrap();
+
+    // Non-replayable Click with no URL in evidence queries current_url().
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.id.clone(),
+            PrimitiveCommand::Click(types::ClickCommand {
+                selector: "#go".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(
+        runtime.get(&page.id).await.unwrap().url.as_deref(),
+        Some("https://app.example.test/after-click")
+    );
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    // Click that opens a dialog must NOT call current_url().
+    click_opens_dialog.store(true, std::sync::atomic::Ordering::SeqCst);
+    *current_url_value.lock().await = Some("https://app.example.test/should-not-read".into());
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.id.clone(),
+            PrimitiveCommand::Click(types::ClickCommand {
+                selector: "#alert".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(
+        runtime.get(&page.id).await.unwrap().url.as_deref(),
+        Some("https://app.example.test/after-click")
+    );
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    // ClickAndWaitForPopup must NOT overwrite opener URL with popup URL.
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.id.clone(),
+            PrimitiveCommand::ClickAndWaitForPopup(types::ClickAndWaitForPopupCommand {
+                selector: "#popup".into(),
+                target: None,
+                timeout_ms: 5_000,
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(
+        runtime.get(&page.id).await.unwrap().url.as_deref(),
+        Some("https://app.example.test/after-click")
+    );
+
+    // Replayable Inspect updates URL from Evidence::Inspection without calling current_url().
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.id.clone(),
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(
+        runtime.get(&page.id).await.unwrap().url.as_deref(),
+        Some("https://app.example.test/inspected")
+    );
+    assert_eq!(
+        current_url_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }

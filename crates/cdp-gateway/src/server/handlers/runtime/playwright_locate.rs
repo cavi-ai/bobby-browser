@@ -67,7 +67,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id,
                 page_id: Some(page_id),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand {
                     selector: None,
                     target: Some(target),

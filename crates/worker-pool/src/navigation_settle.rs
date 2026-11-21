@@ -57,7 +57,7 @@ const bare=url=>String(url).split('#')[0];\
 const inPlace=!!entry&&bare(entry.name)!==bare(location.href);\
 const quietMs=moved?{REDIRECTED_QUIET_MS}:inPlace?{SAME_DOCUMENT_QUIET_MS}:{NAVIGATION_QUIET_MS};\
 const restart=()=>{{clearTimeout(timer);if(document.readyState==='complete')timer=setTimeout(()=>finish(true),quietMs);}};\
-const edited=new WeakSet();\
+const edited=new WeakSet();const textEdited=new WeakSet();\
 const restyle=r=>r.type==='characterData'||r.attributeName==='class'||r.attributeName==='style';\
 const note=r=>{{try{{const node=r.target.nodeType===1?r.target:r.target.parentElement;\
 if(node&&node.closest('main,[role=main]'))tally.insideMain+=1;else tally.outsideMain+=1;\
@@ -65,8 +65,12 @@ if(r.type==='attributes'){{tally.attributes+=1;const name=r.attributeName;\
 if(name.length<={CHURN_ATTRIBUTE_NAME_CHARS}&&(names.has(name)||names.size<{CHURN_TRACKED_ATTRIBUTE_NAMES}))names.set(name,(names.get(name)||0)+1);}}\
 else if(r.type==='characterData')tally.characterData+=1;}}catch(e){{}}return true;}};\
 const counted=(r,relocated)=>{{if(r.type==='childList'){{\
-const added=[...r.addedNodes].filter(n=>!relocated(n)).length,removed=[...r.removedNodes].filter(n=>!relocated(n)).length;\
-if(added+removed===0)return false;tally.added+=added;tally.removed+=removed;return note(r);}}\
+const add=[...r.addedNodes].filter(n=>!relocated(n)),rem=[...r.removedNodes].filter(n=>!relocated(n));\
+const added=add.length,removed=rem.length;\
+if(added+removed===0)return false;\
+const textOnly=added>0&&removed>0&&add.every(n=>n.nodeType===3)&&rem.every(n=>n.nodeType===3);\
+if(textOnly&&(textEdited.has(r.target)||!textEdited.add(r.target)))return false;\
+tally.added+=added;tally.removed+=removed;return note(r);}}\
 if(restyle(r)&&(edited.has(r.target)||!edited.add(r.target)))return false;return note(r);}};\
 const changes=records=>{{const added=new Set(),removed=new Set();\
 records.forEach(r=>{{r.addedNodes.forEach(n=>added.add(n));r.removedNodes.forEach(n=>removed.add(n));}});\
@@ -267,6 +271,8 @@ pub fn trace_settle(
 pub enum ProbeStep {
     /// The document changed while the probe was in flight. Probe again immediately.
     Replaced,
+    /// The page closed while the probe was in flight. Stop settling immediately.
+    Closed,
     /// The probe returned. `None` when the page could not be read.
     Finished(Option<ProbeRead>),
 }
@@ -306,6 +312,10 @@ pub async fn run_settle(
         let landed_before = session.landed_loads().await;
         match session.probe(remaining, requested_url).await {
             ProbeStep::Replaced => continue,
+            ProbeStep::Closed => {
+                settled = None;
+                break SettleExit::Unreadable;
+            }
             ProbeStep::Finished(None) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -562,5 +572,56 @@ mod tests {
             .expect("page");
         assert_eq!(settled, ("https://a.test/now".into(), "Now".into()));
         assert!(session.probes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_probe_exits_unreadable_immediately() {
+        let mut session = Scripted {
+            probes: vec![ProbeStep::Closed, ProbeStep::Finished(Some(quiet_page()))],
+            current: Some(("https://a.test/stale".into(), "Stale".into())),
+            pending: Some(0),
+            landed: 0,
+        };
+        let settled = run_settle(
+            "test",
+            Duration::from_secs(5),
+            "https://a.test/a",
+            &mut session,
+        )
+        .await;
+        assert_eq!(settled, None);
+        assert_eq!(
+            session.probes.len(),
+            1,
+            "run_settle must stop immediately on ProbeStep::Closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_probe_discards_an_earlier_read() {
+        let mut session = Scripted {
+            probes: vec![ProbeStep::Finished(Some(quiet_page())), ProbeStep::Closed],
+            current: None,
+            pending: None,
+            landed: 0,
+        };
+        assert_eq!(
+            run_settle(
+                "test",
+                Duration::from_secs(1),
+                "https://a.test/a",
+                &mut session
+            )
+            .await,
+            None
+        );
+    }
+
+    #[test]
+    fn settle_expression_deduplicates_pure_text_child_list_replacements() {
+        let js = navigation_settle_expression(5_000, "https://a.test/");
+        assert!(js.contains("textEdited=new WeakSet()"));
+        assert!(js.contains("nodeType===3"));
+        assert!(js.contains("textEdited.has(r.target)||!textEdited.add(r.target)"));
     }
 }

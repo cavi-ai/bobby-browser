@@ -6,7 +6,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration as Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Mutex};
@@ -30,7 +30,7 @@ mod persistence_tests {
         IdempotencyKey::try_from("cancelled-caller").unwrap()
     }
     async fn reserve(store: &IdempotencyStore) -> Result<IdempotencyReservation, InterfaceError> {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         store
             .reserve(
                 owner(),
@@ -38,7 +38,7 @@ mod persistence_tests {
                 InterfaceOperation::SubmitCommand,
                 [0; 32],
                 now,
-                now + Duration::seconds(2),
+                now + Duration::from_secs(2),
                 CorrelationId::new(),
             )
             .await
@@ -73,7 +73,7 @@ mod persistence_tests {
                     command_id: command_id.clone(),
                     evidence: vec![]
                 },
-                Utc::now()
+                types::WireTimestamp::now()
             )
         )
         .await
@@ -242,7 +242,7 @@ struct Entry<O> {
     operation: InterfaceOperation,
     canonical_sha256: [u8; 32],
     state: EntryState<O>,
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<types::WireTimestamp>,
     last_used: u64,
 }
 
@@ -273,7 +273,7 @@ struct DurableEntry {
     key: IdempotencyKey,
     operation: InterfaceOperation,
     canonical_sha256: [u8; 32],
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<types::WireTimestamp>,
     last_used: u64,
     state: DurableState,
 }
@@ -349,7 +349,7 @@ impl<O> std::fmt::Debug for IdempotencyStore<O> {
 
 impl<O: RetainedOutcome> Default for IdempotencyStore<O> {
     fn default() -> Self {
-        Self::with_global_capacity(256, 4096, Duration::minutes(15))
+        Self::with_global_capacity(256, 4096, Duration::from_mins(15))
     }
 }
 
@@ -374,7 +374,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                 return Ok(store);
             }
         };
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let mut state = store.state.lock().await;
         let mut protect_unknown = false;
         for entry in entries {
@@ -563,8 +563,8 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         key: IdempotencyKey,
         operation: InterfaceOperation,
         canonical_sha256: [u8; 32],
-        mut now: DateTime<Utc>,
-        deadline: DateTime<Utc>,
+        mut now: types::WireTimestamp,
+        deadline: types::WireTimestamp,
         correlation_id: CorrelationId,
     ) -> Result<IdempotencyReservation<O>, InterfaceError> {
         self.ensure_writable(&correlation_id)?;
@@ -626,8 +626,8 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             };
 
             if let Some(mut receiver) = wait {
-                let remaining = deadline.signed_duration_since(Utc::now());
-                let Ok(remaining) = remaining.to_std() else {
+                let remaining = deadline.duration_since(types::WireTimestamp::now());
+                let Ok(remaining) = std::time::Duration::try_from(remaining) else {
                     return Err(deadline_error(correlation_id));
                 };
                 if tokio::time::timeout(remaining, receiver.changed())
@@ -643,7 +643,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                     ReservationUpdate::Unresolved => return Err(unresolved_error(correlation_id)),
                     ReservationUpdate::Released | ReservationUpdate::Pending => {}
                 }
-                now = Utc::now();
+                now = types::WireTimestamp::now();
                 continue;
             }
 
@@ -731,7 +731,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         &self,
         permit: IdempotencyPermit<O>,
         outcome: O,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<(), InterfaceError> {
         let store = self.clone();
         let correlation = permit.correlation_id.clone();
@@ -744,7 +744,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         &self,
         permit: IdempotencyPermit<O>,
         outcome: O,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<(), InterfaceError> {
         self.ensure_writable(&permit.correlation_id)?;
         let mut permit = permit;
@@ -1113,7 +1113,7 @@ fn canonicalization_error() -> InterfaceError {
     }
 }
 
-fn cleanup_expired<O>(state: &mut StoreState<O>, now: DateTime<Utc>) {
+fn cleanup_expired<O>(state: &mut StoreState<O>, now: types::WireTimestamp) {
     for (principal, entries) in &mut state.entries {
         entries.retain(|entry| {
             let keep = entry.expires_at.is_none_or(|expires_at| expires_at > now);

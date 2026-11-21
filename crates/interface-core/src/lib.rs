@@ -12,7 +12,7 @@ mod idempotency;
 mod session_ownership;
 
 use async_trait::async_trait;
-use chrono::Utc;
+
 use types::{
     Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
     Evidence, InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
@@ -314,7 +314,7 @@ impl AuthorizationGuard {
     /// Validates the live credential and request identity without selecting an operation.
     /// Enumeration boundaries use this before filtering entries by capability.
     pub fn validate(&self, ctx: &RequestContext) -> InterfaceResult<()> {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         if ctx.validate_at(now).is_err() {
             return Err(interface_error(
                 ctx,

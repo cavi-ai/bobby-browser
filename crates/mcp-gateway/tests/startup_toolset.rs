@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{Server, Toolset};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::json;
@@ -24,7 +24,7 @@ async fn initialized_server(build: impl FnOnce(Server) -> Server) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000051")),
             Capability::ALL.to_vec(),
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("authority issues");

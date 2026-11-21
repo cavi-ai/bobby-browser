@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::Utc;
 use serde_json::json;
 use types::{
     SessionId, SkillBrowserEngine, SkillCapability, SkillCommand, SkillDecision, SkillEvidenceRef,
@@ -129,7 +128,7 @@ fn session_state_and_outcomes_round_trip_and_limit_evidence() {
         None,
         vec![SkillTactic::ObserveAgain],
         vec![evidence()],
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .unwrap();
     let value = serde_json::to_value(&state).unwrap();
@@ -444,7 +443,7 @@ fn session_state_constructor_rejects_unsafe_active_version_metadata() {
             None,
             Vec::new(),
             vec![evidence()],
-            Utc::now(),
+            types::WireTimestamp::now(),
         )
         .is_err());
     }
@@ -498,7 +497,7 @@ fn invalid_public_struct_literals_fail_closed_during_serialization() {
         pending_issuance: None,
         attempted_tactics: Vec::new(),
         evidence: vec![evidence()],
-        deadline: Utc::now(),
+        deadline: types::WireTimestamp::now(),
     };
     assert!(serde_json::to_value(&state).is_err());
 }
@@ -545,7 +544,7 @@ fn field_specific_metadata_grammars_reject_named_bypasses() {
         None,
         Vec::new(),
         vec![evidence()],
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .is_err());
 }
@@ -578,7 +577,7 @@ fn field_specific_metadata_grammars_preserve_safe_wire_values() {
         None,
         Vec::new(),
         vec![evidence()],
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .is_ok());
 }
@@ -590,7 +589,7 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
     let proof = types::SkillCheckpointProof::new(
         checkpoint_id.clone(),
         session_id.clone(),
-        Utc::now(),
+        types::WireTimestamp::now(),
         types::SkillEvidenceRef::new("checkpoint-attestation", "c".repeat(64)).unwrap(),
     )
     .unwrap();
@@ -604,7 +603,7 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + chrono::Duration::minutes(5),
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
     )
     .unwrap();
     assert_eq!(
@@ -615,7 +614,7 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
     let mismatched_session = types::SkillCheckpointProof::new(
         checkpoint_id.clone(),
         SessionId::new(),
-        Utc::now(),
+        types::WireTimestamp::now(),
         types::SkillEvidenceRef::new("checkpoint-attestation", "c".repeat(64)).unwrap(),
     )
     .unwrap();
@@ -629,13 +628,13 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + chrono::Duration::minutes(5),
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
     )
     .is_err());
     let arbitrary_checkpoint = types::SkillCheckpointProof::new(
         types::CheckpointId::new(),
         session_id.clone(),
-        Utc::now(),
+        types::WireTimestamp::now(),
         types::SkillEvidenceRef::new("checkpoint-attestation", "c".repeat(64)).unwrap(),
     )
     .unwrap();
@@ -649,13 +648,13 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + chrono::Duration::minutes(5),
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
     )
     .is_err());
     assert!(types::SkillCheckpointProof::new(
         checkpoint_id.clone(),
         session_id.clone(),
-        Utc::now() - chrono::Duration::hours(1),
+        types::WireTimestamp::now() - jiff::SignedDuration::from_hours(1),
         types::SkillEvidenceRef::new("checkpoint-attestation", "c".repeat(64)).unwrap(),
     )
     .is_err());
@@ -673,7 +672,7 @@ fn checkpoint_proofs_bind_the_session_are_fresh_and_fail_closed_when_absent() {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + chrono::Duration::minutes(5),
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
     )
     .is_err());
 }
@@ -709,12 +708,12 @@ fn pending_issuance_requires_an_exact_reservation_and_session_bound_proof() {
     let proof = types::SkillCheckpointProof::new(
         checkpoint_id.clone(),
         session_id.clone(),
-        Utc::now(),
+        types::WireTimestamp::now(),
         types::SkillEvidenceRef::new("checkpoint-attestation", "f".repeat(64)).unwrap(),
     )
     .unwrap();
-    let issued_at = Utc::now();
-    let deadline = issued_at + chrono::Duration::milliseconds(100);
+    let issued_at = types::WireTimestamp::now();
+    let deadline = issued_at + jiff::SignedDuration::from_millis(100);
     let decision = SkillDecision::new(
         SkillTactic::ReconcileCheckpoint,
         SkillFailure::EffectUncertain,
@@ -756,7 +755,8 @@ fn pending_issuance_requires_an_exact_reservation_and_session_bound_proof() {
         pending
     );
     let mut malformed_issuance = pending.clone();
-    malformed_issuance.deadline = malformed_issuance.issued_at - chrono::Duration::milliseconds(1);
+    malformed_issuance.deadline =
+        malformed_issuance.issued_at - jiff::SignedDuration::from_millis(1);
     assert!(serde_json::to_value(&malformed_issuance).is_err());
 
     let mut inflated_issuance = pending.clone();
@@ -769,7 +769,7 @@ fn pending_issuance_requires_an_exact_reservation_and_session_bound_proof() {
         .pending_issuance
         .as_mut()
         .unwrap()
-        .deadline += chrono::Duration::minutes(1);
+        .deadline += jiff::SignedDuration::from_mins(1);
     assert!(serde_json::to_value(&mismatched_deadline).is_err());
 
     let mut mismatched_session = state.clone();
@@ -809,8 +809,8 @@ fn pending_issuance_requires_an_exact_reservation_and_session_bound_proof() {
 #[test]
 fn issued_command_identity_fails_closed_if_public_fields_are_tampered() {
     let session_id = SessionId::new();
-    let issued_at = Utc::now();
-    let deadline = issued_at + chrono::Duration::milliseconds(100);
+    let issued_at = types::WireTimestamp::now();
+    let deadline = issued_at + jiff::SignedDuration::from_millis(100);
     let decision = SkillDecision::new(
         SkillTactic::ObserveAgain,
         SkillFailure::TargetDrift,
@@ -874,7 +874,7 @@ fn reviewed_bounds_and_embedded_unsafe_display_text_fail_closed() {
         None,
         Vec::new(),
         vec![evidence()],
-        Utc::now()
+        types::WireTimestamp::now()
     )
     .is_ok());
     assert!(SkillSessionState::new(
@@ -887,7 +887,7 @@ fn reviewed_bounds_and_embedded_unsafe_display_text_fail_closed() {
         None,
         Vec::new(),
         vec![evidence()],
-        Utc::now()
+        types::WireTimestamp::now()
     )
     .is_err());
 

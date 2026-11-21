@@ -331,7 +331,7 @@ async fn prove_snapshot_target_round_trip(
         attempt_id: AttemptId::new(),
         session_id: types::SessionId(uuid::Uuid::parse_str(session_id).unwrap()),
         page_id: Some(types::PageId(uuid::Uuid::parse_str(page_id).unwrap())),
-        deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(20),
         command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
             purpose: "enter the work phone".into(),
             hints: IntentHints {
@@ -520,7 +520,7 @@ async fn run_mcp_sample(
         attempt_id: attempt.clone(),
         session_id: sid.clone(),
         page_id: Some(pid.clone()),
-        deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(20),
         command: RuntimeCommand::Primitive(command),
     };
     observed.push("command.navigate");
@@ -548,7 +548,7 @@ async fn run_mcp_sample(
             attempt_id: attempt.clone(),
             session_id: sid.clone(),
             page_id: Some(pid.clone()),
-            deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(20),
             command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
                 purpose: "complete the applicant form".into(),
                 fields: vec![CompleteFormField {
@@ -635,7 +635,7 @@ async fn run_mcp_sample(
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: chrono::Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let popup_evidence_ref = popup_checkpoint.cursor.clone().unwrap();
     tool(
@@ -707,7 +707,7 @@ async fn run_mcp_sample(
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: chrono::Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let checkpoint_evidence_ref = checkpoint.cursor.clone().unwrap();
     let saved_checkpoint = tool(
@@ -1367,7 +1367,7 @@ async fn run_intent_sample(surface: &mut dyn IntentSurface, scope: &IntentScope)
         "evidence":[],
         "recoveryHistory":[],
         "recoveryReceipts":[],
-        "createdAt":chrono::Utc::now().to_rfc3339(),
+        "createdAt":types::WireTimestamp::now().rfc3339(),
     });
     let saved = surface
         .checkpoint_save(checkpoint, vec![filled.command_id])

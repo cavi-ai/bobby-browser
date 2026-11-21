@@ -5,8 +5,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cdp_gateway::{CdpGateway, DiscoveryError, MethodRegistry};
-use chrono::{Duration, Utc};
 use interface_core::{Authority, AuthorityStore};
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{Capability, PrincipalId};
@@ -18,7 +18,7 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -119,7 +119,7 @@ async fn revoked_connection_is_rejected_before_method_lookup() {
         .issue(
             principal.clone(),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

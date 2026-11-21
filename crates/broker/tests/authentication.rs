@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use axum::body::{to_bytes, Body};
 use axum::http::{header::WWW_AUTHENTICATE, Request, StatusCode};
 use broker::{router, AppState, EnrolledAuthority, StartupCredential};
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use interface_core::{
     Authority, AuthorityStore, AuthorizationGuard, CapabilityHandle, RuntimeInterface,
 };
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{
@@ -72,10 +72,10 @@ impl Authority for ExpiredBearerAuthority {
     async fn authenticate(
         &self,
         bearer: &str,
-        now: chrono::DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError> {
         let validation_time = if bearer == self.expired_bearer {
-            now + Duration::hours(1)
+            now + Duration::from_hours(1)
         } else {
             now
         };
@@ -95,10 +95,10 @@ fn submit_request(token: &str, duplicate_authorization: bool) -> Request<Body> {
         attempt_id: AttemptId::new(),
         session_id: types::SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
-    let deadline = (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let deadline = (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis();
     let mut request = Request::post("/v1/commands")
         .header("authorization", format!("Bearer {token}"))
         .header("x-interface-version", CURRENT_INTERFACE_VERSION)
@@ -141,7 +141,7 @@ async fn insufficient_scope_is_forbidden_before_runtime_dispatch() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001")),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -187,7 +187,7 @@ async fn authentication_result_precedes_all_context_header_validation() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000041")),
             [Capability::BrowserMutate],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -197,7 +197,7 @@ async fn authentication_result_precedes_all_context_header_validation() {
         .issue(
             revoked_principal.clone(),
             [Capability::BrowserMutate],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -207,7 +207,7 @@ async fn authentication_result_precedes_all_context_header_validation() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000043")),
             [Capability::BrowserMutate],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -256,8 +256,8 @@ async fn authentication_result_precedes_all_context_header_validation() {
     let mut expired_deadline = submit_request(&valid, false);
     expired_deadline.headers_mut().insert(
         "x-deadline",
-        (Utc::now() - Duration::seconds(1))
-            .to_rfc3339_opts(SecondsFormat::Millis, true)
+        (types::WireTimestamp::now() - Duration::from_secs(1))
+            .rfc3339_millis()
             .parse()
             .unwrap(),
     );
@@ -280,7 +280,7 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
             bearer.clone(),
             principal.clone(),
             vec![Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .unwrap(),
         1,
@@ -288,16 +288,25 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
     .await
     .unwrap();
 
-    let handle = authority.authenticate(&bearer, Utc::now()).await.unwrap();
-    let context = handle.context(Utc::now() + Duration::minutes(2), None);
+    let handle = authority
+        .authenticate(&bearer, types::WireTimestamp::now())
+        .await
+        .unwrap();
+    let context = handle.context(types::WireTimestamp::now() + Duration::from_mins(2), None);
     assert!(authority
-        .authenticate("different-startup-bearer-000000", Utc::now())
+        .authenticate(
+            "different-startup-bearer-000000",
+            types::WireTimestamp::now()
+        )
         .await
         .is_err());
     assert!(!format!("{authority:?}").contains(&bearer));
 
     authority.revoke(&principal).await.unwrap();
-    assert!(authority.authenticate(&bearer, Utc::now()).await.is_err());
+    assert!(authority
+        .authenticate(&bearer, types::WireTimestamp::now())
+        .await
+        .is_err());
     assert!(AuthorizationGuard::new(handle)
         .authorize(&context, InterfaceOperation::RuntimeInfo)
         .is_err());
@@ -306,7 +315,7 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
 #[tokio::test]
 async fn startup_bearer_limits_fit_the_authorization_header_exactly() {
     let principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000078"));
-    let expires = Utc::now() + Duration::minutes(5);
+    let expires = types::WireTimestamp::now() + Duration::from_mins(5);
     let max = "x".repeat(505);
 
     let credential = StartupCredential::new(
@@ -335,8 +344,7 @@ async fn startup_bearer_limits_fit_the_authorization_header_exactly() {
                 .header("x-correlation-id", "10000000-0000-0000-0000-000000000079")
                 .header(
                     "x-deadline",
-                    (Utc::now() + Duration::minutes(2))
-                        .to_rfc3339_opts(SecondsFormat::Millis, true),
+                    (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
                 )
                 .body(Body::empty())
                 .unwrap(),

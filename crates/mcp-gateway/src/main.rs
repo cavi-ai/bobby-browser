@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use artifact_store::ArtifactStore;
-use chrono::{DateTime, Utc};
+
 use config::AppConfig;
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, EventStore, SessionOwnershipRegistry,
@@ -88,7 +88,7 @@ async fn run() -> anyhow::Result<()> {
         None => RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory)).await,
     }
     .map_err(anyhow::Error::new)?;
-    if !handle.is_valid_at(Utc::now()) {
+    if !handle.is_valid_at(types::WireTimestamp::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
     let artifact_records = config.interface.max_event_retention;
@@ -239,11 +239,11 @@ async fn explicit_startup_handle() -> anyhow::Result<interface_core::CapabilityH
     if capabilities.is_empty() {
         anyhow::bail!("startup capabilities must be explicit and nonempty");
     }
-    let expires_at =
-        DateTime::parse_from_rfc3339(&required_env("AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT")?)
-            .map_err(|_| anyhow::anyhow!("startup expiry is invalid"))?
-            .with_timezone(&Utc);
-    if expires_at <= Utc::now() {
+    let expires_at = types::WireTimestamp::parse_rfc3339(&required_env(
+        "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
+    )?)
+    .map_err(|_| anyhow::anyhow!("startup expiry is invalid"))?;
+    if expires_at <= types::WireTimestamp::now() {
         anyhow::bail!("startup credential is expired");
     }
     AuthorityStore::with_capacity(1)
@@ -264,7 +264,7 @@ fn parse_capability(value: &str) -> anyhow::Result<Capability> {
 mod tests {
     use std::sync::LazyLock;
 
-    use chrono::{Duration, SecondsFormat};
+    use jiff::SignedDuration as Duration;
     use tokio::sync::Mutex;
 
     use super::*;
@@ -286,12 +286,12 @@ mod tests {
         );
         std::env::set_var(
             "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
-            (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true),
+            (types::WireTimestamp::now() + Duration::from_hours(1)).rfc3339_seconds(),
         );
 
         let handle = explicit_startup_handle().await.unwrap();
         let diagnostic = format!("{handle:?}");
-        assert!(handle.is_valid_at(Utc::now()));
+        assert!(handle.is_valid_at(types::WireTimestamp::now()));
         assert!(!diagnostic.contains(SECRET));
 
         for name in [

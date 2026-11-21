@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use skill_runtime::{
     SkillBrowserEngine, SkillDecision, SkillFailure, SkillSessionState, SkillTactic, SkillTrigger,
     SkillZigZagZig,
@@ -21,7 +21,7 @@ fn state_with_budget(attempted_tactics: Vec<SkillTactic>) -> SkillSessionState {
         None,
         attempted_tactics,
         Vec::new(),
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     )
     .unwrap()
 }
@@ -37,7 +37,7 @@ fn attach_verified_checkpoint(state: &mut SkillSessionState) {
         types::SkillCheckpointProof::new(
             checkpoint_id,
             state.session_id.clone(),
-            Utc::now(),
+            types::WireTimestamp::now(),
             types::SkillEvidenceRef::new("checkpoint-attestation", "a".repeat(64)).unwrap(),
         )
         .unwrap(),
@@ -54,7 +54,7 @@ fn tactics(engine: &SkillZigZagZig, trigger: &SkillTrigger) -> Vec<SkillTactic> 
             engine.compatible_engines().iter().copied(),
         )
         .unwrap();
-        match strategy.next_decision(trigger, Utc::now()) {
+        match strategy.next_decision(trigger, types::WireTimestamp::now()) {
             Ok(decision) => {
                 result.push(decision.tactic);
                 state.attempted_tactics.push(decision.tactic);
@@ -89,7 +89,10 @@ fn ladder_is_ordered_bounded_and_never_replays_uncertain_mutation() {
     );
     assert_eq!(
         engine
-            .next_decision(&trigger(SkillFailure::EffectUncertain), Utc::now())
+            .next_decision(
+                &trigger(SkillFailure::EffectUncertain),
+                types::WireTimestamp::now()
+            )
             .unwrap()
             .tactic,
         SkillTactic::ReconcileCheckpoint
@@ -98,9 +101,9 @@ fn ladder_is_ordered_bounded_and_never_replays_uncertain_mutation() {
 
 #[test]
 fn decisions_are_limited_by_the_workflow_deadline_and_tactic_budget() {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let mut state = state_with_budget(Vec::new());
-    state.deadline = now + Duration::milliseconds(400);
+    state.deadline = now + Duration::from_millis(400);
     let mut engine = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
 
     let decision = engine
@@ -118,7 +121,7 @@ fn decisions_are_limited_by_the_workflow_deadline_and_tactic_budget() {
     assert_eq!(
         expired.next_decision(
             &trigger(SkillFailure::TargetDrift),
-            Utc::now() + Duration::hours(1)
+            types::WireTimestamp::now() + Duration::from_hours(1)
         ),
         Err(SkillFailure::DeadlineExceeded)
     );
@@ -130,7 +133,10 @@ fn decisions_are_limited_by_the_workflow_deadline_and_tactic_budget() {
     )
     .unwrap();
     assert_eq!(
-        no_tactic_budget.next_decision(&trigger(SkillFailure::TargetDrift), Utc::now()),
+        no_tactic_budget.next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::StrategyExhausted)
     );
 }
@@ -144,7 +150,10 @@ fn missing_checkpoint_and_reconciliation_exhaustion_preserve_uncertain_terminal_
     )
     .unwrap();
     assert_eq!(
-        engine.next_decision(&trigger(SkillFailure::EffectUncertain), Utc::now()),
+        engine.next_decision(
+            &trigger(SkillFailure::EffectUncertain),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::EffectUncertain)
     );
 
@@ -152,7 +161,10 @@ fn missing_checkpoint_and_reconciliation_exhaustion_preserve_uncertain_terminal_
     attach_verified_checkpoint(&mut reconciled);
     let mut engine = SkillZigZagZig::new(reconciled, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     assert_eq!(
-        engine.next_decision(&trigger(SkillFailure::EffectUncertain), Utc::now()),
+        engine.next_decision(
+            &trigger(SkillFailure::EffectUncertain),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::EffectUncertain)
     );
 }
@@ -169,7 +181,10 @@ fn restart_tactics_require_a_checkpoint_and_engine_selection_requires_an_alterna
         Some(types::SkillProfile::new("1.0.0", SkillBrowserEngine::Firefox, [], "digest").unwrap());
     let mut engine = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     assert_eq!(
-        engine.next_decision(&trigger(SkillFailure::TargetDrift), Utc::now()),
+        engine.next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::StrategyExhausted)
     );
 
@@ -187,7 +202,10 @@ fn restart_tactics_require_a_checkpoint_and_engine_selection_requires_an_alterna
     let mut engine = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     assert_eq!(
         engine
-            .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+            .next_decision(
+                &trigger(SkillFailure::TargetDrift),
+                types::WireTimestamp::now()
+            )
             .unwrap()
             .tactic,
         SkillTactic::RestartDurableBoundary
@@ -199,7 +217,10 @@ fn record_outcome_keeps_evidence_order_deterministic_and_stop_allows_cleanup_onl
     let state = state_with_budget(Vec::new());
     let mut engine = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     let decision: SkillDecision = engine
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now(),
+        )
         .unwrap();
     engine.stop();
     let outcome = types::SkillOutcome::applied(vec![
@@ -208,7 +229,7 @@ fn record_outcome_keeps_evidence_order_deterministic_and_stop_allows_cleanup_onl
     ])
     .unwrap();
     engine
-        .record_outcome(&decision, &outcome, Utc::now())
+        .record_outcome(&decision, &outcome, types::WireTimestamp::now())
         .unwrap();
 
     assert_eq!(
@@ -225,7 +246,10 @@ fn record_outcome_keeps_evidence_order_deterministic_and_stop_allows_cleanup_onl
         vec!["a-first", "z-last"]
     );
     assert_eq!(
-        engine.next_decision(&trigger(SkillFailure::TargetDrift), Utc::now()),
+        engine.next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::StrategyExhausted)
     );
 }
@@ -242,7 +266,10 @@ fn record_outcome_rejects_tampered_checkpoint_metadata_without_mutating_state() 
     let mut engine =
         SkillZigZagZig::new(state.clone(), 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     let mut decision = engine
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now(),
+        )
         .unwrap();
     assert_eq!(decision.tactic, SkillTactic::ReconcileCheckpoint);
     let reserved = engine.session_state().clone();
@@ -252,7 +279,7 @@ fn record_outcome_rejects_tampered_checkpoint_metadata_without_mutating_state() 
         engine.record_outcome(
             &decision,
             &types::SkillOutcome::applied(Vec::new()).unwrap(),
-            Utc::now(),
+            types::WireTimestamp::now(),
         ),
         Err(SkillFailure::ConfigurationConflict)
     );
@@ -268,7 +295,7 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
         types::SkillCheckpointProof::new(
             checkpoint_id,
             state.session_id.clone(),
-            Utc::now(),
+            types::WireTimestamp::now(),
             types::SkillEvidenceRef::new("checkpoint-attestation", "d".repeat(64)).unwrap(),
         )
         .unwrap(),
@@ -276,14 +303,20 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
     let mut engine =
         SkillZigZagZig::new(state.clone(), 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     let issued = engine
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now(),
+        )
         .unwrap();
     assert_eq!(
         engine.session_state().attempted_tactics,
         vec![issued.tactic]
     );
     assert_eq!(
-        engine.next_decision(&trigger(SkillFailure::TargetDrift), Utc::now()),
+        engine.next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now()
+        ),
         Err(SkillFailure::StrategyExhausted)
     );
 
@@ -293,7 +326,7 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
         engine.record_outcome(
             &tampered,
             &types::SkillOutcome::applied(Vec::new()).unwrap(),
-            Utc::now(),
+            types::WireTimestamp::now(),
         ),
         Err(SkillFailure::ConfigurationConflict)
     );
@@ -320,7 +353,7 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
             engine.record_outcome(
                 &tampered,
                 &types::SkillOutcome::applied(Vec::new()).unwrap(),
-                Utc::now(),
+                types::WireTimestamp::now(),
             ),
             Err(SkillFailure::ConfigurationConflict)
         );
@@ -345,13 +378,16 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
 
     let mut expired = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     let decision = expired
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(
+            &trigger(SkillFailure::TargetDrift),
+            types::WireTimestamp::now(),
+        )
         .unwrap();
     assert_eq!(
         expired.record_outcome(
             &decision,
             &types::SkillOutcome::applied(Vec::new()).unwrap(),
-            expired.session_state().deadline + Duration::milliseconds(1),
+            expired.session_state().deadline + Duration::from_millis(1),
         ),
         Err(SkillFailure::DeadlineExceeded)
     );
@@ -359,15 +395,15 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
 
 #[test]
 fn terminal_cleanup_outcome_finalizes_once_after_command_deadline() {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let mut state = state_with_budget(Vec::new());
-    state.deadline = now + Duration::milliseconds(10);
+    state.deadline = now + Duration::from_millis(10);
     let mut engine = SkillZigZagZig::new(state, 10, [SkillBrowserEngine::Firefox]).unwrap();
     let decision = engine
         .next_decision(&trigger(SkillFailure::TargetDrift), now)
         .unwrap();
-    let finalized_at = engine.session_state().deadline + Duration::milliseconds(20);
-    let finalization_deadline = finalized_at + Duration::seconds(1);
+    let finalized_at = engine.session_state().deadline + Duration::from_millis(20);
+    let finalization_deadline = finalized_at + Duration::from_secs(1);
     let terminal = types::SkillOutcome::failed(SkillFailure::DeadlineExceeded, Vec::new()).unwrap();
 
     engine
@@ -396,7 +432,7 @@ fn engine_selection_is_canonical_and_proof_bound() {
         types::SkillCheckpointProof::new(
             checkpoint_id,
             state.session_id.clone(),
-            Utc::now(),
+            types::WireTimestamp::now(),
             types::SkillEvidenceRef::new("checkpoint-attestation", "e".repeat(64)).unwrap(),
         )
         .unwrap(),
@@ -414,7 +450,10 @@ fn engine_selection_is_canonical_and_proof_bound() {
     )
     .unwrap();
     let decision = engine
-        .next_decision(&trigger(SkillFailure::EngineUnavailable), Utc::now())
+        .next_decision(
+            &trigger(SkillFailure::EngineUnavailable),
+            types::WireTimestamp::now(),
+        )
         .unwrap();
     assert_eq!(decision.tactic, SkillTactic::SelectCompatibleEngine);
     assert_eq!(decision.selected_engine, Some(SkillBrowserEngine::Chromium));
@@ -435,7 +474,10 @@ fn engine_selection_is_canonical_and_proof_bound() {
     .unwrap();
     assert_eq!(
         reordered
-            .next_decision(&trigger(SkillFailure::EngineUnavailable), Utc::now())
+            .next_decision(
+                &trigger(SkillFailure::EngineUnavailable),
+                types::WireTimestamp::now()
+            )
             .unwrap()
             .selected_engine,
         Some(SkillBrowserEngine::Chromium)
@@ -447,7 +489,7 @@ fn engine_selection_is_canonical_and_proof_bound() {
         engine.record_outcome(
             &tampered,
             &types::SkillOutcome::adapted(SkillTactic::SelectCompatibleEngine, Vec::new()).unwrap(),
-            Utc::now(),
+            types::WireTimestamp::now(),
         ),
         Err(SkillFailure::ConfigurationConflict)
     );
@@ -457,7 +499,7 @@ fn engine_selection_is_canonical_and_proof_bound() {
 fn durable_issued_decision_restores_and_completes_exactly_once() {
     let mut state = state_with_budget(Vec::new());
     attach_verified_checkpoint(&mut state);
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let mut issuing = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
     let decision = issuing
         .next_decision(&trigger(SkillFailure::TargetDrift), now)
@@ -473,7 +515,7 @@ fn durable_issued_decision_restores_and_completes_exactly_once() {
         restored.record_outcome(
             &decision,
             &types::SkillOutcome::applied(Vec::new()).unwrap(),
-            issued_at - Duration::milliseconds(1),
+            issued_at - Duration::from_millis(1),
         ),
         Err(SkillFailure::ConfigurationConflict)
     );
@@ -493,7 +535,7 @@ fn durable_issued_decision_restores_and_completes_exactly_once() {
         restored.record_outcome(
             &decision,
             &types::SkillOutcome::applied(Vec::new()).unwrap(),
-            restored.session_state().deadline + Duration::milliseconds(1),
+            restored.session_state().deadline + Duration::from_millis(1),
         ),
         Err(SkillFailure::DeadlineExceeded)
     );
@@ -540,7 +582,7 @@ fn durable_issued_decision_restores_and_completes_exactly_once() {
     ));
 
     let mut expired_state = restored.session_state().clone();
-    let expired_deadline = now - Duration::milliseconds(1);
+    let expired_deadline = now - Duration::from_millis(1);
     let mut expired_decision = decision.clone();
     expired_decision.remaining_deadline_ms = 1;
     expired_decision.tactic_budget_ms = 1;
@@ -552,7 +594,7 @@ fn durable_issued_decision_restores_and_completes_exactly_once() {
             expired_state.session_id.clone(),
             expired_decision,
             None,
-            now - Duration::milliseconds(2),
+            now - Duration::from_millis(2),
             expired_deadline,
         )
         .unwrap(),
@@ -567,7 +609,7 @@ fn durable_issued_decision_restores_and_completes_exactly_once() {
 fn committed_receipt_settlement_requires_the_exact_durable_issuance() {
     let state = state_with_budget(Vec::new());
     let session_id = state.session_id.clone();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let command_id = CommandId::new();
     let workflow_id = WorkflowId::new();
     let attempt_id = AttemptId::new();

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::{extract::State, response::Html, routing::get, Router};
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -107,7 +107,7 @@ async fn recovery_demo_gateway() {
                 Capability::RecoveryRead,
                 Capability::RecoveryWrite,
             ],
-            Utc::now() + Duration::minutes(10),
+            types::WireTimestamp::now() + Duration::from_mins(10),
         )
         .await
         .unwrap();

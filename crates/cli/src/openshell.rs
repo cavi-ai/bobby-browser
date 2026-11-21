@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
 use clap::ValueEnum;
+use jiff::SignedDuration;
 use serde_json::json;
 use types::Capability;
 use uuid::Uuid;
@@ -474,13 +474,19 @@ pub fn provision_sandbox(
     let admin = resolve_jobs_auth(token_override.clone(), bootstrap_path)?;
     let base = resolve_jobs_base_url(base_url.clone(), config);
 
+    let ttl_seconds = ttl_hours
+        .unwrap_or(DEFAULT_SANDBOX_TTL_HOURS)
+        .checked_mul(3_600)
+        .ok_or_else(|| anyhow!("sandbox TTL exceeds supported range"))?;
+    let expires_at = types::WireTimestamp::now()
+        .checked_add(SignedDuration::from_secs(ttl_seconds))
+        .ok_or_else(|| anyhow!("sandbox TTL exceeds supported range"))?
+        .rfc3339_millis();
     let replaced_prior = revoke_recorded_principal_if_any(sandbox, &base, &admin)?;
 
     let mcp_url = pack.mcp_url();
-    let ttl = ChronoDuration::hours(ttl_hours.unwrap_or(DEFAULT_SANDBOX_TTL_HOURS));
     let principal_id = Uuid::new_v4();
     let generation = Uuid::new_v4();
-    let expires_at = (Utc::now() + ttl).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let capabilities: Vec<&str> = capabilities_for_openshell_preset(capabilities_preset)
         .iter()
         .map(|cap| cap.as_str())

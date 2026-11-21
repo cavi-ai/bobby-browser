@@ -6,7 +6,7 @@ use std::{
 
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+
 use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext, TYPED_VALUE_VERIFIED,
 };
@@ -122,7 +122,7 @@ impl From<VisionGate> for SessionGate {
 struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
     /// The command's deadline; bounds the waits the intent runs.
-    deadline: DateTime<Utc>,
+    deadline: types::WireTimestamp,
     /// Time this intent has spent waiting for absent targets. All its target
     /// waits (each field of a form) share one [`TARGET_APPEAR_CAP`], so a form
     /// waits for late fields once, not once per field.
@@ -177,8 +177,9 @@ where
 
 /// Half the time left before `deadline`, at most `cap`. The other half stays
 /// with the action and its verification.
-fn wait_budget(deadline: DateTime<Utc>, cap: StdDuration) -> StdDuration {
-    ((deadline - Utc::now()).to_std().unwrap_or_default() / 2).min(cap)
+fn wait_budget(deadline: types::WireTimestamp, cap: StdDuration) -> StdDuration {
+    (std::time::Duration::try_from(deadline - types::WireTimestamp::now()).unwrap_or_default() / 2)
+        .min(cap)
 }
 
 /// Waits until `target` is attached to the page, for at most `budget` (one
@@ -1709,8 +1710,7 @@ async fn execute_intent(
     // normal execution and fresh fallback keep the rest. Capture the
     // monotonic start before reading wall time so the conversion is conservative.
     let now = tokio::time::Instant::now();
-    let remaining = (envelope.deadline - chrono::Utc::now())
-        .to_std()
+    let remaining = std::time::Duration::try_from(envelope.deadline - types::WireTimestamp::now())
         .unwrap_or_default();
     let prefill_deadline = now.checked_add(remaining / 2).unwrap_or(now);
     let command_deadline = now.checked_add(remaining).unwrap_or(now);

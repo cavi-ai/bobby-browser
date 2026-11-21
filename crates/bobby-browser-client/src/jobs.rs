@@ -1,6 +1,5 @@
 //! Job request and response contracts for `/v1/jobs`.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -72,7 +71,7 @@ pub struct JobResult {
     pub success: bool,
     pub output: Value,
     pub error: Option<String>,
-    pub completed_at: DateTime<Utc>,
+    pub completed_at: crate::WireTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,9 +85,9 @@ pub struct JobStatusResponse {
     pub priority: JobPriority,
     pub status: JobStatus,
     pub payload: Value,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: crate::WireTimestamp,
+    pub started_at: Option<crate::WireTimestamp>,
+    pub completed_at: Option<crate::WireTimestamp>,
     pub retry_count: u32,
     pub max_retries: u32,
     pub result: Option<JobResult>,

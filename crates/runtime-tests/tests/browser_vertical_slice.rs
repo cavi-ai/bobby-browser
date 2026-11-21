@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickAndWaitForDownloadCommand,
@@ -26,7 +26,7 @@ fn envelope(
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -67,7 +67,7 @@ async fn submit_boundary(
             attempt_id: attempt_id.clone(),
             session_id: session_id.clone(),
             page_id: Some(page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(
                 PrimitiveCommand::Inspect(InspectCommand::default()),
             ),
@@ -107,7 +107,7 @@ async fn submit_boundary(
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
                 recovery_receipts: Vec::new(),
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             },
             vec![inspect_id],
         )
@@ -121,7 +121,7 @@ async fn submit_boundary(
             attempt_id,
             session_id: session_id.clone(),
             page_id: Some(page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
         .await
@@ -334,7 +334,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             attempt_id: attempt_id.clone(),
             session_id: first_session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(
                 PrimitiveCommand::Inspect(InspectCommand::default()),
             ),
@@ -374,7 +374,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
                 recovery_receipts: Vec::new(),
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             },
             vec![command_ids.last().unwrap().clone()],
         )
@@ -389,7 +389,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             attempt_id,
             session_id: first_session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
                 selector: "#submit".into(),
                 target: None,

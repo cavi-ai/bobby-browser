@@ -1,6 +1,5 @@
 //! Job definition and state management.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
@@ -80,9 +79,9 @@ pub struct Job {
     pub priority: JobPriority,
     pub status: JobStatus,
     pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: types::WireTimestamp,
+    pub started_at: Option<types::WireTimestamp>,
+    pub completed_at: Option<types::WireTimestamp>,
     pub retry_count: u32,
     pub max_retries: u32,
     pub result: Option<JobResult>,
@@ -109,7 +108,7 @@ impl Job {
             priority,
             status: JobStatus::Pending,
             payload,
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
             started_at: None,
             completed_at: None,
             retry_count: 0,
@@ -149,25 +148,25 @@ impl Job {
 
     pub fn start(&mut self) {
         self.status = JobStatus::Running;
-        self.started_at = Some(Utc::now());
+        self.started_at = Some(types::WireTimestamp::now());
     }
 
     pub fn complete(&mut self, result: JobResult) {
         self.status = JobStatus::Completed;
-        self.completed_at = Some(Utc::now());
+        self.completed_at = Some(types::WireTimestamp::now());
         self.result = Some(result);
         self.error = None;
     }
 
     pub fn fail(&mut self, error: String) {
         self.status = JobStatus::Failed;
-        self.completed_at = Some(Utc::now());
+        self.completed_at = Some(types::WireTimestamp::now());
         self.error = Some(error);
     }
 
     pub fn cancel(&mut self) {
         self.status = JobStatus::Cancelled;
-        self.completed_at = Some(Utc::now());
+        self.completed_at = Some(types::WireTimestamp::now());
     }
 
     pub fn require_reconciliation(&mut self, reason: impl Into<String>) {

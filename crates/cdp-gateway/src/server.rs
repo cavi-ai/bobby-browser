@@ -20,11 +20,11 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use interface_core::{
     Authority, AuthorizationGuard, CapabilityHandle, Event, EventStore, RuntimeInterface,
 };
+use jiff::SignedDuration as Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -60,7 +60,7 @@ fn consume_pending_boundary(
     state: &mut Option<AutomationBoundary>,
     session_id: &SessionId,
     page_id: &PageId,
-    now: chrono::DateTime<Utc>,
+    now: types::WireTimestamp,
 ) -> Result<AutomationBoundary, InterfaceError> {
     let Some(pending) = state.as_mut() else {
         return Err(boundary_state_error(
@@ -235,7 +235,7 @@ impl CdpGateway {
             .filter(|value| !value.is_empty())
             .ok_or(DiscoveryError::Unauthorized)?;
         self.authority
-            .authenticate(bearer, Utc::now())
+            .authenticate(bearer, types::WireTimestamp::now())
             .await
             .map_err(|_| DiscoveryError::Unauthorized)
     }
@@ -245,7 +245,7 @@ impl CdpGateway {
         bearer: Option<&str>,
     ) -> Result<VersionDescription, DiscoveryError> {
         let handle = self.authenticate(bearer).await?;
-        let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+        let ctx = handle.context(types::WireTimestamp::now() + Duration::from_secs(30), None);
         if !ctx.capabilities.contains(types::Capability::SessionRead) {
             return Err(DiscoveryError::Forbidden);
         }
@@ -261,7 +261,7 @@ impl CdpGateway {
         bearer: Option<&str>,
     ) -> Result<Vec<TargetDescription>, DiscoveryError> {
         let handle = self.authenticate(bearer).await?;
-        let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+        let ctx = handle.context(types::WireTimestamp::now() + Duration::from_secs(30), None);
         let runtime = (self.bind_runtime)(handle.clone());
         if self.auto_session {
             self.ensure_runtime_page(&handle, runtime.as_ref()).await;
@@ -334,7 +334,7 @@ impl CdpGateway {
     /// or a runtime that refuses, still gets its socket. Bounded to one page,
     /// and only when the principal has no session at all.
     async fn ensure_runtime_page(&self, handle: &CapabilityHandle, runtime: &dyn RuntimeInterface) {
-        let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+        let ctx = handle.context(types::WireTimestamp::now() + Duration::from_secs(30), None);
         if !ctx.capabilities.contains(types::Capability::SessionWrite)
             || !ctx.capabilities.contains(types::Capability::PageWrite)
         {
@@ -495,7 +495,7 @@ struct AutomationBoundary {
     checkpoint_id: CheckpointId,
     session_id: SessionId,
     page_id: PageId,
-    expires_at: chrono::DateTime<Utc>,
+    expires_at: types::WireTimestamp,
     phase: AutomationBoundaryPhase,
 }
 
@@ -737,7 +737,7 @@ impl CdpConnection {
     ) -> CdpResponse {
         let ctx = self
             .handle
-            .context(Utc::now() + Duration::seconds(30), None);
+            .context(types::WireTimestamp::now() + Duration::from_secs(30), None);
         if AuthorizationGuard::new(self.handle.clone())
             .validate(&ctx)
             .is_err()
@@ -854,7 +854,7 @@ impl CdpConnection {
             };
             let ctx = self
                 .handle
-                .context(Utc::now() + Duration::seconds(30), None);
+                .context(types::WireTimestamp::now() + Duration::from_secs(30), None);
             if AuthorizationGuard::new(self.handle.clone())
                 .validate(&ctx)
                 .is_err()
@@ -1141,7 +1141,12 @@ impl CdpConnection {
     ) -> Result<CommandOutcome, InterfaceError> {
         let boundary = {
             let mut state = self.automation_boundary.lock().await;
-            consume_pending_boundary(&mut state, &session_id, &page_id, Utc::now())?
+            consume_pending_boundary(
+                &mut state,
+                &session_id,
+                &page_id,
+                types::WireTimestamp::now(),
+            )?
         };
         let outcome = self
             .runtime
@@ -1154,7 +1159,7 @@ impl CdpConnection {
                     attempt_id: boundary.attempt_id,
                     session_id,
                     page_id: Some(page_id),
-                    deadline: Utc::now() + Duration::seconds(30),
+                    deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                     command: RuntimeCommand::Primitive(command),
                 },
             )
@@ -1178,7 +1183,7 @@ impl CdpConnection {
         let mut identifiers = self.identifiers.lock().await;
         let ctx = self
             .handle
-            .context(Utc::now() + Duration::seconds(30), None);
+            .context(types::WireTimestamp::now() + Duration::from_secs(30), None);
         AuthorizationGuard::new(self.handle.clone())
             .validate(&ctx)
             .map_err(runtime_error)?;
@@ -1504,7 +1509,7 @@ mod security_tests {
 
     #[test]
     fn pending_boundary_is_page_scoped_expiring_and_one_shot() {
-        let now = chrono::Utc::now();
+        let now = types::WireTimestamp::now();
         let session = types::SessionId::new();
         let page = types::PageId::new();
         let pending = AutomationBoundary {
@@ -1514,7 +1519,7 @@ mod security_tests {
             checkpoint_id: types::CheckpointId::new(),
             session_id: session.clone(),
             page_id: page.clone(),
-            expires_at: now + chrono::Duration::seconds(30),
+            expires_at: now + jiff::SignedDuration::from_secs(30),
             phase: AutomationBoundaryPhase::Pending,
         };
         let expected = (
@@ -1548,7 +1553,7 @@ mod security_tests {
             &mut state,
             &session,
             &page,
-            now + chrono::Duration::seconds(31)
+            now + jiff::SignedDuration::from_secs(31)
         )
         .is_err());
         assert!(consume_pending_boundary(&mut None, &session, &page, now).is_err());
@@ -1815,7 +1820,7 @@ async fn stream_route(
         Ok(handle) => handle,
         Err(error) => return discovery_response(error),
     };
-    let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+    let ctx = handle.context(types::WireTimestamp::now() + Duration::from_secs(30), None);
     if !ctx.capabilities.contains(types::Capability::FileDownload) {
         return discovery_response(DiscoveryError::Unauthorized);
     }
@@ -2004,8 +2009,8 @@ mod playwright_semantic_click {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use chrono::{Duration, Utc};
     use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+    use jiff::SignedDuration as Duration;
     use serde_json::json;
     use types::{
         Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
@@ -2129,7 +2134,7 @@ mod playwright_semantic_click {
                     Capability::PageWrite,
                     Capability::JavascriptEvaluate,
                 ],
-                Utc::now() + Duration::minutes(5),
+                types::WireTimestamp::now() + Duration::from_mins(5),
             )
             .await
             .unwrap()
@@ -2194,7 +2199,7 @@ mod playwright_semantic_click {
 
     #[tokio::test]
     async fn same_document_hash_link_click_submits_click_not_popup() {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let runtime = Arc::new(CapturingRuntime {
             sessions: vec![SessionState {
                 id: SessionId::new(),
@@ -2227,7 +2232,7 @@ mod playwright_semantic_click {
 
     #[tokio::test]
     async fn playwright_document_title_evaluate_returns_verified_title() {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let runtime = Arc::new(CapturingRuntime {
             sessions: vec![SessionState {
                 id: SessionId::new(),
@@ -2281,7 +2286,7 @@ mod playwright_semantic_click {
 
     #[tokio::test]
     async fn navigation_recreates_the_default_execution_context_as_id_1() {
-        let now = Utc::now();
+        let now = types::WireTimestamp::now();
         let runtime = Arc::new(CapturingRuntime {
             sessions: vec![SessionState {
                 id: SessionId::new(),
@@ -2366,8 +2371,8 @@ mod playwright_semantic_click {
 mod dispatch_gates {
     use std::sync::Arc;
 
-    use chrono::{Duration, Utc};
     use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+    use jiff::SignedDuration as Duration;
     use serde_json::json;
     use types::{
         Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
@@ -2480,7 +2485,7 @@ mod dispatch_gates {
             .issue(
                 PrincipalId::from_uuid(uuid::Uuid::new_v4()),
                 capabilities,
-                Utc::now() + Duration::minutes(5),
+                types::WireTimestamp::now() + Duration::from_mins(5),
             )
             .await
             .unwrap()

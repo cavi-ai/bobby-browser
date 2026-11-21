@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
@@ -135,7 +135,7 @@ async fn a_chromium_workflow_replays_with_its_screenshots() {
                 attempt_id: AttemptId::new(),
                 session_id: session.id.clone(),
                 page_id: Some(page.id.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command,
             })
             .await;

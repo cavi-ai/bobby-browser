@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use interface_core::{Authority, AuthorityStore, RuntimeInterface, SessionOwnershipRegistry};
+use jiff::SignedDuration as Duration;
 use sdk_core::AuthenticatedRuntime;
 use std::{
     path::{Path, PathBuf},
@@ -93,7 +93,7 @@ async fn session_availability_uses_existing_worker_policy_live_grants_and_connec
         page_runtime::PageRuntime::new(journal, workers.clone()),
     );
     let authority = AuthorityStore::in_memory();
-    let expires = Utc::now() + Duration::minutes(5);
+    let expires = types::WireTimestamp::now() + Duration::from_mins(5);
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),

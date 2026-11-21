@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use acp_gateway::AcpServer;
-use chrono::{Duration, Utc};
 use interface_conformance::live::ChromeRuntimeHarness;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -156,7 +156,7 @@ async fn acp_walkthrough_matches_mcp_for_context_and_recovery() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             CAPABILITIES,
-            Utc::now() + Duration::minutes(10),
+            types::WireTimestamp::now() + Duration::from_mins(10),
         )
         .await
         .unwrap()
@@ -243,7 +243,7 @@ async fn acp_walkthrough_matches_mcp_for_context_and_recovery() {
                     "evidence":[],
                     "recoveryHistory":[],
                     "recoveryReceipts":[],
-                    "createdAt":Utc::now().to_rfc3339(),
+                    "createdAt":types::WireTimestamp::now().rfc3339(),
                 },
                 "evidenceRefs":[command_id],
             }),

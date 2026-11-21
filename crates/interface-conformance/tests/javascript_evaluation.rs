@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_conformance::live::ChromeRuntimeHarness;
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -30,7 +30,7 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -86,7 +86,7 @@ fn evaluate_javascript_arguments(session_id: &str, page_id: Option<&str>) -> Val
             "attemptId": uuid::Uuid::new_v4(),
             "sessionId": session_id,
             "pageId": page_id,
-            "deadline": (Utc::now() + Duration::seconds(30)).to_rfc3339(),
+            "deadline": (types::WireTimestamp::now() + Duration::from_secs(30)).rfc3339(),
             "command": {
                 "kind": "primitive",
                 "input": {

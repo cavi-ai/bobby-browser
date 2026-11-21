@@ -4,12 +4,12 @@ use artifact_store::ArtifactStore;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use broker::{router, AppState, ArtifactCatalog};
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, Event, EventStore, RuntimeInterface,
     SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::json;
 use tempfile::TempDir;
@@ -26,7 +26,7 @@ fn authorized(method: &str, uri: &str, token: &str) -> Request<Body> {
         .header("x-correlation-id", "10000000-0000-0000-0000-000000000021")
         .header(
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
         )
         .body(Body::empty())
         .unwrap()
@@ -61,7 +61,7 @@ async fn issue(
         .issue(
             PrincipalId::from_uuid(Uuid::from_u128(principal)),
             capabilities,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -202,7 +202,8 @@ async fn artifact_fixture() -> ArtifactFixture {
     .await;
     let other_token = issue(&authority, 11, [Capability::ArtifactRead]).await;
     let owner_handle = authority.verify(&owner_token).await.unwrap();
-    let owner_context = owner_handle.context(Utc::now() + Duration::minutes(2), None);
+    let owner_context =
+        owner_handle.context(types::WireTimestamp::now() + Duration::from_mins(2), None);
     let session = SessionId::new();
     let (ownership, recorder): (_, SessionOwnershipRecorder) = SessionOwnershipRegistry::bounded(2);
     recorder

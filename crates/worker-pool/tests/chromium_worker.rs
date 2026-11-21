@@ -4552,3 +4552,252 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
 
     worker.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn open_page_and_popup_settle_before_returning_evidence() {
+    let server = test_site::FixtureSite::spawn(vec![
+        (
+            "/opener",
+            test_site::Route::Html(
+                r#"<!doctype html><title>Opener</title>
+                <button id="open-redirect" type="button">Open Redirect</button>
+                <button id="open-self-close" type="button">Open Self Close</button>
+                <script>
+                  document.getElementById("open-redirect").addEventListener("click", () => {
+                    window.open("/popup-start", "_blank");
+                  });
+                  document.getElementById("open-self-close").addEventListener("click", () => {
+                    window.open("/popup-close", "_blank");
+                  });
+                </script>"#
+                    .into(),
+            ),
+        ),
+        (
+            "/popup-start",
+            test_site::Route::Html(
+                r#"<!doctype html><title>Redirecting</title>
+                <script>setTimeout(() => location.replace("/popup-final"), 120);</script>"#
+                    .into(),
+            ),
+        ),
+        (
+            "/popup-final",
+            test_site::Route::Html(
+                r#"<!doctype html><title>Popup Final</title><main>Ready</main>"#.into(),
+            ),
+        ),
+        (
+            "/popup-close",
+            test_site::Route::Html(
+                r#"<!doctype html><title>Closing</title><script>setTimeout(() => window.close(), 150);</script>"#.into(),
+            ),
+        ),
+    ])
+    .await;
+
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(false)
+        .await
+        .unwrap();
+
+    // open_page_command with URL settles redirects before returning.
+    let opened = worker_pool::tabs_or_default(worker.tabs())
+        .open_page_command(&OpenPageCommand {
+            url: Some(server.url("/popup-start")),
+        })
+        .await
+        .unwrap();
+    match &opened[0] {
+        Evidence::Page { url, title, .. } => {
+            assert!(
+                url.ends_with("/popup-final"),
+                "open_page_command did not settle redirect: {url}"
+            );
+            assert_eq!(title, "Popup Final");
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    }
+
+    // click_and_wait_for_popup settles a redirecting popup.
+    let opener = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(opener.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &opener,
+            &NavigateCommand {
+                url: server.url("/opener"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let popup = worker_pool::events_or_default(worker.events())
+        .click_and_wait_for_popup(
+            &opener,
+            &ClickAndWaitForPopupCommand {
+                selector: "#open-redirect".into(),
+                target: None,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    match &popup[0] {
+        Evidence::Popup { url, title, .. } => {
+            assert!(
+                url.ends_with("/popup-final"),
+                "click_and_wait_for_popup did not settle redirect: {url}"
+            );
+            assert_eq!(title, "Popup Final");
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    }
+
+    // A self-closing popup finishes promptly without hanging until the 5s settle cap.
+    let started = std::time::Instant::now();
+    let self_close = worker_pool::events_or_default(worker.events())
+        .click_and_wait_for_popup(
+            &opener,
+            &ClickAndWaitForPopupCommand {
+                selector: "#open-self-close".into(),
+                target: None,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(self_close[0], Evidence::Popup { .. }));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "self-closing popup stalled settle: {:?}",
+        started.elapsed()
+    );
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn navigation_settle_ignores_repeated_text_content_churn() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+
+    // Updating el.textContent every 30ms replaces the child Text node via childList
+    // on every tick. Because repeated text-only mutations are deduplicated during
+    // navigation settle, this must settle well under the 5s NAVIGATION_SETTLE_CAP.
+    let server = test_site::FixtureSite::spawn(vec![(
+        "/clock",
+        test_site::Route::Html(
+            r#"<!doctype html><title>Clock</title><span id="clock">0</span>
+            <script>
+              let n = 0;
+              const el = document.getElementById("clock");
+              setInterval(() => { el.textContent = String(++n); }, 30);
+            </script>"#
+                .into(),
+        ),
+    )])
+    .await;
+    let started = std::time::Instant::now();
+    let evidence = worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page,
+            &NavigateCommand {
+                url: server.url("/clock"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(matches!(evidence[0], Evidence::Navigation { .. }));
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "repeated textContent churn prevented settle (took {elapsed:?})"
+    );
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn disposable_profile_removed_on_close_and_preserved_on_terminate() {
+    let root = tempfile::tempdir().unwrap();
+    let profiles_dir = root.path().join("profiles");
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles_dir.clone(),
+        headless: true,
+        max_active: 2,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+
+    // terminate() preserves the disposable profile directory for crash recovery.
+    let term_session = SessionId::new();
+    let term_worker = factory.launch(&term_session).await.unwrap();
+    let term_profile = profiles_dir.join(term_session.0.to_string());
+    assert!(term_profile.exists());
+    term_worker.terminate().await.unwrap();
+    assert!(
+        term_profile.exists(),
+        "terminate() must preserve disposable profile dir"
+    );
+
+    // close() reclaims the disposable profile directory.
+    let close_session = SessionId::new();
+    let close_worker = factory.launch(&close_session).await.unwrap();
+    let close_profile = profiles_dir.join(close_session.0.to_string());
+    assert!(close_profile.exists());
+    close_worker.close().await.unwrap();
+    assert!(
+        !close_profile.exists(),
+        "close() must reclaim disposable profile dir"
+    );
+}

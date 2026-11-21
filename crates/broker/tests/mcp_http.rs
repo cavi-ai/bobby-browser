@@ -332,7 +332,7 @@ async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport()
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: chrono::Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let unowned_command_id = types::CommandId::new();
     let (status, response) = post_mcp(
@@ -402,7 +402,7 @@ async fn issue_for(
         .issue(
             types::PrincipalId::from_uuid(principal),
             capabilities.to_vec(),
-            chrono::Utc::now() + chrono::Duration::minutes(5),
+            types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
         )
         .await
         .expect("bearer issues")

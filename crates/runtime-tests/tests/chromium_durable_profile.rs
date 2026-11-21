@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use runtime_tests::ProfileChrome;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use test_site::{FixtureSite, Route};
@@ -127,7 +127,7 @@ impl Session {
                     Capability::IntentExecute,
                     Capability::ContextRead,
                 ],
-                Utc::now() + Duration::minutes(5),
+                types::WireTimestamp::now() + Duration::from_mins(5),
             )
             .await
             .unwrap()
@@ -160,7 +160,7 @@ impl Session {
                 Capability::IntentExecute,
                 Capability::ContextRead,
             ],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         );
         let mut this = Self {
             runtime: runtime.clone(),
@@ -190,7 +190,7 @@ impl Session {
                 attempt_id: AttemptId::new(),
                 session_id: self.session.clone(),
                 page_id: Some(self.page.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command,
             })
             .await
@@ -212,7 +212,7 @@ impl Session {
             attempt_id: attempt_id.clone(),
             session_id: self.session.clone(),
             page_id: Some(self.page.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         };
         let url = match self
@@ -252,7 +252,7 @@ impl Session {
                     evidence: Vec::new(),
                     recovery_history: Vec::new(),
                     recovery_receipts: Vec::new(),
-                    created_at: Utc::now(),
+                    created_at: types::WireTimestamp::now(),
                 },
                 vec![inspect_id],
             )

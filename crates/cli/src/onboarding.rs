@@ -1610,9 +1610,9 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         run: Box::new({
             let path = bootstrap_path.to_path_buf();
             move || {
-                let material = crate::bootstrap_local::generate_bootstrap(chrono::Duration::days(
-                    crate::bootstrap_local::DEFAULT_TTL_DAYS,
-                ))?;
+                let material = crate::bootstrap_local::generate_bootstrap(
+                    jiff::SignedDuration::from_hours(crate::bootstrap_local::DEFAULT_TTL_DAYS * 24),
+                )?;
                 crate::bootstrap_local::write_bootstrap_env(&path, &material, true)?;
                 Ok(format!("wrote {}", path.display()))
             }
