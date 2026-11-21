@@ -762,6 +762,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             target_gates: Arc::new(Mutex::new(HashMap::new())),
             creation_gate: Arc::new(Mutex::new(())),
             confirmed_closed: Arc::new(Mutex::new(HashSet::new())),
+            shared_locales: Arc::new(Mutex::new(HashMap::new())),
             destroyed_targets,
             destroyed_task: Mutex::new(destroyed_task),
             network_trackers: Arc::new(Mutex::new(HashMap::new())),
@@ -899,6 +900,7 @@ struct ChromiumWorker {
     /// Coordinates discovery with creation until the new target has an identity.
     creation_gate: Arc<Mutex<()>>,
     confirmed_closed: Arc<Mutex<HashSet<PageId>>>,
+    shared_locales: Arc<Mutex<HashMap<TargetId, String>>>,
     destroyed_targets: Arc<Mutex<HashSet<TargetId>>>,
     destroyed_task: Mutex<Option<JoinHandle<()>>>,
     network_trackers: Arc<Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>>,
@@ -956,6 +958,7 @@ struct ChromiumOpenGuard {
     pages: Arc<Mutex<HashMap<PageId, Page>>>,
     closed: Arc<Mutex<HashSet<TargetId>>>,
     confirmed_closed: Arc<Mutex<HashSet<PageId>>>,
+    shared_locales: Arc<Mutex<HashMap<TargetId, String>>>,
     destroyed: Arc<Mutex<HashSet<TargetId>>>,
     gates: Arc<Mutex<HashMap<TargetId, Weak<Mutex<()>>>>>,
     trackers: Arc<Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>>,
@@ -973,6 +976,7 @@ impl Drop for ChromiumOpenGuard {
         let pages = self.pages.clone();
         let closed = self.closed.clone();
         let confirmed_closed = self.confirmed_closed.clone();
+        let shared_locales = self.shared_locales.clone();
         let destroyed = self.destroyed.clone();
         let recorders = self.recorders.clone();
         let har_tasks = self.har_tasks.clone();
@@ -992,6 +996,7 @@ impl Drop for ChromiumOpenGuard {
                     return;
                 }
                 closed.lock().await.insert(target.clone());
+                shared_locales.lock().await.remove(&target);
                 let ids: Vec<_> = {
                     let mut pages = pages.lock().await;
                     let ids = pages
@@ -1090,6 +1095,7 @@ impl ChromiumWorker {
             .map(|(_, page)| page)
             .collect();
         self.network_trackers.lock().await.clear();
+        self.shared_locales.lock().await.clear();
         for (_, task) in self.har_tasks.lock().await.drain() {
             task.abort();
         }
@@ -1170,6 +1176,7 @@ impl ChromiumWorker {
             .cloned()
             .ok_or_else(page_missing)?;
         if !page.is_closed() {
+            self.ensure_shared_locale(&page).await?;
             return Ok(page);
         }
         let target = page.target_id().clone();
@@ -1183,6 +1190,7 @@ impl ChromiumWorker {
             .cloned()
             .ok_or_else(page_missing)?;
         if !current.is_closed() {
+            self.ensure_shared_locale(&current).await?;
             return Ok(current);
         }
         if self.destroyed_targets.lock().await.contains(&target) {
@@ -1199,7 +1207,29 @@ impl ChromiumWorker {
             .map_err(command_failed)?;
         self.replace_page_handle_locked(page_id, fresh.clone())
             .await?;
+        self.ensure_shared_locale(&fresh).await?;
         Ok(fresh)
+    }
+
+    async fn ensure_shared_locale(&self, page: &Page) -> Result<(), CommandError> {
+        if !self
+            .fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let locale = self
+            .shared_locales
+            .lock()
+            .await
+            .get(page.target_id())
+            .cloned();
+        if let Some(locale) = locale {
+            crate::fingerprint_host::ensure_shared_locale(page, &locale)
+                .await
+                .map_err(command_failed)?;
+        }
+        Ok(())
     }
 
     /// Clone a handle to the live browser and release the mutex immediately.
@@ -1743,6 +1773,7 @@ impl ChromiumWorker {
             pages: self.pages.clone(),
             closed: self.closed_targets.clone(),
             confirmed_closed: self.confirmed_closed.clone(),
+            shared_locales: self.shared_locales.clone(),
             destroyed: self.destroyed_targets.clone(),
             gates: self.target_gates.clone(),
             trackers: self.network_trackers.clone(),
@@ -1804,7 +1835,7 @@ impl ChromiumWorker {
     }
 
     async fn install_page_handle(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
-        self.apply_fingerprint_to_page(&page).await?;
+        let shared_locale = self.apply_fingerprint_to_page(&page).await?;
         // Every page acts as the focused one: a page whose window does not
         // hold focus otherwise holds back its focus events.
         page.execute(SetFocusEmulationEnabledParams::new(true))
@@ -1818,6 +1849,15 @@ impl ChromiumWorker {
             .await
             .insert(page_id.clone(), tracker);
         self.install_dialog_listener(&page_id, &page).await;
+        let target = page.target_id().clone();
+        {
+            let mut shared = self.shared_locales.lock().await;
+            if let Some(locale) = shared_locale {
+                shared.insert(target, locale);
+            } else {
+                shared.remove(&target);
+            }
+        }
         self.pages.lock().await.insert(page_id, page);
         Ok(())
     }
@@ -1879,12 +1919,12 @@ impl ChromiumWorker {
         }
     }
 
-    async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<(), CommandError> {
+    async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<Option<String>, CommandError> {
         if !self
             .fingerprint_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            return Ok(());
+            return Ok(None);
         }
         let plan = {
             let cached = self.fingerprint_plan.lock().await;
@@ -1899,7 +1939,7 @@ impl ChromiumWorker {
                 };
                 let plan = match FingerprintApplyPlan::from_config(&config) {
                     Ok(Some(plan)) => std::sync::Arc::new(plan),
-                    Ok(None) => return Ok(()),
+                    Ok(None) => return Ok(None),
                     Err(error) => {
                         return Err(driver_error(
                             ErrorCode::BrowserCommandFailed,
@@ -1912,10 +1952,14 @@ impl ChromiumWorker {
                 plan
             }
         };
-        crate::fingerprint_host::ChromiumPageHost { page }
-            .apply_fingerprint(plan.as_ref())
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))?;
+        let shared_locale = AtomicBool::new(false);
+        crate::fingerprint_host::ChromiumPageHost {
+            page,
+            shared_locale: &shared_locale,
+        }
+        .apply_fingerprint(plan.as_ref())
+        .await
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))?;
 
         // The init script spoofs screen metrics at the JS layer, but the
         // browser's virtual screen (screen.width, device-width media
@@ -1949,7 +1993,9 @@ impl ChromiumWorker {
                 .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
             bounded_cdp(page.execute(params), command_failed).await?;
         }
-        Ok(())
+        Ok(shared_locale
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| plan.locale.clone()))
     }
 
     async fn unregister_page_state(
@@ -1966,6 +2012,9 @@ impl ChromiumWorker {
         let mut recorders = self.har_recorders.lock().await;
         let mut tasks = self.har_tasks.lock().await;
         let page = pages.remove(page_id);
+        if let Some(page) = &page {
+            self.shared_locales.lock().await.remove(page.target_id());
+        }
         let recorder = recorders.remove(page_id);
         if let Some(task) = tasks.remove(page_id) {
             task.abort();
@@ -2533,6 +2582,7 @@ impl crate::TabsEngine for ChromiumWorker {
         let closed = self.closed_targets.clone();
         let confirmed = self.confirmed_closed.clone();
         let destroyed = self.destroyed_targets.clone();
+        let shared_locales = self.shared_locales.clone();
         let trackers = self.network_trackers.clone();
         let dialogs = self.dialog_tasks.clone();
         let pending = self.pending_dialogs.clone();
@@ -2556,7 +2606,8 @@ impl crate::TabsEngine for ChromiumWorker {
                     Ok(Ok(())) => unreachable!(),
                 };
             }
-            closed.lock().await.insert(target);
+            closed.lock().await.insert(target.clone());
+            shared_locales.lock().await.remove(&target);
             pages.lock().await.remove(&id);
             confirmed.lock().await.insert(id.clone());
             trackers.lock().await.remove(&id);
@@ -3838,13 +3889,7 @@ impl crate::EventsEngine for ChromiumWorker {
         page_id: &PageId,
         command: &ClickAndWaitForPopupCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let opener = self
-            .pages
-            .lock()
-            .await
-            .get(page_id)
-            .cloned()
-            .ok_or_else(page_missing)?;
+        let opener = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
         let mut events = browser
             .event_listener::<EventTargetCreated>()
@@ -6496,6 +6541,7 @@ mod tests {
             target_gates: Arc::new(super::Mutex::new(super::HashMap::new())),
             creation_gate: Arc::new(super::Mutex::new(())),
             confirmed_closed: Arc::new(super::Mutex::new(super::HashSet::new())),
+            shared_locales: Arc::new(super::Mutex::new(super::HashMap::new())),
             destroyed_targets: Arc::new(super::Mutex::new(super::HashSet::new())),
             destroyed_task: super::Mutex::new(None),
             network_trackers: Arc::new(super::Mutex::new(super::HashMap::new())),

@@ -94,8 +94,10 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Chromium page and popup lifecycle
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        run: cargo test -p worker-pool --test chromium_worker open_page_and_popup_settle_before_returning_evidence --locked -- --ignored
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          cargo test -p worker-pool --test chromium_worker --locked -- open_page_and_popup_settle_before_returning_evidence --ignored --exact
+          cargo test -p worker-pool --test chromium_worker --locked -- concurrent_popup_discovery_shares_one_page_identity --ignored --exact
 
       - name: Version and naming agreement
         # One tag ships binaries, npm, and the crate, so a version that

@@ -4915,14 +4915,9 @@ async fn concurrent_popup_discovery_shares_one_page_identity() {
         artifacts_dir: root.path().join("artifacts"),
         headless: true,
         ..Default::default()
-    });
+    })
+    .with_fingerprint(fingerprinting::FingerprintConfig::default().with_locale("de_DE"));
     let worker = factory.launch(&SessionId::new()).await.unwrap();
-    worker
-        .session_settings()
-        .unwrap()
-        .set_fingerprint_enabled(false)
-        .await
-        .unwrap();
     let tabs = worker_pool::tabs_or_default(worker.tabs());
     let opened = tabs
         .open_page_command(&OpenPageCommand { url: None })
@@ -4932,17 +4927,21 @@ async fn concurrent_popup_discovery_shares_one_page_identity() {
         Evidence::Page { page_id, .. } => page_id.clone(),
         other => panic!("unexpected: {other:?}"),
     };
-    worker_pool::javascript_or_default(worker.javascript())
+    let locale_before = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &opener,
             &EvaluateJavaScriptCommand {
-                expression: "window.open('about:blank#discovery', '_blank'); true".into(),
+                expression: "(() => { const child = window.open('about:blank#discovery', '_blank'); return [Intl.NumberFormat().resolvedOptions().locale, child.Intl.NumberFormat().resolvedOptions().locale]; })()".into(),
                 timeout_ms: 5_000,
                 await_promise: false,
             },
         )
         .await
         .unwrap();
+    assert!(
+        matches!(&locale_before[0], Evidence::JavaScriptResult { value, .. } if value == &serde_json::json!(["de-DE", "de-DE"])),
+        "unexpected locales: {locale_before:?}"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let (a, b) = tokio::join!(
         tabs.list_pages(&ListPagesCommand),
@@ -4960,6 +4959,36 @@ async fn concurrent_popup_discovery_shares_one_page_identity() {
         }
         other => panic!("unexpected: {other:?}"),
     };
-    assert_eq!(popup(a.unwrap()), popup(b.unwrap()));
+    let popup_id = popup(a.unwrap());
+    assert_eq!(popup_id, popup(b.unwrap()));
+    let read_locale = |page: PageId| {
+        let worker = worker.clone();
+        async move {
+            worker_pool::javascript_or_default(worker.javascript())
+                .evaluate_javascript(
+                    &page,
+                    &EvaluateJavaScriptCommand {
+                        expression: "Intl.NumberFormat().resolvedOptions().locale".into(),
+                        timeout_ms: 5_000,
+                        await_promise: false,
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let popup_locale = read_locale(popup_id.clone()).await;
+    assert!(
+        matches!(&popup_locale[0], Evidence::JavaScriptResult { value, .. } if value == "de-DE"),
+        "unexpected popup locale: {popup_locale:?}"
+    );
+    tabs.close_page_command(&ClosePageCommand { page_id: opener })
+        .await
+        .unwrap();
+    let after_close = read_locale(popup_id).await;
+    assert!(
+        matches!(&after_close[0], Evidence::JavaScriptResult { value, .. } if value == "de-DE"),
+        "unexpected popup locale after opener close: {after_close:?}"
+    );
     worker.close().await.unwrap();
 }
