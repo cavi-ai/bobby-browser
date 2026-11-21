@@ -2578,6 +2578,17 @@ impl crate::TabsEngine for ChromiumWorker {
             .map(|page| page.target_id().clone())
             .ok_or_else(page_missing)?;
         let gate = self.target_gate(&target).await;
+        // A target can own a locale override shared by another target, including
+        // one registering concurrently. Page.close acknowledgement precedes
+        // target destruction and does not guarantee that override is released.
+        let browser = if self
+            .fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            Some(self.browser_handle().await?)
+        } else {
+            None
+        };
         let pages = self.pages.clone();
         let closed = self.closed_targets.clone();
         let confirmed = self.confirmed_closed.clone();
@@ -2596,16 +2607,52 @@ impl crate::TabsEngine for ChromiumWorker {
                 .get(&id)
                 .cloned()
                 .ok_or_else(page_missing)?;
+            // Subscribe before closing so an early destruction event cannot be missed.
+            let mut destruction = match browser {
+                Some(browser) => Some(
+                    tokio::time::timeout(
+                        DEFAULT_CDP_CALL_TIMEOUT,
+                        browser.event_listener::<EventTargetDestroyed>(),
+                    )
+                    .await
+                    .map_err(|_| timeout_error(DEFAULT_CDP_CALL_TIMEOUT.as_millis() as u64))?
+                    .map_err(command_failed)?,
+                ),
+                None => None,
+            };
             let evidence = page_evidence(id.clone(), &page).await.ok();
             let close = tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, page.close()).await;
             let acknowledged = matches!(close, Ok(Ok(())));
-            if !acknowledged && !destroyed.lock().await.contains(&target) {
+            let already_destroyed = destroyed.lock().await.contains(&target);
+            if !acknowledged && !already_destroyed {
                 return match close {
                     Ok(Err(error)) => Err(command_failed(error)),
                     Err(_) => Err(timeout_error(DEFAULT_CDP_CALL_TIMEOUT.as_millis() as u64)),
                     Ok(Ok(())) => unreachable!(),
                 };
             }
+            let destruction_result = if already_destroyed {
+                Ok(())
+            } else if let Some(events) = destruction.as_mut() {
+                match tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, async {
+                    while let Some(event) = events.next().await {
+                        if event.target_id == target {
+                            return Ok(());
+                        }
+                    }
+                    Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "target destruction event stream closed",
+                    ))
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(timeout_error(DEFAULT_CDP_CALL_TIMEOUT.as_millis() as u64)),
+                }
+            } else {
+                Ok(())
+            };
             closed.lock().await.insert(target.clone());
             shared_locales.lock().await.remove(&target);
             pages.lock().await.remove(&id);
@@ -2619,6 +2666,7 @@ impl crate::TabsEngine for ChromiumWorker {
             if let Some(task) = tasks.lock().await.remove(&id) {
                 task.abort();
             }
+            destruction_result?;
             let (url, title) = evidence
                 .map(|evidence| (evidence.url, evidence.title))
                 .unwrap_or_default();
