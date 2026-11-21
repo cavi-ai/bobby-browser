@@ -4688,7 +4688,7 @@ async fn open_page_and_popup_settle_before_returning_evidence() {
         )
         .await
         .unwrap();
-    assert!(matches!(self_close[0], Evidence::Popup { .. }));
+    assert!(matches!(self_close[0], Evidence::PopupClosed { .. }));
     assert!(
         started.elapsed() < std::time::Duration::from_secs(3),
         "self-closing popup stalled settle: {:?}",
@@ -4789,6 +4789,11 @@ async fn disposable_profile_removed_on_close_and_preserved_on_terminate() {
         term_profile.exists(),
         "terminate() must preserve disposable profile dir"
     );
+    factory.finalize_session(&term_session).await.unwrap();
+    assert!(
+        !term_profile.exists(),
+        "final session disposal must reclaim the retained profile"
+    );
 
     // close() reclaims the disposable profile directory.
     let close_session = SessionId::new();
@@ -4800,4 +4805,161 @@ async fn disposable_profile_removed_on_close_and_preserved_on_terminate() {
         !close_profile.exists(),
         "close() must reclaim disposable profile dir"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn cancelled_open_during_navigation_closes_target() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        headless: true,
+        ..Default::default()
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let opening = {
+        let worker = worker.clone();
+        tokio::spawn(async move {
+            worker_pool::tabs_or_default(worker.tabs())
+                .open_page_command(&OpenPageCommand {
+                    url: Some(format!("http://{address}/")),
+                })
+                .await
+        })
+    };
+    let (_connection, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    opening.abort();
+    let _ = opening.await;
+    let tabs = worker_pool::tabs_or_default(worker.tabs());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let listed = tabs.list_pages(&ListPagesCommand).await.unwrap();
+            if matches!(&listed[0], Evidence::Pages { pages } if pages.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("cancelled page should be closed");
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn concurrent_discovery_and_close_do_not_duplicate_or_readopt_target() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        headless: true,
+        ..Default::default()
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let tabs = worker_pool::tabs_or_default(worker.tabs());
+    let opened = tabs
+        .open_page_command(&OpenPageCommand { url: None })
+        .await
+        .unwrap();
+    let id = match &opened[0] {
+        Evidence::Page { page_id, .. } => page_id.clone(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let (a, b) = tokio::join!(
+        tabs.list_pages(&ListPagesCommand),
+        tabs.list_pages(&ListPagesCommand)
+    );
+    for listed in [a.unwrap(), b.unwrap()] {
+        assert!(
+            matches!(&listed[0], Evidence::Pages { pages } if pages.len() == 1 && pages[0].page_id == id)
+        );
+    }
+    let close = ClosePageCommand {
+        page_id: id.clone(),
+    };
+    let (closed, listed) = tokio::join!(
+        tabs.close_page_command(&close),
+        tabs.list_pages(&ListPagesCommand)
+    );
+    closed.unwrap();
+    let listed = listed.unwrap();
+    assert!(
+        matches!(&listed[0], Evidence::Pages { pages } if pages.len() <= 1 && pages.iter().all(|p| p.page_id == id))
+    );
+    for _ in 0..3 {
+        let listed = tabs.list_pages(&ListPagesCommand).await.unwrap();
+        assert!(matches!(&listed[0], Evidence::Pages { pages } if pages.is_empty()));
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn concurrent_popup_discovery_shares_one_page_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        headless: true,
+        ..Default::default()
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    worker
+        .session_settings()
+        .unwrap()
+        .set_fingerprint_enabled(false)
+        .await
+        .unwrap();
+    let tabs = worker_pool::tabs_or_default(worker.tabs());
+    let opened = tabs
+        .open_page_command(&OpenPageCommand { url: None })
+        .await
+        .unwrap();
+    let opener = match &opened[0] {
+        Evidence::Page { page_id, .. } => page_id.clone(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &opener,
+            &EvaluateJavaScriptCommand {
+                expression: "window.open('about:blank#discovery', '_blank'); true".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (a, b) = tokio::join!(
+        tabs.list_pages(&ListPagesCommand),
+        tabs.list_pages(&ListPagesCommand)
+    );
+    let popup = |listed: Vec<Evidence>| match &listed[0] {
+        Evidence::Pages { pages } => {
+            let ids = pages
+                .iter()
+                .filter(|p| p.url.contains("#discovery"))
+                .map(|p| p.page_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(ids.len(), 1);
+            ids[0].clone()
+        }
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert_eq!(popup(a.unwrap()), popup(b.unwrap()));
+    worker.close().await.unwrap();
 }

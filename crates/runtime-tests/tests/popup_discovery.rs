@@ -462,3 +462,120 @@ async fn popup_closing_during_wait_is_not_registered() {
 
     runtime.sessions.delete(&session.id).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn self_closed_page_is_removed_from_session_inventory() {
+    let server = site().await;
+    let root = tempfile::tempdir().unwrap();
+    let runtime = RuntimeService::build(&test_config(root.path()))
+        .await
+        .unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "closure-inventory".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+                ..Default::default()
+            },
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let opener = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let submit = |page_id: types::PageId, command: PrimitiveCommand| {
+        runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page_id),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
+            command: RuntimeCommand::Primitive(command),
+        })
+    };
+    let nav = submit(
+        opener.id.clone(),
+        PrimitiveCommand::Navigate(NavigateCommand {
+            url: server.url("/integrations"),
+            wait_until: WaitUntil::Interactive,
+            timeout_ms: 10_000,
+        }),
+    )
+    .await;
+    assert!(matches!(nav, CommandOutcome::Completed { .. }), "{nav:?}");
+    let opened = submit(
+        opener.id.clone(),
+        PrimitiveCommand::EvaluateJavaScript(EvaluateJavaScriptCommand {
+            expression: "window.open('/ledger/authorize', '_blank'); true".into(),
+            timeout_ms: 5_000,
+            await_promise: false,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(opened, CommandOutcome::Completed { .. }),
+        "{opened:?}"
+    );
+    let listed = submit(
+        opener.id.clone(),
+        PrimitiveCommand::ListPages(ListPagesCommand),
+    )
+    .await;
+    let victim = match listed {
+        CommandOutcome::Completed { evidence, .. } => evidence
+            .iter()
+            .find_map(|item| match item {
+                Evidence::Pages { pages } => pages
+                    .iter()
+                    .find(|page| page.url.contains("ledger/authorize"))
+                    .map(|page| page.page_id.clone()),
+                _ => None,
+            })
+            .expect("popup should be listed"),
+        other => panic!("listing failed: {other:?}"),
+    };
+    assert!(runtime
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .page_ids
+        .contains(&victim));
+    let _ = submit(
+        victim.clone(),
+        PrimitiveCommand::EvaluateJavaScript(EvaluateJavaScriptCommand {
+            expression: "window.close()".into(),
+            timeout_ms: 5_000,
+            await_promise: false,
+        }),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let result = submit(
+                opener.id.clone(),
+                PrimitiveCommand::ListPages(ListPagesCommand),
+            )
+            .await;
+            if let CommandOutcome::Completed { .. } = result {
+                let metadata = runtime.sessions.get(&session.id).await.unwrap();
+                if !metadata.page_ids.contains(&victim) {
+                    assert!(metadata.page_ids.contains(&opener.id));
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("closed page must leave session inventory");
+    runtime.sessions.delete(&session.id).await.unwrap();
+}
