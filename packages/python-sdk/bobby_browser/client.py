@@ -382,7 +382,7 @@ class BrowserRuntimeClient:
         """``GET /v1/context/site/{key}`` -- durable per-site context view."""
         if not site_key:
             raise self._protocol("site key must not be empty")
-        path = f"/v1/context/site/{urllib.parse.quote(site_key)}"
+        path = f"/v1/context/site/{urllib.parse.quote(site_key, safe='')}"
         return self._json("GET", path, None, options, expected_status=200)
 
     # ---- artifacts --------------------------------------------------------

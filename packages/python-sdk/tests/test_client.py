@@ -96,6 +96,25 @@ class ClientUnitTests(unittest.TestCase):
         with self.assertRaises(RuntimeClientError): client.resolve_job(job_id, input)
         self.assertEqual(calls, [f"/v1/jobs/{job_id}/resolution"] * 2)
 
+    def test_context_site_encodes_site_key_as_one_segment(self) -> None:
+        def handler(req: _Handler) -> None:
+            self.assertEqual(req.path, "/v1/context/site/https%3A%2F%2Fexample.com%2Faccount")
+            req.reply_json(200, {"siteKey": "https://example.com/account", "pages": {}})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        self.assertEqual(client.context_site("https://example.com/account")["siteKey"], "https://example.com/account")
+
+    def test_shared_reconciliation_fixtures(self) -> None:
+        fixture_path = Path(__file__).resolve().parents[3] / "crates/bobby-browser-client/tests/fixtures/sdk-responses.json"
+        fixtures = json.loads(fixture_path.read_text())
+        def handler(req: _Handler) -> None:
+            req.read_body()
+            req.reply_json(409, fixtures["command"] if req.path == "/v1/commands" else fixtures["recovery"])
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "token")
+        self.assertEqual(client.submit_command({"schemaVersion": 1, "commandId": fixtures["command"]["commandId"]}), fixtures["command"])
+        self.assertEqual(client.recover_workflow("00000000-0000-4000-8000-000000000002"), fixtures["recovery"])
+
     # ---- auth header contract ------------------------------------------
 
     def test_every_request_carries_the_documented_headers(self) -> None:
