@@ -31,7 +31,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 - A handle replaces `sessionId` and `pageId` on page-scoped tools. Do not send both: that is `workflowBindingConflict`.
 - With exactly one live handle on the connection, a page-scoped call that names no scope uses it, and the evidence records `workflowHandleDefaulted`.
 - `page_activate` with a handle and a `pageId` activates that page and rebinds the handle to it.
-- After `click_and_wait_for_popup`, the handle follows the popup. If the popup later closes, read-only calls fall back to the opener page. Mutating calls fail with `popupClosed` evidence, so no effect is repeated.
+- After `click_and_wait_for_popup`, the handle follows an open popup. If it closes during the command, the outcome carries `popupClosed` evidence and the handle stays on the opener. If it closes later, a read-only call retries once on the opener and reports `popupClosed`; a mutating call fails with that evidence instead of repeating the effect.
 - A handle is a convenience, not authority. Capability and ownership checks still apply. `initialize` invalidates all earlier handles. A malformed, unknown or expired handle is `unknownWorkflowHandle`; recover with explicit IDs.
 - Streamable HTTP shares one server per principal, so a new `initialize` resets every handle of that principal. Use separate principals to isolate clients.
 

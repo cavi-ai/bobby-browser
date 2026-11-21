@@ -38,7 +38,7 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with the 
 
 | Method | Route |
 |---|---|
-| `runtimeInfo()` | `GET /v1/runtime` |
+| `runtimeInfo()`, `runtimeInfoForEngine(engine)` | `GET /v1/runtime`, optionally scoped to an engine |
 | `createSession(input, options?)` | `POST /v1/sessions` |
 | `listSessions()` | `GET /v1/sessions` |
 | `deleteSession(sessionId)` | `DELETE /v1/sessions/{id}` |
@@ -49,7 +49,7 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with the 
 | `checkpoint(input, options?)` | `POST /v1/checkpoints` |
 | `recoveryStatus(workflowId)` | `GET /v1/recovery/{id}` |
 | `recover(workflowId)` | `POST /v1/recovery/{id}` |
-| `events(cursor, options?)` | `GET /v1/events`. Async iterable over batches; resumes after an event gap |
+| `events(cursor, options?)` | `GET /v1/events`. Async iterable over events; throws `RuntimeClientError` with `eventGap` on an HTTP 409 cursor gap |
 | `artifact(reference)` | `GET /v1/artifacts/{id}`. Verified byte stream |
 | `submitJob`, `jobStatus`, `cancelJob` | `/v1/jobs` |
 | `resolveJob(jobId, input)` | `POST /v1/jobs/{job}/resolution` |

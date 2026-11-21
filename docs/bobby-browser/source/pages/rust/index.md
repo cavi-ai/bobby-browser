@@ -22,19 +22,19 @@ let client = BrowserRuntimeClient::new(
     std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
 )?;
 let info = client.runtime_info(None).await?;
-
 let session = client
     .create_session(
         &CreateSessionRequest {
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         },
         None,
     )
     .await?;
 client.delete_session(&session.id, None).await?;
-# let _ = info;
+let _ = info;
 # Ok(()) }
 ```
 
@@ -44,7 +44,7 @@ Get the token with `bobby token`. The client sends the authorization, interface 
 
 | Method | Route |
 |---|---|
-| `runtime_info` | `GET /v1/runtime` |
+| `runtime_info`, `runtime_info_for_engine` | `GET /v1/runtime` |
 | `create_session`, `list_sessions`, `delete_session` | `/v1/sessions` |
 | `open_page` | `POST /v1/pages` |
 | `form_snapshot` | `GET /v1/sessions/{session}/pages/{page}/forms` |
@@ -58,6 +58,12 @@ Get the token with `bobby token`. The client sends the authorization, interface 
 `resolve_job(&job_id, &input, options)` records an operator attestation for a job whose outcome is uncertain. `input` carries `effectObserved` or `effectAbsent` and a lowercase hex SHA-256. The caller needs `job:read`, `job:cancel` and `authority:admin`. See [Events and recovery](../guides/events-recovery.md).
 
 The crate re-exports the wire types, such as `CommandEnvelope` and `CURRENT_INTERFACE_VERSION`. The `bobby` CLI is not a crate dependency; install it as described in [Installation](../introduction/installation.md).
+
+## Wire types and migration
+
+`WireTimestamp` represents UTC RFC 3339 timestamps from `0000-01-01T00:00:00Z` through `9999-12-31T11:59:59.999999999Z`. Use `WireTimestamp::parse_rfc3339` or its checked constructors when migrating from a timestamp string. Command and recovery responses are typed enums: match their variants, including `NeedsReconciliation`, rather than inspecting a generic JSON status. `Evidence` is typed as well, including `PopupClosed`.
+
+Event reads are available through the TypeScript SDK; the Rust client does not expose an event stream.
 
 ## Next
 

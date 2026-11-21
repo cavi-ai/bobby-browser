@@ -1,9 +1,6 @@
 name: Publish crates
 
 on:
-  push:
-    tags:
-      - "v*"
   # Publishes an existing release tag. dry_run stops after the dry-run publish.
   workflow_dispatch:
     inputs:
@@ -33,11 +30,12 @@ jobs:
     environment: crates
     permissions:
       contents: read
+      actions: read
       # crates.io exchanges this OIDC token for a short-lived publish token.
       id-token: write
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-      PUBLISH: ${{ github.event_name == 'push' || inputs.dry_run == 'false' }}
+      PUBLISH: ${{ inputs.dry_run == 'false' }}
     steps:
       - name: Require a release tag
         run: |
@@ -50,8 +48,19 @@ jobs:
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
+      - name: Require verified release artifacts
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-gate.py "$RELEASE_TAG" --assets --timeout 0
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      - name: Match the release tag to the package version
+        run: |
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$RELEASE_TAG" = "v$VERSION"
 
       - name: Build installable binary
         run: cargo build --release -p bobby-browser

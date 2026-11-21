@@ -93,11 +93,15 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Chromium page and popup lifecycle
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: cargo test -p worker-pool --test chromium_worker open_page_and_popup_settle_before_returning_evidence --locked -- --ignored
+
       - name: Version and naming agreement
         # One tag ships binaries, npm, and the crate, so a version that
         # disagrees between manifests ships a mislabelled artifact.
         run: |
-          python3 -m unittest scripts/test_check_version_agreement.py
+          python3 -m unittest scripts/test_check_version_agreement.py scripts/test_release_gate.py
           python3 scripts/check-version-agreement.py
           python3 -m unittest scripts/test_homebrew_release.py
           python3 -m unittest scripts/test_amo_signed_companion.py

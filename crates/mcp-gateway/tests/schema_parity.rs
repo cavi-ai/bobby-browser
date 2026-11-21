@@ -159,3 +159,108 @@ fn openapi_command_uses_generated_schema() {
         "CommandEnvelope.command must reference command.schema.json"
     );
 }
+
+#[test]
+fn generated_openapi_response_schemas_match_rust_wire_types() {
+    let schemas = [
+        (
+            "command-outcome",
+            serde_json::to_value(schemars::schema_for!(types::CommandOutcome)).unwrap(),
+        ),
+        (
+            "workflow-checkpoint",
+            serde_json::to_value(schemars::schema_for!(types::WorkflowCheckpoint)).unwrap(),
+        ),
+        (
+            "recovery-status",
+            serde_json::to_value(schemars::schema_for!(types::RecoveryStatus)).unwrap(),
+        ),
+        (
+            "recovery-decision",
+            serde_json::to_value(schemars::schema_for!(types::RecoveryDecision)).unwrap(),
+        ),
+    ];
+    let openapi =
+        fs::read_to_string(repo_root().join("docs/bobby-browser/source/openapi/v1.yaml")).unwrap();
+    for (name, schema) in schemas {
+        let mut expected = serde_json::to_string_pretty(&schema).unwrap();
+        expected.push('\n');
+        assert_generated(
+            &repo_root().join(format!(
+                "docs/bobby-browser/source/openapi/{name}.schema.json"
+            )),
+            &expected,
+        );
+        assert!(
+            openapi.contains(&format!("$ref: \"./{name}.schema.json\"")),
+            "missing OpenAPI reference for {name}"
+        );
+    }
+}
+
+#[test]
+fn response_schemas_accept_shared_sdk_reconciliation_fixtures() {
+    let fixture: Value = serde_json::from_str(
+        &fs::read_to_string(
+            repo_root().join("crates/bobby-browser-client/tests/fixtures/sdk-responses.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for (name, schema) in [
+        (
+            "command",
+            serde_json::to_value(schemars::schema_for!(types::CommandOutcome)).unwrap(),
+        ),
+        (
+            "recovery",
+            serde_json::to_value(schemars::schema_for!(types::RecoveryDecision)).unwrap(),
+        ),
+    ] {
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(
+            validator.is_valid(&fixture[name]),
+            "{name} fixture must match generated schema"
+        );
+        assert!(
+            !validator.is_valid(&serde_json::json!({"error": fixture["eventGap"]["error"]})),
+            "HTTP error must not match {name}"
+        );
+        assert!(
+            !validator.is_valid(&fixture["eventGap"]),
+            "HTTP error must not match {name}"
+        );
+    }
+}
+
+#[test]
+fn rust_quickstarts_match_compiled_crate_example() {
+    let lib =
+        fs::read_to_string(repo_root().join("crates/bobby-browser-client/src/lib.rs")).unwrap();
+    let example = lib
+        .split("//! ```rust,no_run\n")
+        .nth(1)
+        .unwrap()
+        .split("//! ```")
+        .next()
+        .unwrap()
+        .lines()
+        .map(|line| line.strip_prefix("//! ").unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for path in [
+        "crates/bobby-browser-client/README.md",
+        "docs/bobby-browser/source/pages/rust/index.md",
+    ] {
+        let text = fs::read_to_string(repo_root().join(path)).unwrap();
+        let snippet = text
+            .split("```rust,no_run\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap()
+            .trim_end();
+        assert_eq!(snippet, example.trim_end(), "{path} quickstart drifted");
+    }
+}

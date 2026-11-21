@@ -87,10 +87,11 @@ test("release archives certify clean installs and upgrades on every release plat
   assert.match(releaseWorkflow, /push:\s+tags:\s+- "v\*"/);
   assert.match(releaseWorkflow, /tag:\s+description:[^\n]+\s+required: true/);
   assert.equal(
-    releaseWorkflow.match(/ref: \$\{\{ inputs\.tag \|\| github\.ref \}\}/g)?.length,
-    3,
-    "signing, packaging, and release notes must use the selected release revision",
+    releaseWorkflow.match(/ref: refs\/tags\/\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/g)?.length,
+    1,
+    "preflight must resolve the selected release tag",
   );
+  assert.equal(releaseWorkflow.match(/ref: \$\{\{ needs\.preflight\.outputs\.sha \}\}/g)?.length, 4);
   assert.match(releaseWorkflow, /certify-release-install\.py/);
   assert.match(releaseWorkflow, /--asset-os "\$\{\{ matrix\.asset_os \}\}"/);
   assert.match(releaseWorkflow, /python -m zipfile -c/);

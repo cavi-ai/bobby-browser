@@ -1,9 +1,6 @@
 name: Publish PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
   # Publishes an existing release tag (for example v0.16.0, cut before this
   # workflow existed). dry_run stops after the build.
   workflow_dispatch:
@@ -36,12 +33,13 @@ jobs:
     environment: pypi
     permissions:
       contents: read
+      actions: read
       # The whole of the publish credential: PyPI exchanges this OIDC token for
       # a short-lived upload token. No PyPI token is stored in this repository.
       id-token: write
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-      PUBLISH: ${{ github.event_name == 'push' || inputs.dry_run == 'false' }}
+      PUBLISH: ${{ inputs.dry_run == 'false' }}
     steps:
       - name: Require a release tag
         run: |
@@ -54,6 +52,12 @@ jobs:
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
+
+      - name: Require verified release artifacts
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-gate.py "$RELEASE_TAG" --assets --timeout 0
 
       - name: Verify every artifact carries one version
         run: python3 scripts/check-version-agreement.py

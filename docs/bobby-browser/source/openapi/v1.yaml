@@ -519,6 +519,14 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/InterfaceErrorBody"
                   - $ref: "#/components/schemas/CommandOutcome"
+        "404":
+          description: Interface not found or command outcome `failed` with `notFound`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/InterfaceErrorBody"
+                  - $ref: "#/components/schemas/CommandOutcome"
         "408":
           $ref: "#/components/responses/DeadlineExceeded"
         "409":
@@ -665,7 +673,13 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          description: Reconciliation decision or interface conflict
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/InterfaceErrorBody"
+                  - $ref: "#/components/schemas/RecoveryDecision"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/events:
@@ -1480,17 +1494,13 @@ components:
         command:
           $ref: "./command.schema.json"
     CommandOutcome:
-      type: object
-      additionalProperties: true
+      $ref: "./command-outcome.schema.json"
     WorkflowCheckpoint:
-      type: object
-      additionalProperties: true
+      $ref: "./workflow-checkpoint.schema.json"
     RecoveryStatus:
-      type: object
-      additionalProperties: true
+      $ref: "./recovery-status.schema.json"
     RecoveryDecision:
-      type: object
-      additionalProperties: true
+      $ref: "./recovery-decision.schema.json"
     CreateSessionRequest:
       type: object
       required: [profile]

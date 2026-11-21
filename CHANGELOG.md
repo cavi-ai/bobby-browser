@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.27.0
+
+### Fixed
+
+- The Rust SDK validates outcome status against the HTTP response and keeps credentials out of debug and transport errors.
+- `WireTimestamp` rejects instants below its earliest supported UTC timestamp, including subsecond offsets.
+- The Python SDK escapes slashes in context site keys.
+
 ## 0.26.0 - 2026-11-16
 
 ### Changed
