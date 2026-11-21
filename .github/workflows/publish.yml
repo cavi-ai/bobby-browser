@@ -7,6 +7,10 @@ on:
         description: Release tag to build
         required: false
         type: string
+      commit:
+        description: Verified release commit
+        required: false
+        type: string
       dry_run:
         description: Build and verify without upload
         required: true
@@ -34,7 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          ref: ${{ inputs.commit || (inputs.tag && format('refs/tags/{0}', inputs.tag)) || github.ref }}
+      - name: Verify dispatched workflow identity
+        if: inputs.commit != ''
+        env:
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$GITHUB_SHA" = "$RELEASE_COMMIT"
+
       - name: Require verified release artifacts
         if: inputs.dry_run == 'false'
         env:

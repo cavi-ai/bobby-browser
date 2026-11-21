@@ -30,13 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          ref: ${{ github.event_name == 'push' && github.sha || format('refs/tags/{0}', inputs.tag) }}
       - name: Require successful CI on the exact tag
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: python3 scripts/release-gate.py "$TAG" --output-sha
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$TAG" = "v$VERSION"
+          python3 scripts/release-gate.py "$TAG" --output-sha
 
   # addons.mozilla.org accepts one upload per extension version, so the tag
   # push submits the companion once, to the listed channel, before the
@@ -176,15 +180,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build release bobby + gateways
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           cargo build --release \
             -p bobby-browser -p mcp-gateway -p acp-gateway \
             --target "${{ matrix.target }}"
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
-            VERSION="$(python -c "import pathlib,re; m=re.search(r'\[workspace\.package\][^[]*?\bversion\s*=\s*\"([^\"]+)\"', pathlib.Path('Cargo.toml').read_text(), re.S); print(m.group(1))")"
-          fi
+          VERSION="${TAG#v}"
           STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
           OUT="target/${{ matrix.target }}/release"
           mkdir -p "$STAGE"
@@ -343,9 +346,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_COMMIT: ${{ needs.preflight.outputs.sha }}
         run: |
           set -euo pipefail
           python3 scripts/release-gate.py "$TAG" --assets --timeout 0
           for workflow in publish.yml publish-crates.yml publish-python.yml; do
-            gh workflow run "$workflow" --ref "refs/tags/$TAG" -f tag="$TAG" -f dry_run=false
+            gh workflow run "$workflow" --ref "$TAG" -f tag="$TAG" -f commit="$RELEASE_COMMIT" -f dry_run=false
           done
