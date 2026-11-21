@@ -711,7 +711,7 @@ async fn recall_ranks_persisted_control_totals_above_u64_without_false_ties() {
 #[tokio::test]
 async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
     use async_trait::async_trait;
-    use chrono::{Duration, Utc};
+    use jiff::SignedDuration as Duration;
     use std::path::{Path, PathBuf};
     use types::{
         AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, FollowIntent,
@@ -936,7 +936,7 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
             attempt_id: AttemptId::new(),
             session_id: session,
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
                 purpose: "open dashboard".into(),
                 hints: IntentHints {
@@ -986,7 +986,7 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
 #[tokio::test]
 async fn failed_navigating_intent_records_failure_under_source_url() {
     use async_trait::async_trait;
-    use chrono::{Duration, Utc};
+    use jiff::SignedDuration as Duration;
     use std::path::{Path, PathBuf};
     use types::{
         AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, FollowIntent,
@@ -1222,7 +1222,7 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
         attempt_id: AttemptId::new(),
         session_id: session,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
             purpose: "open dashboard".into(),
             hints: IntentHints {

@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,7 +34,7 @@ struct Manifest {
     kind: String,
     workflow_id: String,
     session_ids: Vec<String>,
-    created_at: DateTime<Utc>,
+    created_at: types::WireTimestamp,
     bobby_version: String,
     files: Vec<FileEntry>,
     /// Artifacts the journal names that are no longer on disk (retention).
@@ -308,7 +308,7 @@ pub fn export(
         kind: KIND.to_owned(),
         workflow_id: workflow.0.to_string(),
         session_ids: sessions.keys().cloned().collect(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
         bobby_version: env!("CARGO_PKG_VERSION").to_owned(),
         files: files
             .iter()
@@ -374,7 +374,7 @@ pub fn export(
 pub struct VerifiedBundle {
     pub summary: VerifySummary,
     pub session_ids: Vec<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: types::WireTimestamp,
     pub bobby_version: String,
     /// Every file the manifest lists, by bundle path.
     pub files: BTreeMap<String, Vec<u8>>,
@@ -506,7 +506,7 @@ mod tests {
             attempt_id: AttemptId::new(),
             session_id: session.clone(),
             page_id: Some(PageId::new()),
-            deadline: Utc::now() + chrono::Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: "https://shop.test/".into(),
                 wait_until: WaitUntil::DomContentLoaded,
@@ -523,7 +523,7 @@ mod tests {
     ) -> JournalRecord {
         JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command.clone(),
             phase,
             envelope,

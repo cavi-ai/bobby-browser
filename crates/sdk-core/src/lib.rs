@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use config::AppConfig;
+use jiff::SignedDuration as Duration;
 use node_registry::NodeRegistry;
 use observability::OperationalMetrics;
 use page_runtime::{
@@ -296,7 +296,7 @@ impl RuntimeService {
                 profile_id,
                 config.context.limits,
                 config.context.ttl_days,
-                context_store::day_since_epoch(Utc::now()),
+                context_store::day_since_epoch(jiff::Timestamp::now()),
             )
             .await
             {
@@ -701,7 +701,7 @@ impl RuntimeService {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: chrono::Utc::now(),
+            created_at: types::WireTimestamp::now(),
         };
         let saved = recovery
             .save_verified(checkpoint, evidence)
@@ -979,7 +979,7 @@ impl RuntimeService {
                             types::SkillCheckpointProof::new(
                                 checkpoint.checkpoint_id.clone(),
                                 envelope.session_id.clone(),
-                                chrono::Utc::now(),
+                                types::WireTimestamp::now(),
                                 attestation,
                             )
                             .ok()
@@ -1147,6 +1147,14 @@ impl RuntimeService {
             _ => WaitUntil::Interactive,
         };
         let timeout_ms = req.timeout_ms.unwrap_or(30_000);
+        let timeout = i64::try_from(timeout_ms).map_err(|_| {
+            RuntimeError::InvalidRequest("navigation timeout exceeds supported range".into())
+        })?;
+        let deadline = types::WireTimestamp::now()
+            .checked_add(Duration::from_millis(timeout))
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest("navigation timeout exceeds supported range".into())
+            })?;
         let envelope = CommandEnvelope {
             schema_version: CommandEnvelope::SCHEMA_VERSION,
             command_id: CommandId::new(),
@@ -1154,7 +1162,7 @@ impl RuntimeService {
             attempt_id: AttemptId::new(),
             session_id: page.session_id,
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::milliseconds(timeout_ms as i64),
+            deadline,
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: req.url,
                 wait_until,

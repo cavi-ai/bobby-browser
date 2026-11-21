@@ -4,10 +4,10 @@
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use interface_core::{
     AuthorityStore, CapabilityHandle, EventStore, InterfaceResult, RuntimeInterface,
 };
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{ArtifactResources, Server};
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -241,7 +241,7 @@ async fn rig(release: Option<Arc<Notify>>) -> Rig {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000d1")),
             Capability::ALL.to_vec(),
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -282,7 +282,10 @@ async fn rig(release: Option<Arc<Notify>>) -> Rig {
 impl Rig {
     async fn listed(&self) -> Vec<SessionId> {
         self.observer
-            .list_sessions(self.handle.context(Utc::now() + Duration::minutes(1), None))
+            .list_sessions(
+                self.handle
+                    .context(types::WireTimestamp::now() + Duration::from_mins(1), None),
+            )
             .await
             .unwrap()
             .into_iter()

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use page_runtime::PageRuntime;
 use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, AccessibilityTarget, ClickCommand,
@@ -168,7 +168,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         attempt_id: types::AttemptId::new(),
         session_id: session.clone(),
         page_id: Some(page.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(command),
     }
 }

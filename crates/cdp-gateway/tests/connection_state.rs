@@ -3,8 +3,8 @@ mod support;
 use std::sync::Arc;
 
 use cdp_gateway::{CdpConnection, IdentifierFamily, MethodRegistry, RuntimeGeneration};
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use types::{Capability, PrincipalId};
 
 #[tokio::test]
@@ -14,7 +14,7 @@ async fn all_identifier_families_are_connection_state_and_generation_events_prec
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::FileDownload],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap();
@@ -68,7 +68,7 @@ async fn generation_replacement_keeps_mappings_when_teardown_cannot_be_queued() 
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::FileDownload],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap();

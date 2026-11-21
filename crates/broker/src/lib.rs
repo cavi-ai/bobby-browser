@@ -89,7 +89,7 @@ impl RuntimeBindingCache {
             observability::locks::lock_recovering(&self.entries, "broker.runtime_binding_cache");
         if let Some((cached_handle, runtime, last_used)) = entries.get_mut(&principal) {
             if cached_handle.capabilities() == handle.capabilities()
-                && cached_handle.is_valid_at(chrono::Utc::now())
+                && cached_handle.is_valid_at(types::WireTimestamp::now())
             {
                 *last_used = std::time::Instant::now();
                 return runtime.clone();
@@ -99,7 +99,9 @@ impl RuntimeBindingCache {
         // first; a still-full map evicts the least-recently-used entry. The
         // steady-state bound is max_principals; this keeps it under churn.
         let now = std::time::Instant::now();
-        entries.retain(|_, (cached_handle, _, _)| cached_handle.is_valid_at(chrono::Utc::now()));
+        entries.retain(|_, (cached_handle, _, _)| {
+            cached_handle.is_valid_at(types::WireTimestamp::now())
+        });
         if entries.len() >= self.capacity {
             if let Some(oldest) = entries
                 .iter()
@@ -636,7 +638,7 @@ struct CdpBootstrap {
 }
 
 impl StartupGate {
-    fn validate_at(&self, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+    fn validate_at(&self, now: types::WireTimestamp) -> anyhow::Result<()> {
         if !self.handle.is_valid_at(now) {
             return Err(StartupCredentialError::Expired.into());
         }
@@ -645,7 +647,7 @@ impl StartupGate {
 
     async fn bind_if_valid_at<T, Bind, BindFuture>(
         &self,
-        now: chrono::DateTime<chrono::Utc>,
+        now: types::WireTimestamp,
         bind: Bind,
     ) -> anyhow::Result<T>
     where
@@ -672,7 +674,7 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     RuntimeService,
 )>
 where
-    Clock: Fn() -> chrono::DateTime<chrono::Utc>,
+    Clock: Fn() -> types::WireTimestamp,
     Build: FnOnce(AppConfig) -> BuildFuture,
     BuildFuture: std::future::Future<Output = anyhow::Result<RuntimeService>>,
     Bind: FnOnce(SocketAddr) -> BindFuture,
@@ -822,7 +824,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle, _) = bootstrap_listener_with(
         config,
         startup,
-        chrono::Utc::now,
+        types::WireTimestamp::now,
         |config| async move {
             RuntimeService::build(&config)
                 .await
@@ -905,9 +907,9 @@ pub mod testing {
         body::{to_bytes, Body},
         http::{request::Builder, StatusCode},
     };
-    use chrono::{Duration, SecondsFormat, Utc};
     use config::{CdpConfig, InterfaceConfig};
     use interface_core::{Authority, RuntimeInterface, SessionOwnershipRegistry};
+    use jiff::SignedDuration as Duration;
     use sdk_core::{AuthenticatedRuntime, RuntimeService};
     use tower::ServiceExt;
     use types::{Capability, PrincipalId, CURRENT_INTERFACE_VERSION};
@@ -961,7 +963,7 @@ pub mod testing {
             ADMIN_BEARER.to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
             Capability::ALL.to_vec(),
-            Utc::now() + Duration::minutes(30),
+            types::WireTimestamp::now() + Duration::from_mins(30),
         )
         .expect("fixed unrestricted admin startup credential is valid");
         let authority = Arc::new(
@@ -1113,7 +1115,7 @@ pub mod testing {
                 Capability::JobRead,
                 Capability::JobCancel,
             ],
-            Utc::now() + Duration::minutes(30),
+            types::WireTimestamp::now() + Duration::from_mins(30),
         )
         .expect("fixed admin startup credential is valid");
         let authority = Arc::new(
@@ -1179,7 +1181,7 @@ pub mod testing {
             .header("x-correlation-id", Uuid::new_v4().to_string())
             .header(
                 "x-deadline",
-                (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+                (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
             )
     }
 
@@ -1194,8 +1196,8 @@ pub mod testing {
         let body = serde_json::json!({
             "principalId": principal,
             "capabilities": capabilities,
-            "expiresAt": (Utc::now() + Duration::minutes(10))
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (types::WireTimestamp::now() + Duration::from_mins(10))
+                .rfc3339_millis(),
         });
         let request = context_headers(axum::http::Request::post("/v1/principals"), admin_bearer)
             .header("idempotency-key", format!("issue-{principal}"))
@@ -1266,7 +1268,7 @@ pub mod testing {
                 Capability::JobRead,
                 Capability::JobCancel,
             ],
-            Utc::now() + Duration::minutes(30),
+            types::WireTimestamp::now() + Duration::from_mins(30),
         )
         .expect("fixed admin startup credential is valid");
         let authority = Arc::new(
@@ -1389,7 +1391,7 @@ fn owner_stop_authorized(control: &SharedRuntimeControl, headers: &axum::http::H
 #[serde(rename_all = "camelCase")]
 struct RuntimeImpact {
     owner_id: uuid::Uuid,
-    taken_at: chrono::DateTime<chrono::Utc>,
+    taken_at: types::WireTimestamp,
     connections: usize,
     #[serde(flatten)]
     runtime: sdk_core::RestartImpact,
@@ -1408,7 +1410,7 @@ async fn shared_runtime_impact(
     };
     axum::Json(RuntimeImpact {
         owner_id: control.id,
-        taken_at: chrono::Utc::now(),
+        taken_at: types::WireTimestamp::now(),
         connections: source.gateways.live_connections(),
         runtime: source.runtime.restart_impact().await,
     })
@@ -1480,7 +1482,7 @@ where
         bootstrap_listener_with(
             config,
             startup,
-            chrono::Utc::now,
+            types::WireTimestamp::now,
             build,
             |addr| async move {
                 tokio::net::TcpListener::bind(addr)
@@ -1544,7 +1546,7 @@ mod tests {
         Arc, Mutex,
     };
 
-    use chrono::{Duration, Utc};
+    use jiff::SignedDuration as Duration;
     use types::{Capability, PrincipalId};
     use uuid::uuid;
 
@@ -1567,12 +1569,15 @@ mod tests {
             "recovery-test-bearer-0000000000000001".into(),
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             Capability::ALL.to_vec(),
-            Utc::now() + Duration::minutes(10),
+            types::WireTimestamp::now() + Duration::from_mins(10),
         )
         .unwrap();
         let authority = Arc::new(EnrolledAuthority::enroll(startup, 4).await.unwrap());
         let handle = authority
-            .authenticate("recovery-test-bearer-0000000000000001", Utc::now())
+            .authenticate(
+                "recovery-test-bearer-0000000000000001",
+                types::WireTimestamp::now(),
+            )
             .await
             .unwrap();
         let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
@@ -1615,8 +1620,8 @@ mod tests {
 
     #[tokio::test]
     async fn credential_expiring_during_runtime_construction_prevents_listener_bind() {
-        let initial = Utc::now();
-        let expires_at = initial + Duration::minutes(1);
+        let initial = types::WireTimestamp::now();
+        let expires_at = initial + Duration::from_mins(1);
         let clock = Arc::new(Mutex::new(initial));
         let construction_clock = clock.clone();
         let bind_calls = Arc::new(AtomicUsize::new(0));
@@ -1634,7 +1639,7 @@ mod tests {
             startup,
             move || *clock.lock().unwrap(),
             move |_| async move {
-                *construction_clock.lock().unwrap() = expires_at + Duration::seconds(1);
+                *construction_clock.lock().unwrap() = expires_at + Duration::from_secs(1);
                 Ok(RuntimeService::default())
             },
             move |_| async move {
@@ -1654,7 +1659,11 @@ mod tests {
         capabilities: Vec<Capability>,
     ) -> CapabilityHandle {
         let bearer = store
-            .issue(principal, capabilities, Utc::now() + Duration::minutes(10))
+            .issue(
+                principal,
+                capabilities,
+                types::WireTimestamp::now() + Duration::from_mins(10),
+            )
             .await
             .expect("token issues")
             .expose_once();
@@ -1732,7 +1741,7 @@ mod tests {
             .issue(
                 principal.clone(),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::milliseconds(250),
+                types::WireTimestamp::now() + Duration::from_millis(250),
             )
             .await
             .expect("token issues")

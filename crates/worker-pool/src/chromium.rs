@@ -3886,7 +3886,7 @@ impl crate::CaptureEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
         let _front = self.bring_page_to_front(&page).await;
-        let captured_at = chrono::Utc::now();
+        let captured_at = types::WireTimestamp::now();
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
                 bounded_cdp(

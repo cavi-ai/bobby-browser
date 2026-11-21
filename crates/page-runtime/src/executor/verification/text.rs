@@ -234,10 +234,11 @@ impl CommandVerifier for Text {
                             )
                             .await;
                         }
-                        let settle_budget = (envelope.deadline - Utc::now())
-                            .to_std()
-                            .unwrap_or_default()
-                            .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
+                        let settle_budget = std::time::Duration::try_from(
+                            envelope.deadline - types::WireTimestamp::now(),
+                        )
+                        .unwrap_or_default()
+                        .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
                         match worker_pool::navigation_or_default(lease.worker().navigation())
                             .settle_page(page_id, settle_budget, None)
                             .await

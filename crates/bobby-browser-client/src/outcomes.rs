@@ -416,7 +416,7 @@ pub struct ScreenshotOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub captured_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub captured_at: Option<crate::WireTimestamp>,
 }
 
 /// Upper bound on [`Evidence::Wait`]'s `observed` value, in characters.

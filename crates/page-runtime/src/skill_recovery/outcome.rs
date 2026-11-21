@@ -228,7 +228,7 @@ fn recovery_receipt(
                 })
             })
             .collect::<Result<Vec<_>, CommandError>>()?,
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .map_err(skill_contract_error)
 }
@@ -303,7 +303,7 @@ impl SkillRecoveryCoordinator {
         let mut skills = self.skills.lock().await;
         let before = skills.clone();
         skills
-            .record_outcome(decision, outcome, Utc::now())
+            .record_outcome(decision, outcome, types::WireTimestamp::now())
             .map_err(skill_failure_error)?;
         let completed = skills.session_state().clone();
         if let Err(error) = replace_skill_state(&self.skill_state, &completed) {
@@ -723,7 +723,7 @@ impl SkillRecoveryCoordinator {
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: envelope.command_id.clone(),
                 phase: CommandPhase::Recovering,
                 envelope: None,
@@ -743,7 +743,7 @@ impl SkillRecoveryCoordinator {
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: envelope.command_id.clone(),
                 phase,
                 envelope: None,

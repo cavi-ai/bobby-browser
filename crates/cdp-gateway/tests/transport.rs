@@ -3,9 +3,9 @@ mod support;
 use std::{collections::BTreeSet, future::IntoFuture, sync::Arc};
 
 use cdp_gateway::{CdpGateway, MethodRegistry};
-use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use types::{Capability, PrincipalId};
 
@@ -18,7 +18,7 @@ async fn websocket_dispatches_multiple_requests_concurrently_and_preserves_ids()
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::FileDownload],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -74,7 +74,7 @@ async fn websocket_dispatches_multiple_requests_concurrently_and_preserves_ids()
 async fn websocket_drains_generation_teardown_events_before_target_disappears() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let session = types::SessionId::new();
     let runtime_session = session.0.to_string();
     let runtime = Arc::new(support::StaticRuntime {
@@ -94,7 +94,7 @@ async fn websocket_drains_generation_teardown_events_before_target_disappears() 
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::FileDownload],
-            now + Duration::minutes(5),
+            now + Duration::from_mins(5),
         )
         .await
         .unwrap()

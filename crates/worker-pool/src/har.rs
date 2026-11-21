@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -74,9 +73,9 @@ fn iso_8601_from_unix_ms(unix_ms: f64) -> String {
     } else {
         0
     };
-    DateTime::<Utc>::from_timestamp_millis(millis)
-        .unwrap_or(DateTime::UNIX_EPOCH)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
+    types::WireTimestamp::from_millisecond(millis)
+        .unwrap_or_else(|_| types::WireTimestamp::from_second(0).expect("valid epoch"))
+        .rfc3339_millis()
 }
 
 pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {

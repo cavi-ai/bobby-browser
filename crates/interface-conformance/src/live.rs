@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
-use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, CapabilityHandle};
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tempfile::TempDir;
 use types::{Capability, PrincipalId, RequestContext};
@@ -44,7 +44,7 @@ impl ChromeRuntimeHarness {
             .await
             .expect("build real Chrome runtime");
         let authority = Arc::new(AuthorityStore::in_memory());
-        let expires = Utc::now() + Duration::minutes(5);
+        let expires = types::WireTimestamp::now() + Duration::from_mins(5);
         let token = authority
             .issue(
                 PrincipalId::from_uuid(uuid::Uuid::new_v4()),
@@ -79,7 +79,7 @@ impl ChromeRuntimeHarness {
 
     pub fn context(&self) -> RequestContext {
         self.handle
-            .context(Utc::now() + Duration::seconds(30), None)
+            .context(types::WireTimestamp::now() + Duration::from_secs(30), None)
     }
     pub fn site_url(&self) -> String {
         self.site.base_url()

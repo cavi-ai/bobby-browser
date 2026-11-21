@@ -37,7 +37,7 @@ impl CdpConnection {
                 let mut state = self.automation_boundary.lock().await;
                 if state.as_ref().is_some_and(|pending| {
                     pending.phase == AutomationBoundaryPhase::Pending
-                        && pending.expires_at > Utc::now()
+                        && pending.expires_at > types::WireTimestamp::now()
                 }) {
                     return CdpResponse::failure(
                         &request,
@@ -64,7 +64,7 @@ impl CdpConnection {
                         attempt_id: attempt_id.clone(),
                         session_id: session_id.clone(),
                         page_id: Some(page_id.clone()),
-                        deadline: Utc::now() + Duration::seconds(30),
+                        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                         command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                             InspectCommand::default(),
                         )),
@@ -120,7 +120,7 @@ impl CdpConnection {
                 evidence: evidence.clone(),
                 recovery_history: vec![],
                 recovery_receipts: vec![],
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             };
             match self.runtime.checkpoint(ctx, checkpoint, evidence).await {
                 Ok(saved) => {
@@ -131,7 +131,7 @@ impl CdpConnection {
                         checkpoint_id: checkpoint_id.clone(),
                         session_id,
                         page_id,
-                        expires_at: Utc::now() + Duration::seconds(30),
+                        expires_at: types::WireTimestamp::now() + Duration::from_secs(30),
                         phase: AutomationBoundaryPhase::Pending,
                     });
                     self.record_interface_event(

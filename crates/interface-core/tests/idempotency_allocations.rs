@@ -2,8 +2,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use chrono::{Duration, Utc};
 use interface_core::{canonical_sha256, IdempotencyReservation, IdempotencyStore, RetainedOutcome};
+use jiff::SignedDuration as Duration;
 use serde::{Deserialize, Serialize};
 use types::{CorrelationId, IdempotencyKey, InterfaceOperation, PrincipalId};
 
@@ -76,7 +76,7 @@ async fn reserve(
     owner: &PrincipalId,
     key: &str,
 ) -> IdempotencyReservation<Outcome> {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     store
         .reserve(
             owner.clone(),
@@ -84,7 +84,7 @@ async fn reserve(
             InterfaceOperation::SubmitCommand,
             [0; 32],
             now,
-            now + Duration::seconds(2),
+            now + Duration::from_secs(2),
             CorrelationId::new(),
         )
         .await
@@ -110,7 +110,7 @@ fn ledger_checkpoints_and_loading_do_not_clone_entries_for_checksums() {
             serde_json::json!({
                 "principalId": owner, "key": format!("old-{index}"),
                 "operation": InterfaceOperation::SubmitCommand, "canonicalSha256": vec![0; 32],
-                "expiresAt": Utc::now() + Duration::hours(1), "lastUsed": index + 1,
+                "expiresAt": types::WireTimestamp::now() + Duration::from_hours(1), "lastUsed": index + 1,
                 "state": {"kind": "retained", "value": payload}
             })
         })
@@ -148,7 +148,7 @@ fn ledger_checkpoints_and_loading_do_not_clone_entries_for_checksums() {
         panic!("fresh reservation")
     };
     runtime
-        .block_on(store.finish(permit, Outcome("fresh".into()), Utc::now()))
+        .block_on(store.finish(permit, Outcome("fresh".into()), types::WireTimestamp::now()))
         .unwrap();
     drop(store);
     let original = std::fs::read(&path).unwrap();

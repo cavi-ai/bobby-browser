@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use broker::{router, AppState};
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandError, CommandId, CommandOutcome, ErrorCode,
@@ -115,7 +115,7 @@ fn envelope() -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id: types::SessionId::new(),
         page_id: Some(types::PageId::new()),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
     }
 }
@@ -126,7 +126,7 @@ async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value
         .issue(
             PrincipalId::from_uuid(Uuid::from_u128(99)),
             [Capability::BrowserMutate],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -148,8 +148,7 @@ async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value
                 .header("x-correlation-id", "10000000-0000-0000-0000-000000000099")
                 .header(
                     "x-deadline",
-                    (Utc::now() + Duration::minutes(2))
-                        .to_rfc3339_opts(SecondsFormat::Millis, true),
+                    (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
                 )
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&envelope()).unwrap()))

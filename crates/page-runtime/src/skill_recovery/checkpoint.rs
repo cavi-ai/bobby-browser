@@ -84,7 +84,7 @@ impl SkillRecoveryCoordinator {
             || checkpoint.page_id != *page_id
             || proof.checkpoint_id != checkpoint.checkpoint_id
             || proof.session_id != checkpoint.session_id
-            || !proof.is_fresh_at(Utc::now())
+            || !proof.is_fresh_at(types::WireTimestamp::now())
             || proof.attestation.sha256 != verified.digest()
             || !boundary_matches
         {

@@ -230,12 +230,10 @@ pub(super) fn tactic_budget(
     }
 }
 
-pub(super) fn remaining_duration(
-    deadline: chrono::DateTime<Utc>,
-) -> Result<Duration, CommandError> {
+pub(super) fn remaining_duration(deadline: types::WireTimestamp) -> Result<Duration, CommandError> {
     let millis = deadline
-        .signed_duration_since(Utc::now())
-        .num_milliseconds();
+        .duration_since(types::WireTimestamp::now())
+        .as_millis();
     if millis <= 0 {
         Err(deadline_error("command deadline has elapsed"))
     } else {

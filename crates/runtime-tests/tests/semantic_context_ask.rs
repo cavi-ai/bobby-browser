@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
 use config::{NodeConfig, NodeKind};
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use test_site::{FixtureSite, Route};
 use types::{
@@ -150,7 +150,7 @@ async fn ask_after_a_snapshot(
         .issue(
             types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             CAPABILITIES,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -160,7 +160,7 @@ async fn ask_after_a_snapshot(
     let ctx = types::RequestContext::new_for_test(
         authed.capability_handle().principal_id().clone(),
         CAPABILITIES,
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     );
     let session = runtime
         .create_session(CreateSessionRequest {
@@ -199,7 +199,7 @@ async fn ask_after_a_snapshot(
                 attempt_id: AttemptId::new(),
                 session_id: session.id.clone(),
                 page_id: Some(page.id.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(command),
             })
             .await;

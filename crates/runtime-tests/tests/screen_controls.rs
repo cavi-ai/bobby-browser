@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
 use config::{NodeConfig, NodeKind};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
@@ -192,7 +192,7 @@ async fn follow_export(
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(60),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(60),
             command,
         };
         last = Some(runtime.submit_with_vision_capability(envelope, true).await);

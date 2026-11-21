@@ -7,7 +7,7 @@ use broker::{
     SharedRuntimeControl,
 };
 use checkpoint_store::CheckpointStore;
-use chrono::Utc;
+
 use futures_util::StreamExt;
 use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::RuntimeService;
@@ -176,7 +176,7 @@ async fn impact_lists_sessions_pages_and_recoverable_workflows() {
     println!("{body}");
     assert_eq!(body["connections"], 0);
     assert_eq!(body["inFlightCommands"], 0);
-    assert!(chrono::DateTime::parse_from_rfc3339(body["takenAt"].as_str().unwrap()).is_ok());
+    assert!(types::WireTimestamp::parse_rfc3339(body["takenAt"].as_str().unwrap()).is_ok());
     let sessions = body["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2);
     let find = |profile: &str| {
@@ -280,6 +280,6 @@ fn checkpoint(session_id: &SessionId, workflow_id: &WorkflowId, url: &str) -> Wo
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }

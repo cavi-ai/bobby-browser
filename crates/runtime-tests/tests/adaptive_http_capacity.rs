@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use network_engine::state::HttpStateSnapshot;
 use network_engine::{DirectHttpExecutor, HttpCandidate, NetworkPolicy};
 use sdk_core::RuntimeService;
@@ -69,7 +69,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         // The real bound on this test. The runtime refuses a command whose
         // deadline has elapsed, so a `Completed` outcome proves the work fit
         // inside it. Sized for a loaded machine, not for a quiet one.
-        deadline: Utc::now() + Duration::seconds(120),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(120),
         command: RuntimeCommand::Primitive(command),
     }
 }

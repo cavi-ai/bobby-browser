@@ -3,7 +3,7 @@ use crate::server::playwright_semantic_click::{attached_connection, CapturingRun
 use std::sync::{Arc, Mutex as StdMutex};
 
 async fn fixture() -> (Arc<CapturingRuntime>, CdpConnection, String) {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let runtime = Arc::new(CapturingRuntime {
         sessions: vec![types::SessionState {
             id: SessionId::new(),
@@ -24,7 +24,7 @@ async fn fixture() -> (Arc<CapturingRuntime>, CdpConnection, String) {
 fn context(connection: &CdpConnection) -> RequestContext {
     connection
         .handle
-        .context(Utc::now() + Duration::seconds(30), None)
+        .context(types::WireTimestamp::now() + Duration::from_secs(30), None)
 }
 
 fn request(method: &str, session: &str, params: Value) -> CdpRequest {

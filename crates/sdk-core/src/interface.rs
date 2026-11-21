@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStoreError;
-use chrono::Utc;
+
 use interface_core::{
     canonical_sha256, command_identity_sha256, AuthorizationGuard, CapabilityHandle,
     IdempotencyReservation, IdempotencyStore, InterfaceResult, RuntimeInterface,
@@ -294,7 +294,7 @@ impl AuthenticatedRuntime {
                 key,
                 InterfaceOperation::SubmitCommand,
                 digest,
-                Utc::now(),
+                types::WireTimestamp::now(),
                 ctx.deadline,
                 ctx.correlation_id.clone(),
             )
@@ -325,7 +325,7 @@ impl AuthenticatedRuntime {
                     )
                     .await;
                 self.idempotency
-                    .finish(permit, outcome.clone(), Utc::now())
+                    .finish(permit, outcome.clone(), types::WireTimestamp::now())
                     .await?;
                 Ok(outcome)
             }
@@ -374,7 +374,7 @@ impl AuthenticatedRuntime {
                 key,
                 InterfaceOperation::SubmitCommand,
                 digest,
-                Utc::now(),
+                types::WireTimestamp::now(),
                 ctx.deadline,
                 ctx.correlation_id.clone(),
             )
@@ -398,7 +398,7 @@ impl AuthenticatedRuntime {
                 {
                     Ok((outcome, checkpoint_id)) => {
                         self.idempotency
-                            .finish(permit, outcome.clone(), Utc::now())
+                            .finish(permit, outcome.clone(), types::WireTimestamp::now())
                             .await?;
                         Ok((outcome, Some(checkpoint_id)))
                     }
@@ -592,7 +592,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 key,
                 InterfaceOperation::CreateSession,
                 digest,
-                Utc::now(),
+                types::WireTimestamp::now(),
                 ctx.deadline,
                 ctx.correlation_id.clone(),
             )
@@ -609,7 +609,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
                             .finish(
                                 permit,
                                 SessionCheckpointOutcome::Session(session.clone()),
-                                Utc::now(),
+                                types::WireTimestamp::now(),
                             )
                             .await?;
                         Ok(session)
@@ -794,7 +794,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 key,
                 InterfaceOperation::CreateCheckpoint,
                 digest,
-                Utc::now(),
+                types::WireTimestamp::now(),
                 ctx.deadline,
                 ctx.correlation_id.clone(),
             )
@@ -811,7 +811,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
                             .finish(
                                 permit,
                                 SessionCheckpointOutcome::Checkpoint(checkpoint.clone()),
-                                Utc::now(),
+                                types::WireTimestamp::now(),
                             )
                             .await?;
                         Ok(checkpoint)
@@ -1076,7 +1076,7 @@ mod recovery_integrity_tests {
             .issue(
                 types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
                 Capability::ALL.to_vec(),
-                Utc::now() + chrono::Duration::minutes(10),
+                types::WireTimestamp::now() + jiff::SignedDuration::from_mins(10),
             )
             .await
             .unwrap();
@@ -1105,7 +1105,7 @@ mod recovery_integrity_tests {
             evidence: vec![],
             recovery_history: vec![],
             recovery_receipts: vec![],
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         };
         for key in [
             None,
@@ -1113,7 +1113,10 @@ mod recovery_integrity_tests {
         ] {
             let error = api
                 .checkpoint(
-                    handle.context(Utc::now() + chrono::Duration::seconds(30), key),
+                    handle.context(
+                        types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
+                        key,
+                    ),
                     checkpoint.clone(),
                     vec![],
                 )
@@ -1124,7 +1127,10 @@ mod recovery_integrity_tests {
         }
         assert_eq!(api.checkpoint_dispatch_count(), 0);
         let info = api
-            .runtime_info(handle.context(Utc::now() + chrono::Duration::seconds(30), None))
+            .runtime_info(handle.context(
+                types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
+                None,
+            ))
             .await
             .unwrap();
         assert!(info

@@ -5,8 +5,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use cdp_gateway::{CdpConnection, CdpErrorCode, CdpEvent, CdpRequest, MethodRegistry};
-use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use serde_json::json;
 use types::{
     Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, Evidence, OpenPageRequest,
@@ -98,7 +98,7 @@ async fn unsupported_methods_are_explicit_and_never_forwarded() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap();
@@ -133,7 +133,7 @@ async fn event_queue_fails_closed_at_the_declared_bound() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap();
@@ -277,7 +277,7 @@ async fn every_manifest_method_rejects_malformed_params_and_missing_capability_b
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

@@ -59,7 +59,7 @@ fn opening_validates_and_indexes_without_decoding_the_payload_twice() {
     let mut file = std::fs::File::create(&path).unwrap();
     let record = JournalRecord {
         sequence: 7,
-        recorded_at: chrono::Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: id.clone(),
         phase: CommandPhase::Prepared,
         envelope: None,

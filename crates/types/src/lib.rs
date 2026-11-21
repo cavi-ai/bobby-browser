@@ -29,6 +29,8 @@ mod recovery;
 mod skills;
 #[path = "../../bobby-browser-client/src/state.rs"]
 mod state;
+#[path = "../../bobby-browser-client/src/timestamp.rs"]
+mod timestamp;
 mod upload;
 
 pub use auth::*;
@@ -44,4 +46,5 @@ pub use presets::{capability_effect, CapabilityPreset};
 pub use recovery::*;
 pub use skills::*;
 pub use state::*;
+pub use timestamp::WireTimestamp;
 pub use upload::upload_source_reference;

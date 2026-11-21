@@ -57,6 +57,7 @@ mod outcomes;
 mod recovery;
 mod skills;
 mod state;
+mod timestamp;
 
 pub use auth::*;
 pub use challenges::*;
@@ -72,3 +73,4 @@ pub use outcomes::*;
 pub use recovery::*;
 pub use skills::*;
 pub use state::*;
+pub use timestamp::WireTimestamp;

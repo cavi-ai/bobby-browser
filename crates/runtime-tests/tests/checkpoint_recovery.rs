@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use checkpoint_store::CheckpointStore;
-use chrono::Utc;
+
 use config::BrowserConfig;
 use page_runtime::RecoveryCoordinator;
 use types::{
@@ -41,7 +41,7 @@ fn checkpoint(
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }
 

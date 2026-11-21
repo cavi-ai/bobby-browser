@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
@@ -327,7 +327,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -515,7 +515,7 @@ async fn page_scoped_text_wait_matches_body_text() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -626,7 +626,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(60),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(60),
             command,
         })
     };
@@ -851,7 +851,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             attempt_id: attempt_id.clone(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                 types::InspectCommand::default(),
             )),
@@ -893,7 +893,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
                 recovery_receipts: Vec::new(),
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             },
             vec![inspect_id],
         )
@@ -908,7 +908,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             attempt_id,
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(60),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(60),
             command: RuntimeCommand::Intent(IntentCommand::SubmitAndVerify(
                 types::SubmitAndVerifyIntent {
                     purpose: "Save the customer priority".into(),
@@ -1019,7 +1019,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -1178,7 +1178,7 @@ async fn control_action_reports_revealed_conditional_controls() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -1347,7 +1347,7 @@ async fn a11y_snapshot_exposes_link_urls() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(45),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(45),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -1447,7 +1447,7 @@ async fn a11y_snapshot_scopes_to_a_target_subtree() {
             attempt_id: AttemptId::new(),
             session_id: probe.session_id.clone(),
             page_id: Some(probe.page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
                 types::AccessibilitySnapshotCommand {
                     max_nodes: None,
@@ -1542,7 +1542,7 @@ async fn a11y_snapshot_descends_into_iframes() {
             attempt_id: AttemptId::new(),
             session_id: probe.session_id.clone(),
             page_id: Some(probe.page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
                 types::AccessibilitySnapshotCommand {
                     max_nodes: None,
@@ -1624,7 +1624,7 @@ async fn a11y_snapshot_descends_into_iframes() {
             attempt_id: AttemptId::new(),
             session_id: probe.session_id.clone(),
             page_id: Some(probe.page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(
                 types::ControlActionCommand {
                     target: control_target,

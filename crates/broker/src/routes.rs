@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::Utc;
+
 use interface_core::{canonical_sha256, Event, EventGap, IdempotencyReservation};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use task_scheduler::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
@@ -255,7 +255,9 @@ async fn submit_command(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ProtocolError> {
     let envelope: CommandEnvelope = parse_json(body, &request.context.correlation_id)?;
-    if envelope.deadline <= Utc::now() || envelope.deadline > request.context.deadline {
+    if envelope.deadline <= types::WireTimestamp::now()
+        || envelope.deadline > request.context.deadline
+    {
         return Err(ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
             "command deadline must be live and no later than the request deadline",
@@ -379,9 +381,9 @@ async fn events(
             query.limit,
         ));
     }
-    let wait = (request.context.deadline - Utc::now())
-        .to_std()
-        .map_err(|_| deadline_error(&request.context.correlation_id))?;
+    let wait =
+        std::time::Duration::try_from(request.context.deadline - types::WireTimestamp::now())
+            .map_err(|_| deadline_error(&request.context.correlation_id))?;
     match tokio::time::timeout(
         wait,
         state.events.read_after_for(
@@ -547,7 +549,7 @@ async fn artifact(
 struct IssuePrincipalRequest {
     principal_id: Uuid,
     capabilities: Vec<types::Capability>,
-    expires_at: chrono::DateTime<Utc>,
+    expires_at: types::WireTimestamp,
 }
 
 /// Longest lifetime an interface-issued principal token may be granted.
@@ -587,7 +589,14 @@ async fn issue_principal(
             None,
         )));
     }
-    if input.expires_at > Utc::now() + chrono::Duration::days(MAX_TOKEN_TTL_DAYS) {
+    if input.expires_at
+        > types::WireTimestamp::now()
+            + jiff::SignedDuration::from_hours(
+                (MAX_TOKEN_TTL_DAYS)
+                    .checked_mul(24)
+                    .expect("duration overflow"),
+            )
+    {
         return Err(ProtocolError::invalid_with(
             InterfaceErrorCode::InvalidRequest,
             request.context.correlation_id.clone(),
@@ -670,9 +679,9 @@ struct JobStatusResponse {
     priority: String,
     status: String,
     payload: serde_json::Value,
-    created_at: chrono::DateTime<Utc>,
-    started_at: Option<chrono::DateTime<Utc>>,
-    completed_at: Option<chrono::DateTime<Utc>>,
+    created_at: types::WireTimestamp,
+    started_at: Option<types::WireTimestamp>,
+    completed_at: Option<types::WireTimestamp>,
     retry_count: u32,
     max_retries: u32,
     result: Option<serde_json::Value>,
@@ -865,7 +874,7 @@ async fn submit_job(
                 key,
                 InterfaceOperation::SubmitJob,
                 digest,
-                Utc::now(),
+                types::WireTimestamp::now(),
                 request.context.deadline,
                 request.context.correlation_id.clone(),
             )
@@ -878,7 +887,7 @@ async fn submit_job(
                     Ok(outcome) => {
                         state
                             .job_idempotency
-                            .finish(permit, outcome.clone(), Utc::now())
+                            .finish(permit, outcome.clone(), types::WireTimestamp::now())
                             .await
                             .map_err(ProtocolError::from)?;
                         outcome
@@ -1119,9 +1128,9 @@ pub(crate) async fn validate_request_boundary(
         .get::<AuthenticatedRequest>()
         .expect("authentication inserts trusted request context");
     let correlation_id = authenticated.context.correlation_id.clone();
-    let remaining = (authenticated.context.deadline - Utc::now())
-        .to_std()
-        .map_err(|_| deadline_error(&correlation_id))?;
+    let remaining =
+        std::time::Duration::try_from(authenticated.context.deadline - types::WireTimestamp::now())
+            .map_err(|_| deadline_error(&correlation_id))?;
     let body_deadline = tokio::time::Instant::now() + remaining;
     let path = request.uri().path();
     let bodyful = (request.method() == Method::POST

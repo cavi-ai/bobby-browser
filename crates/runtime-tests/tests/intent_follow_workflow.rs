@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
@@ -33,7 +33,7 @@ fn primitive_envelope(
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -53,7 +53,7 @@ fn intent_envelope(
         attempt_id,
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(command),
     }
 }
@@ -256,7 +256,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
             attempt_id: attempt_id.clone(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                 types::InspectCommand::default(),
             )),
@@ -296,7 +296,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
                 recovery_receipts: Vec::new(),
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             },
             vec![inspect_id],
         )

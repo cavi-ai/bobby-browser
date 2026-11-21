@@ -2228,7 +2228,11 @@ fn run_init(
         None => bootstrap_local::default_bootstrap_path()?,
     };
     let material = bootstrap_local::generate_bootstrap_for_preset(
-        chrono::Duration::days(i64::from(ttl_days)),
+        jiff::SignedDuration::from_hours(
+            (i64::from(ttl_days))
+                .checked_mul(24)
+                .expect("duration overflow"),
+        ),
         preset,
     )?;
     bootstrap_local::write_bootstrap_env(&path, &material, force)?;
@@ -3203,7 +3207,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = doctor_config_fixture(root.path());
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
         let original = std::fs::read_to_string(&bootstrap).unwrap();
         let stripped = original.replace(",browser:fingerprint", "");
@@ -4315,18 +4320,30 @@ model = "mlx-community/example-selected"
 
     #[test]
     fn bootstrap_expiry_check_fails_when_expired_warns_when_near_and_passes_beyond() {
-        let expired = check_bootstrap_expiry(chrono::Utc::now() - chrono::Duration::hours(1));
+        let expired = check_bootstrap_expiry(
+            types::WireTimestamp::now() - jiff::SignedDuration::from_hours(1),
+        );
         assert_eq!(expired.status, DoctorStatus::Fail);
         assert!(expired.detail.contains("expired"));
 
         let soon = check_bootstrap_expiry(
-            chrono::Utc::now() + chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS - 1),
+            types::WireTimestamp::now()
+                + jiff::SignedDuration::from_hours(
+                    (BOOTSTRAP_EXPIRY_WARN_DAYS - 1)
+                        .checked_mul(24)
+                        .expect("duration overflow"),
+                ),
         );
         assert_eq!(soon.status, DoctorStatus::Warn);
         assert!(soon.detail.contains("expires in"));
 
         let later = check_bootstrap_expiry(
-            chrono::Utc::now() + chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS + 10),
+            types::WireTimestamp::now()
+                + jiff::SignedDuration::from_hours(
+                    (BOOTSTRAP_EXPIRY_WARN_DAYS + 10)
+                        .checked_mul(24)
+                        .expect("duration overflow"),
+                ),
         );
         assert_eq!(later.status, DoctorStatus::Ok);
         assert!(later.detail.contains("valid"));
@@ -4446,7 +4463,8 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         let root = tempfile::tempdir().unwrap();
         let config = doctor_config_fixture(root.path());
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor_with_profile(
@@ -4508,7 +4526,8 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         let root = tempfile::tempdir().unwrap();
         let config = doctor_config_fixture(root.path());
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
@@ -4832,7 +4851,8 @@ auth = "oauth-device-code"
         let config = root.path().join("config.toml");
         std::fs::write(&config, "").unwrap();
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
@@ -4855,7 +4875,8 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         )
         .unwrap();
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
@@ -4900,7 +4921,8 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         )
         .unwrap();
         let bootstrap = root.path().join("bootstrap.env");
-        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material =
+            bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(720)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
@@ -4922,7 +4944,7 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         std::fs::write(&config, "").unwrap();
         let bootstrap = root.path().join("bootstrap.env");
         let material = bootstrap_local::generate_bootstrap_for_preset(
-            chrono::Duration::days(30),
+            jiff::SignedDuration::from_hours(720),
             bootstrap_local::BootstrapPreset::Agent,
         )
         .unwrap();
@@ -4946,7 +4968,7 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         std::fs::write(&config, "").unwrap();
         let bootstrap = root.path().join("bootstrap.env");
         let material = bootstrap_local::generate_bootstrap_for_preset(
-            chrono::Duration::days(30),
+            jiff::SignedDuration::from_hours(720),
             bootstrap_local::BootstrapPreset::Claude,
         )
         .unwrap();
@@ -4986,7 +5008,7 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         let config = doctor_config_fixture(root.path());
         let bootstrap = root.path().join("bootstrap.env");
         let material = bootstrap_local::generate_bootstrap_for_preset(
-            chrono::Duration::hours(-1),
+            jiff::SignedDuration::from_hours(-1),
             bootstrap_local::BootstrapPreset::Agent,
         )
         .unwrap();
@@ -5010,7 +5032,7 @@ endpoint_url = "http://127.0.0.1:8080/propose"
             "agent preset must not widen"
         );
         let loaded = bootstrap_local::load_startup_from_env_file(&bootstrap).unwrap();
-        assert!(loaded.expires_at() > chrono::Utc::now());
+        assert!(loaded.expires_at() > types::WireTimestamp::now());
         let action = report
             .actions
             .iter()

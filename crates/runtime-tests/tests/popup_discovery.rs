@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
@@ -121,7 +121,7 @@ async fn popup_opens_as_a_listed_page() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -189,7 +189,7 @@ async fn popup_opens_as_a_listed_page() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(popup.page_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                 types::InspectCommand::default(),
             )),
@@ -238,7 +238,7 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page_id),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -373,7 +373,7 @@ async fn popup_closing_during_wait_is_not_registered() {
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page_id),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(command),
         })
     };
@@ -402,7 +402,7 @@ async fn popup_closing_during_wait_is_not_registered() {
                 attempt_id: AttemptId::new(),
                 session_id: session.id.clone(),
                 page_id: Some(opener.id.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(
                     ClickAndWaitForPopupCommand {
                         selector: "#short-popup".into(),

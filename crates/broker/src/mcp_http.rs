@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
+
 use interface_core::CapabilityHandle;
 use mcp_gateway::Server;
 use tokio::sync::RwLock;
@@ -40,7 +40,7 @@ impl McpServers {
         let principal = handle.principal_id().clone();
         if let Some((cached_handle, server)) = self.entries.read().await.get(&principal) {
             if cached_handle.capabilities() == handle.capabilities()
-                && cached_handle.is_valid_at(Utc::now())
+                && cached_handle.is_valid_at(types::WireTimestamp::now())
             {
                 return server.clone();
             }
@@ -48,7 +48,7 @@ impl McpServers {
         let mut entries = self.entries.write().await;
         if let Some((cached_handle, server)) = entries.get(&principal) {
             if cached_handle.capabilities() == handle.capabilities()
-                && cached_handle.is_valid_at(Utc::now())
+                && cached_handle.is_valid_at(types::WireTimestamp::now())
             {
                 return server.clone();
             }
@@ -101,7 +101,11 @@ pub(crate) async fn post_mcp(
         Some(bearer) => bearer,
         None => return ProtocolError::authentication().into_response(),
     };
-    let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
+    let handle = match state
+        .authority
+        .authenticate(&bearer, types::WireTimestamp::now())
+        .await
+    {
         Ok(handle) => handle,
         // `bearer` must never be logged or Debug-printed on the failure path.
         Err(error) => return ProtocolError::from(error).into_response(),
@@ -175,7 +179,11 @@ pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -
     let Some(bearer) = bearer_token(&headers) else {
         return ProtocolError::authentication().into_response();
     };
-    let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
+    let handle = match state
+        .authority
+        .authenticate(&bearer, types::WireTimestamp::now())
+        .await
+    {
         Ok(handle) => handle,
         Err(error) => return ProtocolError::from(error).into_response(),
     };
@@ -211,7 +219,7 @@ pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -
             // a stream whose principal loses SubscribeEvents keeps its
             // channel (clients require it before they will POST) but stops
             // receiving event data until the grant returns.
-            if !stream.handle.is_valid_at(Utc::now()) {
+            if !stream.handle.is_valid_at(types::WireTimestamp::now()) {
                 return None;
             }
             stream
@@ -239,7 +247,10 @@ pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -
 /// Whether this principal may be sent runtime events: the `SubscribeEvents` gate,
 /// evaluated through the same guard `GET /v1/events` and `events_read` use.
 fn authorized_for_events(handle: &CapabilityHandle) -> bool {
-    let context = handle.context(Utc::now() + chrono::Duration::minutes(1), None);
+    let context = handle.context(
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(1),
+        None,
+    );
     interface_core::AuthorizationGuard::new(handle.clone())
         .authorize(&context, types::InterfaceOperation::SubscribeEvents)
         .is_ok()

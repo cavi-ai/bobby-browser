@@ -301,7 +301,11 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
             Ok(heal) => {
                 match bootstrap_local::rotate_expired_bootstrap(
                     &bootstrap_path,
-                    chrono::Duration::days(bootstrap_local::DEFAULT_TTL_DAYS),
+                    jiff::SignedDuration::from_hours(
+                        (bootstrap_local::DEFAULT_TTL_DAYS)
+                            .checked_mul(24)
+                            .expect("duration overflow"),
+                    ),
                 ) {
                     Ok(rotate) if rotate.rotated => actions.push(DoctorFixAction {
                         status: DoctorFixStatus::Fixed,
@@ -335,8 +339,8 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
             }),
         }
     } else {
-        match bootstrap_local::generate_bootstrap(chrono::Duration::days(
-            bootstrap_local::DEFAULT_TTL_DAYS,
+        match bootstrap_local::generate_bootstrap(jiff::SignedDuration::from_hours(
+            bootstrap_local::DEFAULT_TTL_DAYS * 24,
         ))
         .and_then(|material| {
             bootstrap_local::write_bootstrap_env(&bootstrap_path, &material, false)

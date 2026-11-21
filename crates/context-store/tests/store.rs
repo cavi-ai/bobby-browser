@@ -517,7 +517,7 @@ async fn forget_removes_memory_and_file() {
 async fn sweep_drops_only_expired_records() {
     let temp = tempfile::tempdir().unwrap();
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
-    let today = day_since_epoch(chrono::Utc::now());
+    let today = day_since_epoch(jiff::Timestamp::now());
     store
         .upsert_site("https://fresh.example", site(&["Email"], today))
         .await;
@@ -644,10 +644,17 @@ async fn failed_flush_keeps_data_session_only() {
 
 #[test]
 fn day_precision_is_coarse() {
-    let morning = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-    let later = chrono::DateTime::from_timestamp(1_700_003_600, 0).unwrap();
+    let morning = jiff::Timestamp::new(1_700_000_000, 0).unwrap();
+    let later = jiff::Timestamp::new(1_700_003_600, 0).unwrap();
     assert_eq!(day_since_epoch(morning), day_since_epoch(later));
     assert_eq!(day_since_epoch(morning), 19675);
+    assert_eq!(day_since_epoch(jiff::Timestamp::new(0, 0).unwrap()), 0);
+    assert_eq!(
+        day_since_epoch(jiff::Timestamp::new(-86_401, 0).unwrap()),
+        0
+    );
+    assert_eq!(day_since_epoch(jiff::Timestamp::new(86_399, 0).unwrap()), 0);
+    assert_eq!(day_since_epoch(jiff::Timestamp::new(86_400, 0).unwrap()), 1);
 }
 
 #[test]

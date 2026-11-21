@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use acp_gateway::AcpServer;
-use chrono::{DateTime, Utc};
+
 use config::AppConfig;
 use interface_core::{AuthorityStore, SessionOwnershipRegistry};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -55,7 +55,7 @@ async fn run() -> anyhow::Result<()> {
     let runtime = RuntimeService::build(&config)
         .await
         .map_err(anyhow::Error::new)?;
-    if !handle.is_valid_at(Utc::now()) {
+    if !handle.is_valid_at(types::WireTimestamp::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
     let (_ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
@@ -89,11 +89,11 @@ async fn explicit_startup_handle(
     if capabilities.is_empty() {
         anyhow::bail!("startup capabilities must be explicit and nonempty");
     }
-    let expires_at =
-        DateTime::parse_from_rfc3339(&required_env("AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT")?)
-            .map_err(|_| anyhow::anyhow!("startup expiry is invalid"))?
-            .with_timezone(&Utc);
-    if expires_at <= Utc::now() {
+    let expires_at = types::WireTimestamp::parse_rfc3339(&required_env(
+        "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
+    )?)
+    .map_err(|_| anyhow::anyhow!("startup expiry is invalid"))?;
+    if expires_at <= types::WireTimestamp::now() {
         anyhow::bail!("startup credential is expired");
     }
     let handle = AuthorityStore::with_capacity(1)

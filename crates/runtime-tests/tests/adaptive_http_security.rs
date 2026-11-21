@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use network_engine::state::HttpStateSnapshot;
 use network_engine::{DestinationPolicy, DirectHttpExecutor, NetworkPolicy};
 use sdk_core::RuntimeService;
@@ -74,7 +74,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         attempt_id: AttemptId::new(),
         session_id: session.clone(),
         page_id: Some(page.clone()),
-        deadline: Utc::now() + Duration::seconds(15),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(15),
         command: RuntimeCommand::Primitive(command),
     }
 }

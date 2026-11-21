@@ -112,7 +112,7 @@ impl Scope {
             .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
             .header(
                 "x-deadline",
-                (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+                (types::WireTimestamp::now() + jiff::SignedDuration::from_mins(2)).rfc3339(),
             )
     }
 
@@ -136,7 +136,7 @@ impl Scope {
         ] {
             let response = self.http(reqwest::Method::POST, "/v1/principals", &self.bearer)
                 .header("idempotency-key", uuid::Uuid::new_v4().to_string())
-                .json(&json!({"principalId":uuid::Uuid::new_v4(), "capabilities":capabilities,"expiresAt":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339()}))
+                .json(&json!({"principalId":uuid::Uuid::new_v4(), "capabilities":capabilities,"expiresAt":(types::WireTimestamp::now()+jiff::SignedDuration::from_mins(10)).rfc3339()}))
                 .send().await.unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::CREATED);
             let issued: Value = response.json().await.unwrap();
@@ -285,7 +285,7 @@ async fn scope(firefox: bool) -> (Scope, Option<runtime_tests::InstalledFirefoxR
         .map(|cap| cap.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    std::fs::write(root.path().join("bootstrap.env"), format!("# bobby-bootstrap-preset: unrestricted\nAUTOMATION_RUNTIME_BOOTSTRAP_TOKEN={bearer}\nAUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL={}\nAUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES={capabilities}\nAUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT={}\n", uuid::Uuid::new_v4(), (chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339())).unwrap();
+    std::fs::write(root.path().join("bootstrap.env"), format!("# bobby-bootstrap-preset: unrestricted\nAUTOMATION_RUNTIME_BOOTSTRAP_TOKEN={bearer}\nAUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL={}\nAUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES={capabilities}\nAUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT={}\n", uuid::Uuid::new_v4(), (types::WireTimestamp::now()+jiff::SignedDuration::from_hours(1)).rfc3339())).unwrap();
     let mut scope = Scope {
         root,
         selection: r#"{"preference":{"mode":"managedChromium"},"firefox":[]}"#.into(),

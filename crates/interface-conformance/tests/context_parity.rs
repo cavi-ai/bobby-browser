@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -21,7 +21,7 @@ async fn authority_with(capabilities: Vec<Capability>) -> (Arc<AuthorityStore>, 
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             capabilities,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -38,7 +38,7 @@ fn http_request(uri: &str, token: &str) -> Request<Body> {
         .header("x-correlation-id", "10000000-0000-0000-0000-000000000099")
         .header(
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
         )
         .body(Body::empty())
         .unwrap()
@@ -131,7 +131,7 @@ async fn context_answers_are_identical_over_mcp_and_http() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             vec![Capability::PageRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

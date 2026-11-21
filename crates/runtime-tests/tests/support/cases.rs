@@ -5150,7 +5150,7 @@ pub async fn compact_agent_evidence_preserves_journal_diagnostics(rig: &Rig) {
         workflow_id: serde_json::from_value(live.started["workflowId"].clone()).unwrap(),
         session_id: serde_json::from_value(live.session_id.clone()).unwrap(),
         page_id: Some(serde_json::from_value(live.page_id.clone()).unwrap()),
-        deadline: chrono::Utc::now()+chrono::Duration::seconds(30),
+        deadline: types::WireTimestamp::now()+jiff::SignedDuration::from_secs(30),
         command: types::RuntimeCommand::Intent(types::IntentCommand::Locate(types::LocateIntent {
             purpose: "Continue".into(),
             hints: types::IntentHints { role: Some("button".into()), accessible_name: Some("Continue".into()), ..Default::default() },
@@ -7121,7 +7121,7 @@ pub async fn screenshots_name_their_session_and_page(rig: &Rig) {
     assert!(
         shot["capturedAt"]
             .as_str()
-            .is_some_and(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok()),
+            .is_some_and(|at| types::WireTimestamp::parse_rfc3339(at).is_ok()),
         "{shot}"
     );
     live.close().await;

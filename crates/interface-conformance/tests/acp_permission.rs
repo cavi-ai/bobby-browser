@@ -11,8 +11,8 @@ use acp_gateway::{decide, Escalation, EscalationRequest, SessionPolicyGates};
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use broker::testing::{app_with_admin, context_headers, issue_bearer};
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -36,7 +36,7 @@ async fn mcp_server_without_javascript() -> Server {
                 Capability::PageRead,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("authority issues");
@@ -149,7 +149,7 @@ async fn http_denies_the_same_capability_gap_as_missing_capability() {
         "attemptId": uuid::Uuid::new_v4(),
         "sessionId": uuid::Uuid::new_v4(),
         "pageId": uuid::Uuid::new_v4(),
-        "deadline": (Utc::now() + Duration::seconds(30)).to_rfc3339(),
+        "deadline": (types::WireTimestamp::now() + Duration::from_secs(30)).rfc3339(),
         "command": {"kind":"primitive","input":{
             "kind":"evaluateJavaScript",
             "input":{"expression":"1","timeoutMs":1000,"awaitPromise":false}

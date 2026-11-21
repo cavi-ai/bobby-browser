@@ -15,8 +15,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -60,7 +60,7 @@ async fn server_with_capabilities(
     capabilities: Vec<Capability>,
 ) -> Server {
     let authority = AuthorityStore::in_memory();
-    let expires = Utc::now() + Duration::minutes(5);
+    let expires = types::WireTimestamp::now() + Duration::from_mins(5);
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),

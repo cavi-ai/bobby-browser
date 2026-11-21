@@ -10,7 +10,6 @@ use cdp_gateway::{
     parse_frame, CdpConnection, CdpErrorCode, CdpEvent, CdpGateway, CdpRequest, MethodRegistry,
     MAX_FRAME_BYTES as MAX_CDP_FRAME_BYTES, MAX_QUEUED_EVENTS,
 };
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +19,7 @@ use interface_core::{
     EventGapReason, EventStore, IdempotencyReservation, IdempotencyStore, RuntimeInterface,
     SessionOwnershipAuthority, SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{
     protocol::{MAX_FRAME_BYTES as MAX_MCP_FRAME_BYTES, MCP_PROTOCOL_VERSION},
     ArtifactResources, Server as McpServer,
@@ -214,7 +214,7 @@ impl BoundaryFixture {
         let (_, token, handle) = identity(
             &authority,
             all_capabilities(),
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .expect("protocol fixture identity");
@@ -251,7 +251,7 @@ fn authorized(method: &str, uri: &str, token: &str, body: Body) -> Request<Body>
         .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
         .header(
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
         )
         .header("content-type", "application/json")
         .body(body)
@@ -261,7 +261,7 @@ fn authorized(method: &str, uri: &str, token: &str, body: Body) -> Request<Body>
 async fn identity(
     authority: &AuthorityStore,
     capabilities: impl IntoIterator<Item = Capability>,
-    expires_at: chrono::DateTime<Utc>,
+    expires_at: types::WireTimestamp,
 ) -> Result<(PrincipalId, String, interface_core::CapabilityHandle), String> {
     let principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
     let token = authority
@@ -284,7 +284,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         attempt_id: AttemptId::new(),
         session_id: session.clone(),
         page_id: Some(page.clone()),
-        deadline: Utc::now() + Duration::seconds(20),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(20),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -396,7 +396,7 @@ async fn broker_request(
         .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
         .header(
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339(),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339(),
         );
     if let Some(body) = body {
         request = request
@@ -447,7 +447,7 @@ async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
             Sha256::digest(SECRET.as_bytes()).into(),
             canary_principal,
             all_capabilities(),
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .map_err(|error| format!("{error:?}"))?;
@@ -710,9 +710,9 @@ async fn http_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
             &fixture.authority,
             [Capability::SessionWrite],
             if revoke {
-                Utc::now() + Duration::minutes(5)
+                types::WireTimestamp::now() + Duration::from_mins(5)
             } else {
-                Utc::now() + Duration::milliseconds(100)
+                types::WireTimestamp::now() + Duration::from_millis(100)
             },
         )
         .await?;
@@ -747,9 +747,9 @@ async fn mcp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
             &fixture.authority,
             [Capability::SessionRead],
             if revoke {
-                Utc::now() + Duration::minutes(5)
+                types::WireTimestamp::now() + Duration::from_mins(5)
             } else {
-                Utc::now() + Duration::milliseconds(100)
+                types::WireTimestamp::now() + Duration::from_millis(100)
             },
         )
         .await?;
@@ -785,14 +785,14 @@ async fn cdp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
             &fixture.authority,
             [Capability::SessionRead],
             if revoke {
-                Utc::now() + Duration::minutes(5)
+                types::WireTimestamp::now() + Duration::from_mins(5)
             } else {
                 // Unlike the HTTP/MCP passes (which spawn while valid and
                 // delay only the body), the CDP pass must complete
                 // `version` + `upgrade` — both of which verify the token —
                 // before the expiry. 100ms raced loaded CI runners; 500ms
                 // keeps the mid-connection semantics with margin.
-                Utc::now() + Duration::milliseconds(500)
+                types::WireTimestamp::now() + Duration::from_millis(500)
             },
         )
         .await?;
@@ -847,7 +847,7 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
             Capability::ArtifactRead,
             Capability::ArtifactCapture,
         ],
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     )
     .await?;
     let (_, other_token, other_handle) = identity(
@@ -858,11 +858,13 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
             Capability::BrowserMutate,
             Capability::ArtifactRead,
         ],
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     )
     .await?;
-    let owner_ctx = owner_handle.context(Utc::now() + Duration::minutes(1), None);
-    let other_ctx = other_handle.context(Utc::now() + Duration::minutes(1), None);
+    let owner_ctx =
+        owner_handle.context(types::WireTimestamp::now() + Duration::from_mins(1), None);
+    let other_ctx =
+        other_handle.context(types::WireTimestamp::now() + Duration::from_mins(1), None);
     let (session_ownership, recorder) = SessionOwnershipRegistry::bounded(4);
     let owner = AuthenticatedRuntime::with_session_ownership(
         harness.service.clone(),
@@ -1267,10 +1269,10 @@ async fn filesystem_confinement() -> SecurityResult {
         let (_, _, handle) = identity(
             &authority,
             [Capability::ArtifactRead, Capability::ArtifactCapture],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await?;
-        let context = handle.context(Utc::now() + Duration::minutes(1), None);
+        let context = handle.context(types::WireTimestamp::now() + Duration::from_mins(1), None);
         let (ownership, recorder) = SessionOwnershipRegistry::bounded(2);
         recorder
             .record_authenticated_session(context.principal_id.clone(), session.clone())
@@ -1450,11 +1452,11 @@ async fn unsupported_protocols(fixture: &BoundaryFixture) -> SecurityResult {
 
 async fn idempotency_mismatch() -> SecurityResult {
     let store: IdempotencyStore =
-        IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+        IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
     let key = IdempotencyKey::try_from("release-security-idempotency")
         .map_err(|error| error.to_string())?;
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let first = store
         .reserve(
             principal.clone(),
@@ -1462,7 +1464,7 @@ async fn idempotency_mismatch() -> SecurityResult {
             InterfaceOperation::SubmitCommand,
             canonical_sha256(&json!({"value":1})).map_err(|error| format!("{error:?}"))?,
             now,
-            now + Duration::seconds(5),
+            now + Duration::from_secs(5),
             CorrelationId::new(),
         )
         .await
@@ -1477,8 +1479,8 @@ async fn idempotency_mismatch() -> SecurityResult {
             key,
             InterfaceOperation::SubmitCommand,
             canonical_sha256(&json!({"value":2})).map_err(|error| format!("{error:?}"))?,
-            Utc::now(),
-            Utc::now() + Duration::seconds(5),
+            types::WireTimestamp::now(),
+            types::WireTimestamp::now() + Duration::from_secs(5),
             CorrelationId::new(),
         )
         .await
@@ -1555,14 +1557,14 @@ async fn credentials_expire_revoke_and_never_reach_observable_payloads() {
         .issue(
             principal.clone(),
             [Capability::SessionRead],
-            Utc::now() + Duration::seconds(30),
+            types::WireTimestamp::now() + Duration::from_secs(30),
         )
         .await
         .unwrap()
         .expose_once();
     let handle = authority.verify(&token).await.unwrap();
     authority.revoke(&principal).await.unwrap();
-    assert!(!handle.is_valid_at(Utc::now()));
+    assert!(!handle.is_valid_at(types::WireTimestamp::now()));
     assert!(authority.verify(&token).await.is_err());
     let events = EventStore::new(2);
     events.append(Event::new("diagnostic", json!({"authorization":format!("Bearer {SECRET}"),"nested":{"token":SECRET,"cookie":SECRET}}))).await;

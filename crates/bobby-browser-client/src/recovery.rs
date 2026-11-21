@@ -1,6 +1,5 @@
 //! Workflow checkpoint and recovery decision types.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -55,7 +54,7 @@ pub struct WorkflowCheckpoint {
     pub recovery_history: Vec<RecoveryRecord>,
     #[serde(default)]
     pub recovery_receipts: Vec<RecoveryReceipt>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: crate::WireTimestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,7 +121,7 @@ pub struct RecoveryReceipt {
     pub skill_outcome: SkillOutcome,
     pub tactic_evidence: Vec<Evidence>,
     pub outcome_sha256: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: crate::WireTimestamp,
 }
 
 #[derive(Deserialize)]
@@ -137,7 +136,7 @@ struct RecoveryReceiptWire {
     skill_outcome: SkillOutcome,
     tactic_evidence: Vec<Evidence>,
     outcome_sha256: String,
-    recorded_at: DateTime<Utc>,
+    recorded_at: crate::WireTimestamp,
 }
 
 impl<'de> Deserialize<'de> for RecoveryReceipt {
@@ -174,7 +173,7 @@ impl RecoveryReceipt {
         command_outcome: CommandOutcome,
         skill_outcome: SkillOutcome,
         tactic_evidence: Vec<Evidence>,
-        recorded_at: DateTime<Utc>,
+        recorded_at: crate::WireTimestamp,
     ) -> Result<Self, String> {
         let outcome_sha256 =
             Self::outcome_digest(&command_outcome, &skill_outcome, &tactic_evidence)?;
@@ -259,7 +258,7 @@ fn validate_sha256(value: &str, name: &str) -> Result<(), String> {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryRecord {
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: crate::WireTimestamp,
     pub decision: RecoveryDecision,
 }
 

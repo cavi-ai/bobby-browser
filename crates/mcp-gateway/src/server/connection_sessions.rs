@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use futures_util::future::join_all;
 use interface_core::{CapabilityHandle, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 
 const DISCONNECT_DELETE_DEADLINE_SECONDS: i64 = 30;
 
@@ -79,7 +79,7 @@ pub(super) async fn delete_session_quietly(
     session_id: types::SessionId,
 ) -> bool {
     let context = handle.context(
-        Utc::now() + Duration::seconds(DISCONNECT_DELETE_DEADLINE_SECONDS),
+        types::WireTimestamp::now() + Duration::from_secs(DISCONNECT_DELETE_DEADLINE_SECONDS),
         None,
     );
     match runtime.delete_session(context, session_id.clone()).await {

@@ -56,14 +56,14 @@ async-trait = "0.1"
 agent-client-protocol = "5"
 axum = "0.8"
 base64 = "0.23"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2.35", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 chromiumoxide = { package = "bobby-chromiumoxide", version = "0.9.1", path = "vendor/chromiumoxide" }
 futures = "0.3"
 jsonschema = "0.61"
 libc = "0.2"
 psl = "2.1.223"
-schemars = { version = "1", features = ["derive", "uuid1", "chrono04"] }
+schemars = { version = "1", features = ["derive", "uuid1", "jiff02"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"

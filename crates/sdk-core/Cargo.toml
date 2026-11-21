@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 artifact-store.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 checkpoint-store.workspace = true
 context-store.workspace = true
 node-registry.workspace = true

@@ -6234,7 +6234,7 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
             )
         })?;
         let context = self.context(page_id).await?;
-        let captured_at = chrono::Utc::now();
+        let captured_at = types::WireTimestamp::now();
         let url = self
             .transport
             .send(

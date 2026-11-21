@@ -45,32 +45,41 @@ pub(super) fn credential(context: &mut DoctorContext, report: &mut DoctorReport)
     Ok(())
 }
 
-pub(crate) fn check_bootstrap_expiry(expires_at: chrono::DateTime<chrono::Utc>) -> DoctorCheck {
-    let remaining = expires_at - chrono::Utc::now();
-    if remaining <= chrono::Duration::zero() {
+pub(crate) fn check_bootstrap_expiry(expires_at: types::WireTimestamp) -> DoctorCheck {
+    let remaining = expires_at - types::WireTimestamp::now();
+    if remaining <= jiff::SignedDuration::ZERO {
         DoctorCheck {
             status: DoctorStatus::Fail,
             name: "bootstrap-expiry".to_string(),
             detail: format!(
                 "credential expired at {}; run `bobby init --force`",
-                expires_at.to_rfc3339()
+                expires_at.rfc3339()
             ),
         }
-    } else if remaining < chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS) {
+    } else if remaining
+        < jiff::SignedDuration::from_hours(
+            (BOOTSTRAP_EXPIRY_WARN_DAYS)
+                .checked_mul(24)
+                .expect("duration overflow"),
+        )
+    {
         DoctorCheck {
             status: DoctorStatus::Warn,
             name: "bootstrap-expiry".to_string(),
             detail: format!(
                 "credential expires in {} day(s) at {}; run `bobby init --force` before then",
-                remaining.num_days(),
-                expires_at.to_rfc3339()
+                (remaining.as_secs() / 86_400),
+                expires_at.rfc3339()
             ),
         }
     } else {
         DoctorCheck {
             status: DoctorStatus::Ok,
             name: "bootstrap-expiry".to_string(),
-            detail: format!("credential valid for {} more day(s)", remaining.num_days()),
+            detail: format!(
+                "credential valid for {} more day(s)",
+                (remaining.as_secs() / 86_400)
+            ),
         }
     }
 }
@@ -82,13 +91,17 @@ mod tests {
     use super::*;
     #[test]
     fn expiry_row_distinguishes_expired_expiring_and_valid_credentials() {
-        let now = chrono::Utc::now();
+        let now = types::WireTimestamp::now();
         for (days, expected) in [
             (-1, DoctorStatus::Fail),
             (1, DoctorStatus::Warn),
             (8, DoctorStatus::Ok),
         ] {
-            let check = check_bootstrap_expiry(now + chrono::Duration::days(days));
+            let check = check_bootstrap_expiry(
+                now + jiff::SignedDuration::from_hours(
+                    (days as i64).checked_mul(24).expect("duration overflow"),
+                ),
+            );
             assert_eq!(check.name, "bootstrap-expiry");
             assert_eq!(check.status, expected);
             if expected != DoctorStatus::Ok {

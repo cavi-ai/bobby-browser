@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use artifact_store::ArtifactStore;
-use chrono::{Duration, Utc};
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, Authority, AuthorityStore, SessionOwnershipAuthority,
 };
+use jiff::SignedDuration as Duration;
 use types::{Capability, InterfaceErrorCode, PageId, PrincipalId, SessionId};
 use uuid::Uuid;
 
@@ -39,13 +39,13 @@ async fn artifact_registration_fails_closed_on_non_unix_targets() {
         .issue(
             PrincipalId::from_uuid(Uuid::from_u128(99)),
             [Capability::ArtifactCapture],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
         .expose_once();
     let handle = authority.verify(&token).await.unwrap();
-    let context = handle.context(Utc::now() + Duration::minutes(1), None);
+    let context = handle.context(types::WireTimestamp::now() + Duration::from_mins(1), None);
     let reader = ArtifactReader::new(
         store,
         Arc::new(AllowOwnedSession),

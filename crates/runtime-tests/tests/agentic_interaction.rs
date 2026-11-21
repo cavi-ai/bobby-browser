@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
@@ -22,7 +22,7 @@ fn envelope(
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(command),
     }
 }

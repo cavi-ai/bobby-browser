@@ -6,7 +6,6 @@ mod verification;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use chrono::Utc;
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
@@ -252,9 +251,9 @@ impl PageRuntime {
             (RuntimeCommand::Primitive(PrimitiveCommand::TypeText(command)), Some(page_id))
                 if command.value.contains(['\n', '\r']) =>
             {
-                let budget = (envelope.deadline - Utc::now())
-                    .to_std()
-                    .unwrap_or(StdDuration::ZERO);
+                let budget =
+                    std::time::Duration::try_from(envelope.deadline - types::WireTimestamp::now())
+                        .unwrap_or(StdDuration::ZERO);
                 tokio::time::timeout(
                     budget,
                     worker_pool::observation_or_default(lease.worker().observation())
@@ -503,7 +502,7 @@ impl PageRuntime {
         if envelope.schema_version != CommandEnvelope::SCHEMA_VERSION {
             return Err(validation_error("unsupported command schema version"));
         }
-        if envelope.deadline <= Utc::now() {
+        if envelope.deadline <= types::WireTimestamp::now() {
             return Err(CommandError {
                 code: ErrorCode::DeadlineExceeded,
                 message: "command deadline has elapsed".into(),
@@ -839,7 +838,7 @@ fn record(
 ) -> JournalRecord {
     JournalRecord {
         sequence: 0,
-        recorded_at: Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: envelope.command_id.clone(),
         phase,
         envelope: stored_envelope,
@@ -851,7 +850,7 @@ fn record(
 fn prepared_record(envelope: &CommandEnvelope, prepared_result: PreparedResult) -> JournalRecord {
     JournalRecord {
         sequence: 0,
-        recorded_at: Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: envelope.command_id.clone(),
         phase: CommandPhase::ResultPrepared,
         envelope: None,

@@ -256,7 +256,9 @@ pub(crate) enum Guard {
 fn write_snapshot(runtime_dir: &Path, pid: Option<u32>, raw: &str) -> Result<PathBuf> {
     let dir = runtime_dir.join("restart-snapshots");
     crate::runtime_scopes::private_dir(&dir)?;
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let stamp = types::WireTimestamp::now()
+        .rfc3339_millis()
+        .replace(['-', ':'], "");
     let name = match pid {
         Some(pid) => format!("{stamp}-{pid}.json"),
         None => format!("{stamp}-unknown.json"),

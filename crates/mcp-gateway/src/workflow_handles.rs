@@ -575,7 +575,6 @@ mod tests {
         thread,
     };
 
-    use chrono::Utc;
     use serde_json::json;
     use tokio::sync::oneshot;
 
@@ -630,8 +629,8 @@ mod tests {
             profile: "test".into(),
             proxy: None,
             page_ids: Vec::new(),
-            created_at: Utc::now(),
-            last_used_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
+            last_used_at: types::WireTimestamp::now(),
             execution_policy: types::ExecutionPolicy::default(),
             zigzagzig: false,
         }

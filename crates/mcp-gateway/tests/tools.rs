@@ -3,8 +3,8 @@ use std::sync::Arc;
 mod common;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use interface_core::{Authority, AuthorityStore, Event, EventStore};
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{ArtifactResources, Server};
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -28,7 +28,7 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000016")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -418,7 +418,7 @@ async fn page_open_closes_the_new_page_when_navigation_returns_an_interface_erro
                 Capability::PageWrite,
                 Capability::BrowserMutate,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -482,7 +482,7 @@ async fn page_close_removes_the_page_from_session_state() {
                 Capability::PageWrite,
                 Capability::BrowserMutate,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -596,7 +596,7 @@ async fn events_read_preserves_exact_event_gap_metadata() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000017")),
             [Capability::SessionRead],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -638,7 +638,7 @@ async fn revocation_after_initialize_denies_every_enumeration_and_dispatch_bound
         .issue(
             principal.clone(),
             [Capability::SessionRead, Capability::ArtifactRead],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -686,7 +686,7 @@ async fn expiry_after_initialize_denies_tool_enumeration() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000019")),
             [Capability::SessionRead],
-            Utc::now() + Duration::milliseconds(100),
+            types::WireTimestamp::now() + Duration::from_millis(100),
         )
         .await
         .unwrap();
@@ -725,7 +725,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000020")),
             [Capability::BrowserMutate, Capability::RecoveryWrite],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -893,7 +893,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
     let mut envelope_value = serde_json::to_value(envelope).unwrap();
@@ -912,7 +912,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::TypeText(types::TypeTextCommand {
             expected_url: None,
             selector: "#name".to_owned(),
@@ -955,7 +955,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let oversized = vec![CommandId::new(); 129];
     let rejected = server
@@ -1137,7 +1137,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
                 Capability::PageWrite,
                 Capability::BrowserMutate,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1177,7 +1177,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
     live.journal
         .append(JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: types::CommandPhase::Accepted,
             envelope: Some(CommandEnvelope {
@@ -1187,7 +1187,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
                 attempt_id: attempt_id.clone(),
                 session_id: session_id.clone(),
                 page_id: Some(page_id.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                     types::InspectCommand::default(),
                 )),
@@ -1200,7 +1200,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
     live.journal
         .append(JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: types::CommandPhase::Completed,
             envelope: None,
@@ -1230,7 +1230,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
 
     let saved = live
@@ -1437,7 +1437,7 @@ async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_o
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000a1")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1453,7 +1453,7 @@ async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_o
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000b2")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1485,7 +1485,7 @@ async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_o
         attempt_id: AttemptId::new(),
         session_id: session_b_id,
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
     let submitted = server_b
@@ -1530,7 +1530,7 @@ async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_o
         evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let response = server_a
         .handle_message(request(
@@ -1571,7 +1571,7 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1588,7 +1588,7 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Continue".to_owned(),
             hints: IntentHints::default(),
@@ -1663,7 +1663,7 @@ async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1680,7 +1680,7 @@ async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
             purpose: "enter the applicant name".into(),
             hints: IntentHints {
@@ -1724,7 +1724,7 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1741,7 +1741,7 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
             purpose: "complete application form".into(),
             fields: vec![CompleteFormField {
@@ -1773,7 +1773,7 @@ async fn command_execute_schema_rejects_locate_purpose_over_256() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000023")),
             [Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1789,7 +1789,7 @@ async fn command_execute_schema_rejects_locate_purpose_over_256() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Continue".to_owned(),
             hints: IntentHints::default(),
@@ -1825,7 +1825,7 @@ async fn command_execute_schema_accepts_follow_intent_envelope() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1842,7 +1842,7 @@ async fn command_execute_schema_accepts_follow_intent_envelope() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
             purpose: "Details".to_owned(),
             hints: IntentHints::default(),
@@ -1867,7 +1867,7 @@ async fn command_execute_schema_rejects_follow_missing_expected_destination() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000025")),
             [Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1883,7 +1883,7 @@ async fn command_execute_schema_rejects_follow_missing_expected_destination() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
             purpose: "Details".to_owned(),
             hints: IntentHints::default(),
@@ -1929,7 +1929,7 @@ async fn command_execute_schema_accepts_dismiss_obstruction_intent_envelope() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1946,7 +1946,7 @@ async fn command_execute_schema_accepts_dismiss_obstruction_intent_envelope() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
             DismissObstructionIntent {
                 purpose: "Cookie notice close button".to_owned(),
@@ -1967,7 +1967,7 @@ async fn command_execute_schema_rejects_dismiss_obstruction_missing_purpose() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000027")),
             [Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -1983,7 +1983,7 @@ async fn command_execute_schema_rejects_dismiss_obstruction_missing_purpose() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
             DismissObstructionIntent {
                 purpose: "Cookie notice close button".to_owned(),
@@ -2025,7 +2025,7 @@ async fn command_execute_schema_accepts_extract_intent_envelope() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -2042,7 +2042,7 @@ async fn command_execute_schema_accepts_extract_intent_envelope() {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Extract(types::ExtractIntent {
             purpose: "Profile summary".to_owned(),
             fields: vec![
@@ -2094,7 +2094,7 @@ async fn command_execute_schema_rejects_extract_with_empty_fields() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000029")),
             [Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -2110,7 +2110,7 @@ async fn command_execute_schema_rejects_extract_with_empty_fields() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Extract(types::ExtractIntent {
             purpose: "Profile summary".to_owned(),
             fields: vec![types::ExtractField {
@@ -2465,7 +2465,7 @@ async fn authenticated_with_browser_mutate() -> AuthenticatedRuntime {
                 Capability::FileUpload,
                 Capability::JavascriptEvaluate,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -2590,7 +2590,7 @@ async fn authenticated_with_intents() -> AuthenticatedRuntime {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000031")),
             [Capability::BrowserMutate, Capability::IntentExecute],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -2685,7 +2685,7 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -2869,7 +2869,7 @@ async fn live_server_for_control_id_resolution() -> common::LiveServer {
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -3419,7 +3419,7 @@ async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes(
                 Capability::SessionWrite,
                 Capability::PageWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -3428,7 +3428,7 @@ async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes(
     common::initialize(&live.server).await;
     let mut next_id = 800;
     let (session_id, _) = common::create_session_and_page(&live.server, &mut next_id).await;
-    let deadline = (Utc::now() + Duration::seconds(270)).to_rfc3339();
+    let deadline = (types::WireTimestamp::now() + Duration::from_secs(270)).rfc3339();
 
     let response = live
         .server
@@ -3468,7 +3468,7 @@ async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes(
 #[tokio::test]
 async fn command_execute_rejects_an_agent_deadline_beyond_five_minutes() {
     let server = fixture_server(vec![Capability::BrowserMutate]).await;
-    let deadline = (Utc::now() + Duration::seconds(310)).to_rfc3339();
+    let deadline = (types::WireTimestamp::now() + Duration::from_secs(310)).rfc3339();
 
     let response = server
         .handle_message(request(
@@ -3890,7 +3890,7 @@ async fn notify_fixture(principal: uuid::Uuid, events: EventStore) -> Server {
         .issue(
             PrincipalId::from_uuid(principal),
             [Capability::SessionRead],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -4641,7 +4641,7 @@ async fn auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
                 Capability::IntentExecute,
                 Capability::RecoveryWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -4760,7 +4760,7 @@ async fn boundary_wait_tools_save_checkpoints_matching_their_commands() {
                 Capability::FileUpload,
                 Capability::RecoveryWrite,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();

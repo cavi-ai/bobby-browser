@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use intent_engine::{VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CompleteFormField,
@@ -243,7 +243,7 @@ async fn open_fixture(runtime: &RuntimeService, url: &str) -> (SessionId, PageId
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: WaitUntil::Interactive,
@@ -269,7 +269,7 @@ async fn submit_intent(
         session_id,
         page_id,
         command,
-        Utc::now() + Duration::seconds(30),
+        types::WireTimestamp::now() + Duration::from_secs(30),
     )
     .await
 }
@@ -279,7 +279,7 @@ async fn submit_intent_until(
     session_id: &SessionId,
     page_id: &PageId,
     command: IntentCommand,
-    deadline: chrono::DateTime<Utc>,
+    deadline: types::WireTimestamp,
 ) -> CommandOutcome {
     runtime
         .submit_with_vision_capability(
@@ -482,7 +482,7 @@ async fn run_budgeted_prefill(
                 &session,
                 &page,
                 intent,
-                Utc::now() + Duration::seconds(10),
+                types::WireTimestamp::now() + Duration::from_secs(10),
             )
             .await
         })

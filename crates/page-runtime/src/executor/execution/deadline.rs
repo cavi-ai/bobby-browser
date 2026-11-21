@@ -7,9 +7,9 @@ impl ExecutionContext<'_> {
         lease: &worker_pool::WorkerLease,
         page: Option<types::PageState>,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
-        let remaining = (self.envelope.deadline - Utc::now())
-            .to_std()
-            .unwrap_or(StdDuration::ZERO);
+        let remaining =
+            std::time::Duration::try_from(self.envelope.deadline - types::WireTimestamp::now())
+                .unwrap_or(StdDuration::ZERO);
         tokio::time::timeout(
             remaining,
             self.runtime

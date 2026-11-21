@@ -13,7 +13,7 @@ async fn mcp_server_observes_live_capability_filtered_json_rpc_boundary() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            chrono::Utc::now() + chrono::Duration::minutes(5),
+            types::WireTimestamp::now() + jiff::SignedDuration::from_mins(5),
         )
         .await
         .unwrap();

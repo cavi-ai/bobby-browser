@@ -45,7 +45,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id,
                 page_id: Some(page_id),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::SetFocusEmulation(
                     SetFocusEmulationCommand { enabled },
                 )),
@@ -160,7 +160,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id,
                 page_id: Some(page_id),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::SetEmulatedMedia(command)),
             };
             match self.runtime.submit(ctx, envelope).await {
@@ -271,7 +271,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id,
                 page_id: Some(page_id),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Emulate(
                     types::EmulateCommand {
                         viewport: Some(viewport),

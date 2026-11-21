@@ -4,7 +4,6 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use chrono::Utc;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandPhase, NavigateCommand, PageId, PrimitiveCommand,
     RuntimeCommand, SessionId, WaitUntil, WorkflowId,
@@ -47,7 +46,7 @@ async fn audit_export_and_verify_through_the_cli() {
     journal
         .append(JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command.clone(),
             phase: CommandPhase::Executing,
             envelope: Some(CommandEnvelope {
@@ -57,7 +56,7 @@ async fn audit_export_and_verify_through_the_cli() {
                 attempt_id: AttemptId::new(),
                 session_id: SessionId::new(),
                 page_id: Some(PageId::new()),
-                deadline: Utc::now() + chrono::Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                     url: "https://shop.test/".into(),
                     wait_until: WaitUntil::DomContentLoaded,

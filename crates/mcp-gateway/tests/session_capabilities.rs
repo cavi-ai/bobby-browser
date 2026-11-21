@@ -1,5 +1,5 @@
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -20,7 +20,7 @@ async fn session_capabilities_is_a_read_only_tool_with_a_validated_output() {
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead, Capability::SessionWrite],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

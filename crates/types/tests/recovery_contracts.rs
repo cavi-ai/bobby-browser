@@ -1,4 +1,3 @@
-use chrono::Utc;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, CommandClass, CommandId, CommandOutcome,
     Evidence, PageId, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
@@ -38,7 +37,7 @@ fn checkpoint() -> WorkflowCheckpoint {
         }],
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }
 
@@ -160,7 +159,7 @@ fn recovery_receipt_round_trips_full_command_identity_and_outbox_state() {
         },
         SkillOutcome::applied(Vec::new()).unwrap(),
         Vec::new(),
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .unwrap();
 
@@ -217,7 +216,7 @@ fn recovery_receipt_rejects_oversized_evidence_before_persistence() {
             name: "bounded".into(),
             value: "x".repeat(types::MAX_RECOVERY_RECEIPT_BYTES),
         }],
-        Utc::now(),
+        types::WireTimestamp::now(),
     );
     assert!(result.unwrap_err().contains("byte bound"));
 }

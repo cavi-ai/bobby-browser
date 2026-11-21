@@ -16,7 +16,7 @@ use context_store::{
 use page_runtime::ContextPromotion;
 
 fn day_now() -> u32 {
-    context_store::day_since_epoch(chrono::Utc::now())
+    context_store::day_since_epoch(jiff::Timestamp::now())
 }
 
 fn control(name: &str, successes: u64, failures: u64, last_day: Option<u32>) -> ControlContext {

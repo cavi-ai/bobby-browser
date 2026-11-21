@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{DateTime, Utc};
+
 use interface_core::{Authority, AuthorityStore, AuthorizationGuard, CapabilityHandle};
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -40,7 +40,7 @@ pub struct StartupCredential {
     token_hash: [u8; 32],
     principal_id: PrincipalId,
     capabilities: Vec<Capability>,
-    expires_at: DateTime<Utc>,
+    expires_at: types::WireTimestamp,
 }
 
 impl StartupCredential {
@@ -48,7 +48,7 @@ impl StartupCredential {
         bearer: String,
         principal_id: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<Self, StartupCredentialError> {
         if !valid_bearer(&bearer) {
             return Err(StartupCredentialError::InvalidBearer);
@@ -56,7 +56,7 @@ impl StartupCredential {
         if capabilities.is_empty() {
             return Err(StartupCredentialError::MissingCapabilities);
         }
-        if expires_at <= Utc::now() {
+        if expires_at <= types::WireTimestamp::now() {
             return Err(StartupCredentialError::Expired);
         }
         let token_hash = Sha256::digest(bearer.as_bytes()).into();
@@ -81,14 +81,13 @@ impl StartupCredential {
             .map(str::trim)
             .map(parse_capability)
             .collect::<Result<Vec<_>, _>>()?;
-        let expires_at = DateTime::parse_from_rfc3339(&expires_at)
-            .map_err(|_| StartupCredentialError::InvalidExpiry)?
-            .with_timezone(&Utc);
+        let expires_at = types::WireTimestamp::parse_rfc3339(&expires_at)
+            .map_err(|_| StartupCredentialError::InvalidExpiry)?;
         Self::new(bearer, principal_id, capabilities, expires_at)
     }
 
     /// When this credential stops working. Exposes no bearer material.
-    pub fn expires_at(&self) -> DateTime<Utc> {
+    pub fn expires_at(&self) -> types::WireTimestamp {
         self.expires_at
     }
 }
@@ -171,7 +170,7 @@ impl EnrolledAuthority {
         &self,
         principal: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<interface_core::IssuedToken, InterfaceError> {
         self.store.issue(principal, capabilities, expires_at).await
     }
@@ -184,7 +183,7 @@ impl EnrolledAuthority {
         hash: [u8; 32],
         principal: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<(), InterfaceError> {
         self.store
             .enroll_hash(hash, principal, capabilities, expires_at)
@@ -207,7 +206,7 @@ impl Authority for EnrolledAuthority {
     async fn authenticate(
         &self,
         bearer: &str,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<CapabilityHandle, InterfaceError> {
         if !valid_bearer(bearer) {
             return Err(authentication_error(CorrelationId::new()));
@@ -223,7 +222,7 @@ impl Authority for EnrolledAuthority {
         &self,
         principal: PrincipalId,
         capabilities: Vec<Capability>,
-        expires_at: DateTime<Utc>,
+        expires_at: types::WireTimestamp,
     ) -> Result<interface_core::IssuedToken, InterfaceError> {
         EnrolledAuthority::issue(self, principal, capabilities, expires_at).await
     }
@@ -238,7 +237,11 @@ pub(crate) async fn authenticate(
         Ok(value) => value,
         Err(error) => return error.into_response(),
     };
-    let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
+    let handle = match state
+        .authority
+        .authenticate(&bearer, types::WireTimestamp::now())
+        .await
+    {
         Ok(handle) => handle,
         Err(error) => {
             tracing::warn!(error = ?error, "auth.authentication_failed");
@@ -361,7 +364,7 @@ pub(crate) async fn acquire_principal_permit(
 struct ParsedHeaders {
     interface_version: InterfaceVersion,
     correlation_id: CorrelationId,
-    deadline: DateTime<Utc>,
+    deadline: types::WireTimestamp,
     idempotency_key: Option<IdempotencyKey>,
 }
 
@@ -403,12 +406,10 @@ fn parse_context_headers(headers: &HeaderMap) -> Result<ParsedHeaders, ProtocolE
     let deadline = required_text(headers, "x-deadline", MAX_DEADLINE_BYTES).map_err(|_| {
         ProtocolError::invalid_with(InterfaceErrorCode::InvalidRequest, correlation_id.clone())
     })?;
-    let deadline = DateTime::parse_from_rfc3339(deadline)
-        .map_err(|_| {
-            ProtocolError::invalid_with(InterfaceErrorCode::InvalidRequest, correlation_id.clone())
-        })?
-        .with_timezone(&Utc);
-    let now = Utc::now();
+    let deadline = types::WireTimestamp::parse_rfc3339(deadline).map_err(|_| {
+        ProtocolError::invalid_with(InterfaceErrorCode::InvalidRequest, correlation_id.clone())
+    })?;
+    let now = types::WireTimestamp::now();
     if deadline <= now {
         return Err(ProtocolError::from(interface_error(
             InterfaceErrorCode::DeadlineExceeded,
@@ -417,7 +418,7 @@ fn parse_context_headers(headers: &HeaderMap) -> Result<ParsedHeaders, ProtocolE
             None,
         )));
     }
-    if deadline > now + chrono::Duration::minutes(MAX_DEADLINE_AHEAD_MINUTES) {
+    if deadline > now + jiff::SignedDuration::from_mins(MAX_DEADLINE_AHEAD_MINUTES) {
         return Err(ProtocolError::invalid_with(
             InterfaceErrorCode::InvalidRequest,
             correlation_id,
@@ -642,14 +643,14 @@ pub(crate) fn authorize_boundary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use jiff::SignedDuration as Duration;
 
     fn startup() -> StartupCredential {
         StartupCredential::new(
             "bootstrap-bearer-0123456789abcdef0123456789abcdef".to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
             vec![Capability::AuthorityAdmin, Capability::SessionRead],
-            Utc::now() + Duration::minutes(30),
+            types::WireTimestamp::now() + Duration::from_mins(30),
         )
         .unwrap()
     }
@@ -661,13 +662,16 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(2)),
                 vec![Capability::SessionRead, Capability::SessionWrite],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .unwrap();
         let bearer = issued.expose_once();
-        let handle = authority.authenticate(&bearer, Utc::now()).await.unwrap();
-        assert!(handle.is_valid_at(Utc::now()));
+        let handle = authority
+            .authenticate(&bearer, types::WireTimestamp::now())
+            .await
+            .unwrap();
+        assert!(handle.is_valid_at(types::WireTimestamp::now()));
     }
 
     #[tokio::test]
@@ -679,7 +683,7 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(3)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .is_ok());
@@ -687,7 +691,7 @@ mod tests {
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(4)),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::minutes(10),
+                types::WireTimestamp::now() + Duration::from_mins(10),
             )
             .await
             .is_err());

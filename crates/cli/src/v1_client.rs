@@ -7,7 +7,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use jiff::SignedDuration;
 use types::CURRENT_INTERFACE_VERSION;
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ pub fn v1_request(options: V1Request) -> Result<V1Response> {
     v1_request_with_limits(
         options,
         Duration::from_secs(REQUEST_TIMEOUT_SECS),
-        ChronoDuration::minutes(DEADLINE_MINUTES),
+        SignedDuration::from_mins(DEADLINE_MINUTES),
     )
 }
 
@@ -54,7 +54,7 @@ pub fn v1_request(options: V1Request) -> Result<V1Response> {
 pub fn v1_request_with_limits(
     options: V1Request,
     request_timeout: Duration,
-    deadline: ChronoDuration,
+    deadline: SignedDuration,
 ) -> Result<V1Response> {
     match std::thread::spawn(move || v1_request_blocking(options, request_timeout, deadline)).join()
     {
@@ -66,7 +66,7 @@ pub fn v1_request_with_limits(
 fn v1_request_blocking(
     options: V1Request,
     request_timeout: Duration,
-    deadline: ChronoDuration,
+    deadline: SignedDuration,
 ) -> Result<V1Response> {
     let client = reqwest::blocking::Client::builder()
         .timeout(request_timeout)
@@ -75,7 +75,10 @@ fn v1_request_blocking(
         .context("failed to build /v1 HTTP client")?;
 
     let correlation_id = Uuid::new_v4();
-    let deadline = (Utc::now() + deadline).to_rfc3339();
+    let deadline = types::WireTimestamp::now()
+        .checked_add(deadline)
+        .ok_or_else(|| anyhow::anyhow!("request deadline exceeds supported range"))?
+        .rfc3339();
 
     let mut builder = client
         .request(options.method.clone(), &options.url)

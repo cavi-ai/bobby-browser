@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::Utc;
+
 use page_runtime::{evaluate_invariants, PageRuntime, RecoveryCoordinator};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,7 +45,7 @@ fn checkpoint() -> WorkflowCheckpoint {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     }
 }
 
@@ -100,7 +100,7 @@ fn recovery_receipt(
         },
         SkillOutcome::failed(SkillFailure::DeadlineExceeded, Vec::new()).unwrap(),
         Vec::new(),
-        Utc::now(),
+        types::WireTimestamp::now(),
     )
     .unwrap()
 }
@@ -279,7 +279,7 @@ async fn recovery_receipt_fsm_is_forward_only_and_committed_payload_survives_reo
         .unwrap();
     assert_eq!(committed.state, RecoveryReceiptState::Committed);
     let mut changed = committed.clone();
-    changed.recorded_at = Utc::now() + chrono::Duration::seconds(1);
+    changed.recorded_at = types::WireTimestamp::now() + jiff::SignedDuration::from_secs(1);
     assert!(reopened.persist_recovery_receipt(changed).await.is_err());
     assert_eq!(
         reopened_store
@@ -522,7 +522,7 @@ async fn evidence_for_command_returns_the_terminal_outcome_evidence() {
     journal
         .append(workflow_journal::JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: types::CommandPhase::Completed,
             envelope: None,
@@ -573,7 +573,7 @@ async fn command_session_returns_the_envelope_session_for_a_recorded_command() {
         attempt_id: AttemptId::new(),
         session_id: session_id.clone(),
         page_id: None,
-        deadline: Utc::now() + chrono::Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
         command: types::RuntimeCommand::Primitive(types::PrimitiveCommand::Inspect(
             InspectCommand::default(),
         )),
@@ -583,7 +583,7 @@ async fn command_session_returns_the_envelope_session_for_a_recorded_command() {
     journal
         .append(workflow_journal::JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: types::CommandPhase::Accepted,
             envelope: Some(envelope),
@@ -595,7 +595,7 @@ async fn command_session_returns_the_envelope_session_for_a_recorded_command() {
     journal
         .append(workflow_journal::JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: types::CommandPhase::Completed,
             envelope: None,

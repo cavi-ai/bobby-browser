@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use skill_runtime::{
     EffectiveSkillProfile, SessionId, Skill, SkillBrowserEngine, SkillCapability, SkillCommand,
     SkillContext, SkillEngineAdapter, SkillFailure, SkillGhost, SkillGhostCommand, SkillOutcome,
@@ -124,7 +124,7 @@ fn session_state(session_id: SessionId) -> SkillSessionState {
         None,
         vec![],
         vec![],
-        Utc::now() + Duration::minutes(5),
+        types::WireTimestamp::now() + Duration::from_mins(5),
     )
     .unwrap()
 }

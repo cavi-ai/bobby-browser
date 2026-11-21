@@ -8,12 +8,12 @@ use std::{
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
 use interface_core::{
     command_identity_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
     IdempotencyReservation, IdempotencyStore, RuntimeInterface, SessionOwnershipAuthority,
     SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration as Duration;
 use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::{workflow::WorkflowService, AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
@@ -132,8 +132,8 @@ async fn rust_workflow_service_prepares_typed_resources_without_mcp() {
     assert!(cleanup.session_delete.is_ok());
 }
 
-fn expiry() -> chrono::DateTime<Utc> {
-    Utc::now() + Duration::minutes(5)
+fn expiry() -> types::WireTimestamp {
+    types::WireTimestamp::now() + Duration::from_mins(5)
 }
 
 struct LifecycleWorker {
@@ -435,7 +435,7 @@ async fn authenticated_with(
 async fn authenticated_with_store(
     runtime: RuntimeService,
     authority: &AuthorityStore,
-    handle_expiry: chrono::DateTime<Utc>,
+    handle_expiry: types::WireTimestamp,
     idempotency: IdempotencyStore,
 ) -> (AuthenticatedRuntime, CapabilityHandle) {
     let token = authority
@@ -557,7 +557,7 @@ async fn hold_reservation(
                 false,
             )
             .unwrap(),
-            Utc::now(),
+            types::WireTimestamp::now(),
             context.deadline,
             context.correlation_id.clone(),
         )
@@ -600,8 +600,8 @@ async fn assert_reservation_released(
                     false,
                 )
                 .unwrap(),
-                Utc::now(),
-                Utc::now() + Duration::seconds(1),
+                types::WireTimestamp::now(),
+                types::WireTimestamp::now() + Duration::from_secs(1),
                 context.correlation_id.clone(),
             )
             .await
@@ -971,7 +971,7 @@ async fn checkpoint_rejects_another_principals_session_before_persistence() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
 
     let denial = other
@@ -1027,7 +1027,7 @@ async fn recovery_rejects_another_principals_checkpoint_before_browser_dispatch(
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     store.save(&checkpoint).await.unwrap();
     let runtime = RuntimeService::with_recovery(
@@ -1195,7 +1195,7 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
 #[tokio::test]
 async fn revoked_waiter_revalidates_and_abandons_without_runtime_dispatch() {
     let authority = AuthorityStore::in_memory();
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let (api, handle) = authenticated_with_store(
         RuntimeService::default(),
         &authority,
@@ -1205,7 +1205,7 @@ async fn revoked_waiter_revalidates_and_abandons_without_runtime_dispatch() {
     .await;
     let request = submit_request();
     let context = handle.context(
-        Utc::now() + Duration::seconds(2),
+        types::WireTimestamp::now() + Duration::from_secs(2),
         Some(IdempotencyKey::try_from("revoked-waiter").unwrap()),
     );
     let permit = hold_reservation(&store, &context, &request).await;
@@ -1221,7 +1221,7 @@ async fn revoked_waiter_revalidates_and_abandons_without_runtime_dispatch() {
     );
     authority.revoke(&context.principal_id).await.unwrap();
     store
-        .finish(permit, retryable_release(), Utc::now())
+        .finish(permit, retryable_release(), types::WireTimestamp::now())
         .await
         .unwrap();
 
@@ -1234,8 +1234,8 @@ async fn revoked_waiter_revalidates_and_abandons_without_runtime_dispatch() {
 #[tokio::test]
 async fn expired_handle_waiter_revalidates_and_abandons_without_runtime_dispatch() {
     let authority = AuthorityStore::in_memory();
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
-    let handle_expiry = Utc::now() + Duration::milliseconds(80);
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
+    let handle_expiry = types::WireTimestamp::now() + Duration::from_millis(80);
     let (api, handle) = authenticated_with_store(
         RuntimeService::default(),
         &authority,
@@ -1245,7 +1245,7 @@ async fn expired_handle_waiter_revalidates_and_abandons_without_runtime_dispatch
     .await;
     let request = submit_request();
     let context = handle.context(
-        Utc::now() + Duration::seconds(2),
+        types::WireTimestamp::now() + Duration::from_secs(2),
         Some(IdempotencyKey::try_from("expired-waiter").unwrap()),
     );
     let permit = hold_reservation(&store, &context, &request).await;
@@ -1261,7 +1261,7 @@ async fn expired_handle_waiter_revalidates_and_abandons_without_runtime_dispatch
     );
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     store
-        .finish(permit, retryable_release(), Utc::now())
+        .finish(permit, retryable_release(), types::WireTimestamp::now())
         .await
         .unwrap();
 
@@ -1274,7 +1274,7 @@ async fn expired_handle_waiter_revalidates_and_abandons_without_runtime_dispatch
 #[tokio::test]
 async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandoned() {
     let authority = AuthorityStore::in_memory();
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::from_mins(5));
     let (api, handle) = authenticated_with_store(
         RuntimeService::default(),
         &authority,
@@ -1287,7 +1287,7 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
     // cannot stretch that sleep past the deadline and finish the waiter early;
     // the waiter still self-expires with DeadlineExceeded when it elapses.
     let context = handle.context(
-        Utc::now() + Duration::seconds(2),
+        types::WireTimestamp::now() + Duration::from_secs(2),
         Some(IdempotencyKey::try_from("deadline-waiter").unwrap()),
     );
     let permit = hold_reservation(&store, &context, &request).await;
@@ -2357,7 +2357,7 @@ async fn checkpoint_replays_retained_checkpoint_and_conflicts_before_dispatch() 
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
 
     let first = api
@@ -2504,7 +2504,7 @@ async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     store.save(&checkpoint).await.unwrap();
     let runtime = RuntimeService::with_recovery(
@@ -2696,7 +2696,7 @@ async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempote
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(first.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(types::PrimitiveCommand::OpenPage(
                 types::OpenPageCommand { url: None },
             )),
@@ -2721,7 +2721,7 @@ async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempote
                 attempt_id: AttemptId::new(),
                 session_id: session.id.clone(),
                 page_id: None,
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
                     types::ListPagesCommand,
                 )),
@@ -2745,7 +2745,7 @@ async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempote
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(first.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(types::PrimitiveCommand::ClickAndWaitForPopup(
                 types::ClickAndWaitForPopupCommand {
                     selector: "#pop".into(),
@@ -2773,7 +2773,7 @@ async fn session_page_ids_sync_on_open_list_popup_close_and_add_page_is_idempote
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(popup_id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(30),
             command: RuntimeCommand::Primitive(types::PrimitiveCommand::ClosePage(
                 types::ClosePageCommand {
                     page_id: popup_id.clone(),

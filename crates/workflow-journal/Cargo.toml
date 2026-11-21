@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 durable-file.workspace = true
 ring.workspace = true
 same-file.workspace = true

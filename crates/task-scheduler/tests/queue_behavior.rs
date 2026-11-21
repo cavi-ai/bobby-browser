@@ -14,7 +14,7 @@ fn job_queue_rejected_cancellation_preserves_completed_job() {
                 success: true,
                 output: None,
                 error: None,
-                completed_at: chrono::Utc::now(),
+                completed_at: types::WireTimestamp::now(),
             },
         )
         .unwrap();

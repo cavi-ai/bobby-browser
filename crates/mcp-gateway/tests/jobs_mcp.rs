@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{InProcessJobPort, Server, Toolset};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::json;
@@ -24,7 +24,7 @@ async fn server_with_admission(capabilities: Vec<Capability>, degraded: bool) ->
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000061")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use page_runtime::{RecoveryCoordinator, SkillRecoveryCoordinator, SkillTacticEffect};
 use skill_runtime::{SkillTrigger, SkillZigZagZig};
 use tokio::sync::Mutex;
@@ -152,7 +152,7 @@ fn skill_state(
     checkpoint_id: CheckpointId,
     checkpoint_digest: &str,
 ) -> SkillSessionState {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let attestation = SkillEvidenceRef::new("checkpoint-attestation", checkpoint_digest).unwrap();
     let proof =
         SkillCheckpointProof::new(checkpoint_id.clone(), session_id.clone(), now, attestation)
@@ -167,13 +167,13 @@ fn skill_state(
         None,
         Vec::new(),
         Vec::new(),
-        now + Duration::seconds(5),
+        now + Duration::from_secs(5),
     )
     .unwrap()
 }
 
 fn skill_state_without_checkpoint(session_id: SessionId) -> SkillSessionState {
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     SkillSessionState::new(
         session_id,
         BTreeMap::from([("SkillZigZagZig".into(), "1.0.0".into())]),
@@ -184,7 +184,7 @@ fn skill_state_without_checkpoint(session_id: SessionId) -> SkillSessionState {
         None,
         Vec::new(),
         Vec::new(),
-        now + Duration::seconds(5),
+        now + Duration::from_secs(5),
     )
     .unwrap()
 }
@@ -363,7 +363,7 @@ async fn read_only_tactics_precede_interaction_retry_and_preserve_the_postcondit
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#credential-like-private-target".into(),
             target: None,
@@ -463,7 +463,7 @@ async fn uncertain_boundary_reconciles_without_duplicate_click() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let recovery = RecoveryCoordinator::with_workers(store.clone(), Arc::clone(&pool));
     recovery
@@ -494,7 +494,7 @@ async fn uncertain_boundary_reconciles_without_duplicate_click() {
         attempt_id,
         session_id,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#purchase".into(),
             target: None,
@@ -597,7 +597,7 @@ async fn cancelled_boundary_recovery_persists_receipt_without_duplicate_click() 
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
                 recovery_receipts: Vec::new(),
-                created_at: Utc::now(),
+                created_at: types::WireTimestamp::now(),
             },
             vec![Evidence::Navigation {
                 url: "https://example.test/start".into(),
@@ -633,7 +633,7 @@ async fn cancelled_boundary_recovery_persists_receipt_without_duplicate_click() 
         // finishing without ever calling `inspect`, which left the busy-wait
         // loop below spinning forever waiting for a count that would never
         // increase.
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#purchase".into(),
             target: None,
@@ -764,7 +764,7 @@ async fn checkpoint_authority_mismatch_fails_before_pool_replacement() {
         evidence: Vec::new(),
         recovery_history: Vec::new(),
         recovery_receipts: Vec::new(),
-        created_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
     };
     let recovery = RecoveryCoordinator::with_workers(store.clone(), Arc::clone(&pool));
     recovery
@@ -796,7 +796,7 @@ async fn checkpoint_authority_mismatch_fails_before_pool_replacement() {
         attempt_id,
         session_id,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#purchase".into(),
             target: None,
@@ -1073,7 +1073,7 @@ fn stuck_click_envelope(session_id: SessionId, page_id: PageId) -> CommandEnvelo
         // A 5s outer value left no slack for scheduling delay under sibling
         // test contention: `remaining_duration` could elapse before the
         // DeafDetectVision ladder finished, surfacing DeadlineExceeded.
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#blocked-target".into(),
             target: None,

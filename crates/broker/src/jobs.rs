@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use chrono::Duration as ChronoDuration;
 use config::AppConfig;
 use interface_core::{IdempotencyStore, RetainedOutcome};
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use task_scheduler::{register_builtin_handlers, JobId, JobScheduler, JobStatus, SchedulerConfig};
 use tracing::info;
@@ -53,7 +53,7 @@ pub async fn journal_scheduler(
 }
 
 pub fn job_idempotency_store() -> IdempotencyStore<JobSubmitOutcome> {
-    IdempotencyStore::with_global_capacity(256, 4096, ChronoDuration::minutes(15))
+    IdempotencyStore::with_global_capacity(256, 4096, SignedDuration::from_mins(15))
 }
 
 pub async fn shutdown_scheduler(

@@ -8,10 +8,10 @@ use std::{
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use base64::Engine as _;
-use chrono::{Duration, Utc};
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, EventStore, SessionOwnershipRegistry,
 };
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{ArtifactResources, Server};
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -278,7 +278,7 @@ async fn fixture_capturing(
                 Capability::ArtifactRead,
                 Capability::ArtifactCapture,
             ],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -506,7 +506,7 @@ async fn command_execute_list_pages_succeeds_without_a_page_id() {
                     "attemptId":"10000000-0000-0000-0000-000000000123",
                     "sessionId":session_id,
                     "pageId":null,
-                    "deadline":(Utc::now() + Duration::seconds(270)).to_rfc3339(),
+                    "deadline":(types::WireTimestamp::now() + Duration::from_secs(270)).rfc3339(),
                     "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
                 }}
             }),
@@ -535,7 +535,7 @@ async fn execute_screenshot(server: &Server) -> Value {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(
             CaptureScreenshotCommand {
                 mode: types::ScreenshotMode::Viewport,
@@ -757,7 +757,7 @@ async fn download_paths_are_replaced_by_authenticated_resources_and_never_expose
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForDownload(
             ClickAndWaitForDownloadCommand {
                 selector: "#download".to_owned(),

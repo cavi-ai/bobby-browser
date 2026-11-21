@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+
 use tokio::sync::Mutex;
 use types::{
     CommandId, RecoveryReceipt, RecoveryReceiptState, SkillBrowserEngine, SkillCapability,
@@ -216,7 +216,7 @@ impl SkillZigZagZig {
         if state
             .pending_issuance
             .as_ref()
-            .is_some_and(|issued| !issued.is_active_at(Utc::now()))
+            .is_some_and(|issued| !issued.is_active_at(types::WireTimestamp::now()))
         {
             return Err(SkillFailure::DeadlineExceeded);
         }
@@ -250,7 +250,7 @@ impl SkillZigZagZig {
     pub fn next_decision(
         &mut self,
         trigger: &SkillTrigger,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<SkillDecision, SkillFailure> {
         self.next_decision_inner(trigger, None, now)
     }
@@ -259,7 +259,7 @@ impl SkillZigZagZig {
         &mut self,
         trigger: &SkillTrigger,
         command_identity: SkillCommandIdentity,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<SkillDecision, SkillFailure> {
         self.next_decision_inner(trigger, Some(command_identity), now)
     }
@@ -268,7 +268,7 @@ impl SkillZigZagZig {
         &mut self,
         trigger: &SkillTrigger,
         command_identity: Option<SkillCommandIdentity>,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<SkillDecision, SkillFailure> {
         let remaining_deadline_ms = remaining_deadline_ms(self.state.deadline, now)?;
         if self.stopped || self.state.pending_issuance.is_some() || self.per_tactic_budget_ms == 0 {
@@ -333,7 +333,7 @@ impl SkillZigZagZig {
         &mut self,
         decision: &SkillDecision,
         outcome: &SkillOutcome,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<(), SkillFailure> {
         if now > self.state.deadline {
             return Err(SkillFailure::DeadlineExceeded);
@@ -345,8 +345,8 @@ impl SkillZigZagZig {
         &mut self,
         decision: &SkillDecision,
         outcome: &SkillOutcome,
-        now: DateTime<Utc>,
-        finalization_deadline: DateTime<Utc>,
+        now: types::WireTimestamp,
+        finalization_deadline: types::WireTimestamp,
     ) -> Result<(), SkillFailure> {
         if now <= self.state.deadline
             || now > finalization_deadline
@@ -364,7 +364,7 @@ impl SkillZigZagZig {
         &mut self,
         decision: &SkillDecision,
         outcome: &SkillOutcome,
-        now: DateTime<Utc>,
+        now: types::WireTimestamp,
     ) -> Result<(), SkillFailure> {
         let issued = self
             .state
@@ -401,7 +401,7 @@ impl SkillZigZagZig {
         settle_committed_receipt_state(&mut self.state, receipt)
     }
 
-    fn next_tactic(&self, failure: SkillFailure, now: DateTime<Utc>) -> Option<SkillTactic> {
+    fn next_tactic(&self, failure: SkillFailure, now: types::WireTimestamp) -> Option<SkillTactic> {
         if failure == SkillFailure::EffectUncertain {
             return self
                 .eligible(SkillTactic::ReconcileCheckpoint, now)
@@ -412,14 +412,14 @@ impl SkillZigZagZig {
             .find(|tactic| self.eligible(*tactic, now))
     }
 
-    fn eligible(&self, tactic: SkillTactic, now: DateTime<Utc>) -> bool {
+    fn eligible(&self, tactic: SkillTactic, now: types::WireTimestamp) -> bool {
         !self.state.attempted_tactics.contains(&tactic)
             && (!requires_checkpoint(tactic) || self.verified_checkpoint(now).is_some())
             && (tactic != SkillTactic::SelectCompatibleEngine
                 || self.select_compatible_engine().is_some())
     }
 
-    fn verified_checkpoint(&self, now: DateTime<Utc>) -> Option<SkillCheckpointProof> {
+    fn verified_checkpoint(&self, now: types::WireTimestamp) -> Option<SkillCheckpointProof> {
         let proof = self.state.verified_checkpoint.as_ref()?;
         (self.state.last_checkpoint_id.as_ref() == Some(&proof.checkpoint_id)
             && proof.session_id == self.state.session_id
@@ -427,7 +427,7 @@ impl SkillZigZagZig {
         .then(|| proof.clone())
     }
 
-    fn proof_is_unchanged(&self, issued: &SkillIssuedDecision, now: DateTime<Utc>) -> bool {
+    fn proof_is_unchanged(&self, issued: &SkillIssuedDecision, now: types::WireTimestamp) -> bool {
         match &issued.checkpoint_proof {
             None => true,
             Some(proof) => self.verified_checkpoint(now).as_ref() == Some(proof),
@@ -496,8 +496,11 @@ pub(crate) fn settle_committed_receipt_state(
     Ok(())
 }
 
-fn remaining_deadline_ms(deadline: DateTime<Utc>, now: DateTime<Utc>) -> Result<u64, SkillFailure> {
-    let remaining = deadline.signed_duration_since(now).num_milliseconds();
+fn remaining_deadline_ms(
+    deadline: types::WireTimestamp,
+    now: types::WireTimestamp,
+) -> Result<u64, SkillFailure> {
+    let remaining = deadline.duration_since(now).as_millis();
     if remaining <= 0 {
         return Err(SkillFailure::DeadlineExceeded);
     }

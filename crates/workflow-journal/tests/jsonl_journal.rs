@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 use types::{CommandId, CommandPhase};
 use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
@@ -17,7 +16,7 @@ fn v1_navigate_line(sequence: u64, command_id: &CommandId) -> String {
 fn record(command_id: &CommandId, phase: CommandPhase) -> JournalRecord {
     JournalRecord {
         sequence: 0,
-        recorded_at: Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: command_id.clone(),
         phase,
         envelope: None,

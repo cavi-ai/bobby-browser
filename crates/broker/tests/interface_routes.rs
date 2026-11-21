@@ -9,9 +9,9 @@ use std::{
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{Request, StatusCode};
 use broker::{router, AppState};
-use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{
@@ -30,7 +30,7 @@ async fn authenticated_app(
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010")),
             capabilities,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -198,7 +198,7 @@ async fn counted_app(
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010")),
             capabilities,
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()
@@ -228,7 +228,7 @@ fn authorized(method: &str, uri: &str, token: &str, body: Body) -> Request<Body>
         .header("x-correlation-id", "10000000-0000-0000-0000-000000000011")
         .header(
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
         )
         .header("content-type", "application/json")
         .body(body)
@@ -362,8 +362,8 @@ async fn body_collection_obeys_deadline_and_releases_the_in_flight_permit() {
     let mut request = authorized("POST", "/v1/sessions", &token, Body::from_stream(delayed));
     request.headers_mut().insert(
         "x-deadline",
-        (Utc::now() + Duration::seconds(5))
-            .to_rfc3339_opts(SecondsFormat::Millis, true)
+        (types::WireTimestamp::now() + Duration::from_secs(5))
+            .rfc3339_millis()
             .parse()
             .unwrap(),
     );
@@ -572,8 +572,8 @@ async fn deadlines_are_strictly_bounded_before_dispatch() {
     let mut request = authorized("GET", "/v1/runtime", &token, Body::empty());
     request.headers_mut().insert(
         "x-deadline",
-        (Utc::now() + Duration::days(1))
-            .to_rfc3339_opts(SecondsFormat::Millis, true)
+        (types::WireTimestamp::now() + Duration::from_hours(24))
+            .rfc3339_millis()
             .parse()
             .unwrap(),
     );

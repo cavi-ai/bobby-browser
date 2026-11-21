@@ -156,7 +156,7 @@ impl FileVersion {
 #[derive(Clone, PartialEq, Eq)]
 struct CheckpointRef {
     workflow_id: WorkflowId,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: types::WireTimestamp,
     path: PathBuf,
     version: FileVersion,
 }

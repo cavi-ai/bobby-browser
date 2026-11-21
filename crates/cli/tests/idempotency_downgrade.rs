@@ -1,6 +1,6 @@
 //! Real CLI rollback using isolated configuration and durable ledger files.
-use chrono::{Duration, Utc};
 use interface_core::{IdempotencyReservation, IdempotencyStore};
+use jiff::SignedDuration as Duration;
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -42,7 +42,7 @@ async fn seed(path: &Path) -> IdempotencyStore {
     })
     .await
     .unwrap();
-    let now = Utc::now();
+    let now = types::WireTimestamp::now();
     let IdempotencyReservation::Acquired(permit) = store
         .reserve(
             PrincipalId::from_uuid(uuid::Uuid::nil()),
@@ -50,7 +50,7 @@ async fn seed(path: &Path) -> IdempotencyStore {
             InterfaceOperation::SubmitCommand,
             [0; 32],
             now,
-            now + Duration::seconds(30),
+            now + Duration::from_secs(30),
             CorrelationId::new(),
         )
         .await

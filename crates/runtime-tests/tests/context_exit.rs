@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use test_site::{FixtureSite, Route};
 use types::{
@@ -143,7 +143,7 @@ impl Station {
                 Capability::IntentExecute,
                 Capability::ContextRead,
             ],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         );
         let mut station = Self {
             runtime: runtime.clone(),
@@ -210,7 +210,7 @@ impl Station {
                 attempt_id: AttemptId::new(),
                 session_id: self.session.clone(),
                 page_id: Some(self.page.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command,
             })
             .await
@@ -303,7 +303,7 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
                 Capability::IntentExecute,
                 Capability::ContextRead,
             ],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap()

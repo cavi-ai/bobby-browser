@@ -9,8 +9,8 @@ use std::{
 };
 
 use broker::StartupCredential;
-use chrono::{Duration, SecondsFormat, Utc};
 use config::AppConfig;
+use jiff::SignedDuration as Duration;
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -72,7 +72,7 @@ pub fn startup_credential(capabilities: Vec<Capability>) -> StartupCredential {
         BOOTSTRAP_BEARER.to_owned(),
         types::PrincipalId::from_uuid(Uuid::nil()),
         capabilities,
-        Utc::now() + Duration::minutes(30),
+        types::WireTimestamp::now() + Duration::from_mins(30),
     )
     .expect("bootstrap startup credential is valid")
 }
@@ -166,7 +166,7 @@ pub fn context_headers(bearer: &str) -> Vec<(&'static str, String)> {
         ("x-correlation-id", Uuid::new_v4().to_string()),
         (
             "x-deadline",
-            (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            (types::WireTimestamp::now() + Duration::from_mins(2)).rfc3339_millis(),
         ),
     ]
 }
@@ -184,7 +184,7 @@ pub async fn issue_principal(
     let body = json!({
         "principalId": principal,
         "capabilities": capabilities,
-        "expiresAt": (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true),
+        "expiresAt": (types::WireTimestamp::now() + Duration::from_mins(10)).rfc3339_millis(),
     });
     let (status, response) = send(address, "POST", "/v1/principals", &headers, Some(&body)).await;
     assert_eq!(status, 201, "principal issuance failed: {response}");

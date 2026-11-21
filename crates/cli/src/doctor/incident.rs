@@ -277,7 +277,7 @@ pub(super) fn export(config: &AppConfig, output: &Path) -> Result<()> {
     let bundle = json!({
         "schemaVersion": 1,
         "runtimeVersion": env!("CARGO_PKG_VERSION"),
-        "collectedAt": chrono::Utc::now(),
+        "collectedAt": types::WireTimestamp::now(),
         "consistency": "nonAtomicObservation",
         "replayAuthority": false,
         "stores": stores,

@@ -74,7 +74,7 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
             &mut file,
             &JournalRecord {
                 sequence,
-                recorded_at: chrono::Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: command_id.clone(),
                 phase: CommandPhase::Accepted,
                 envelope: None,
@@ -140,7 +140,7 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     let archive = root.path().join("archived.jsonl.archive-fixture");
     let mut original = serde_json::to_vec(&JournalRecord {
         sequence: 0,
-        recorded_at: chrono::Utc::now(),
+        recorded_at: types::WireTimestamp::now(),
         command_id: command_id.clone(),
         phase: CommandPhase::Accepted,
         envelope: None,

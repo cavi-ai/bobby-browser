@@ -5,8 +5,8 @@ use std::sync::Arc;
 use cdp_gateway::{
     CdpConnection, CdpErrorCode, CdpRequest, MethodRegistry, MAX_IN_FLIGHT_REQUESTS,
 };
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use serde_json::json;
 use types::{Capability, PrincipalId};
 
@@ -17,7 +17,7 @@ async fn connection_runs_requests_concurrently_and_rejects_before_spawning_over_
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
             [Capability::SessionRead],
-            Utc::now() + Duration::minutes(5),
+            types::WireTimestamp::now() + Duration::from_mins(5),
         )
         .await
         .unwrap();

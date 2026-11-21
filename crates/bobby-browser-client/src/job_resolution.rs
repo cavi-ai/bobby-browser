@@ -1,6 +1,6 @@
 //! Explicit operator attestation for an uncertain scheduled effect. Never replay.
 use crate::PrincipalId;
-use chrono::{DateTime, Utc};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ pub struct JobResolutionReceipt {
     pub decision: JobResolutionDecision,
     pub evidence_sha256: String,
     pub actor: PrincipalId,
-    pub resolved_at: DateTime<Utc>,
+    pub resolved_at: crate::WireTimestamp,
     /// The runtime records an operator's assertion; it does not verify the effect.
     pub provenance: String,
 }

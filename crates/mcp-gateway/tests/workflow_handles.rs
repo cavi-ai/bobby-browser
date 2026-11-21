@@ -4,8 +4,8 @@ mod common;
 
 use std::{sync::Arc, time::Duration as StdDuration};
 
-use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, CapabilityHandle};
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{Server, INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE};
 use serde_json::{json, Value};
 use types::{Capability, CommandId, CommandPhase, PrincipalId};
@@ -27,7 +27,7 @@ async fn verified_handle(capabilities: Vec<Capability>) -> CapabilityHandle {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000039")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("issue capability token");
@@ -2487,7 +2487,7 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
             )
             .unwrap(),
             page_id: Some(popup_page_id),
-            deadline: Utc::now() + Duration::seconds(10),
+            deadline: types::WireTimestamp::now() + Duration::from_secs(10),
             command: types::RuntimeCommand::Primitive(types::PrimitiveCommand::EvaluateJavaScript(
                 types::EvaluateJavaScriptCommand {
                     expression: "window.close()".into(),

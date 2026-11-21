@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, CapabilityHandle, EventStore, RuntimeInterface};
+use jiff::SignedDuration as Duration;
 use mcp_gateway::protocol::{MAX_FRAME_BYTES, MAX_REQUEST_ID_BYTES};
 use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -15,7 +15,7 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000006")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -401,7 +401,7 @@ async fn for_interface_constructor_serves_initialize() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000006")),
             vec![Capability::SessionRead],
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();

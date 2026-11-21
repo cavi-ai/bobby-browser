@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::{Server, Toolset, TOOLS_LIST_BYTE_BUDGET};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -26,7 +26,7 @@ async fn server() -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000044")),
             all_capabilities(),
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("authority issues");
@@ -89,7 +89,7 @@ async fn the_default_is_explore() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000045")),
             all_capabilities(),
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("authority issues");
@@ -367,7 +367,7 @@ async fn a_principal_holding_nothing_is_shown_nothing() {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000045")),
             Vec::<Capability>::new(),
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .expect("authority issues");

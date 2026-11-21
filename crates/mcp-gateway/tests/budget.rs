@@ -5,8 +5,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
+use jiff::SignedDuration as Duration;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -29,7 +29,7 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000032")),
             capabilities,
-            Utc::now() + Duration::hours(1),
+            types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
         .unwrap();
@@ -295,7 +295,7 @@ async fn narrowing_the_advertised_schema_did_not_narrow_validation() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Continue".to_owned(),
             hints: IntentHints::default(),
@@ -900,8 +900,8 @@ async fn session_list_round_trips_through_its_output_schema() {
         profile: "default".to_owned(),
         proxy: None,
         page_ids: vec![PageId::new()],
-        created_at: Utc::now(),
-        last_used_at: Utc::now(),
+        created_at: types::WireTimestamp::now(),
+        last_used_at: types::WireTimestamp::now(),
         execution_policy: ExecutionPolicy::default(),
         zigzagzig: false,
     }])

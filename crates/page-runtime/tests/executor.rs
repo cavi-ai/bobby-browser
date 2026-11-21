@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, ClickModifier, CommandClass, CommandEnvelope,
@@ -747,7 +747,7 @@ async fn upload_and_confirm_returns_upload_and_confirmation_evidence() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1082,7 +1082,7 @@ fn envelope(session: SessionId, page: PageId, command: PrimitiveCommand) -> Comm
         attempt_id: AttemptId::new(),
         session_id: session,
         page_id: Some(page),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Primitive(command),
     }
 }
@@ -1095,7 +1095,7 @@ fn intent_envelope(session: SessionId, page: PageId, command: IntentCommand) -> 
         attempt_id: AttemptId::new(),
         session_id: session,
         page_id: Some(page),
-        deadline: Utc::now() + Duration::minutes(1),
+        deadline: types::WireTimestamp::now() + Duration::from_mins(1),
         command: RuntimeCommand::Intent(command),
     }
 }
@@ -1331,7 +1331,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1409,7 +1409,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1501,7 +1501,7 @@ async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1769,7 +1769,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -1848,7 +1848,7 @@ async fn expected_state_pre_satisfied_is_failed_not_needs_reconciliation() {
             evidence: Vec::new(),
             recovery_history: Vec::new(),
             recovery_receipts: Vec::new(),
-            created_at: Utc::now(),
+            created_at: types::WireTimestamp::now(),
         })
         .await
         .unwrap();
@@ -2969,7 +2969,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
     let journal = Arc::new(RecoveryJournal {
         records: vec![JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::ResultPrepared,
             envelope: None,
@@ -3057,7 +3057,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
     let records = vec![
         JournalRecord {
             sequence: 0,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::Accepted,
             envelope: Some(command.journal_safe()),
@@ -3066,7 +3066,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         },
         JournalRecord {
             sequence: 1,
-            recorded_at: Utc::now(),
+            recorded_at: types::WireTimestamp::now(),
             command_id: command_id.clone(),
             phase: CommandPhase::ResultPrepared,
             envelope: None,
@@ -3724,7 +3724,7 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
             include_html: false,
         }),
     );
-    request.deadline = Utc::now() + Duration::milliseconds(200);
+    request.deadline = types::WireTimestamp::now() + Duration::from_millis(200);
 
     let outcome = tokio::time::timeout(StdDuration::from_secs(2), runtime.execute(request))
         .await
@@ -3896,7 +3896,7 @@ async fn archived_history_never_authorizes_recovery_evidence_or_session_ownershi
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: id.clone(),
                 phase: if completed {
                     CommandPhase::Completed
@@ -3945,7 +3945,7 @@ async fn archived_history_never_authorizes_recovery_evidence_or_session_ownershi
         journal
             .append(JournalRecord {
                 sequence: 0,
-                recorded_at: Utc::now(),
+                recorded_at: types::WireTimestamp::now(),
                 command_id: fresh.clone(),
                 phase: CommandPhase::Accepted,
                 envelope: None,
@@ -4246,7 +4246,7 @@ async fn list_pages_registers_discovered_pages_without_pruning_or_resurrecting_c
             attempt_id: AttemptId::new(),
             session_id: session_b.clone(),
             page_id: None,
-            deadline: Utc::now() + chrono::Duration::seconds(30),
+            deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(
                 types::ListPagesCommand,
             )),

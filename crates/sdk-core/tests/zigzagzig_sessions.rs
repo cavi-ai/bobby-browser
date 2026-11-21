@@ -11,8 +11,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use intent_engine::{VisionAssist, VisionProposal, VisionProposeRequest};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use tokio::sync::Mutex;
 use types::{
@@ -214,7 +214,7 @@ fn stuck_click(session_id: SessionId, page_id: PageId) -> CommandEnvelope {
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(5),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#blocked-target".into(),
             target: None,

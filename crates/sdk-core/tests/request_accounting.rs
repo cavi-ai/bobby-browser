@@ -1,8 +1,8 @@
-use chrono::{Duration, Utc};
 use interface_core::{
     command_identity_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyReservation,
     IdempotencyStore, RuntimeInterface,
 };
+use jiff::SignedDuration as Duration;
 use observability::test_support::CaptureSink;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use std::task::{Context, Poll, Waker};
@@ -12,8 +12,8 @@ use types::{
     WaitUntil, WorkflowId,
 };
 
-fn deadline() -> chrono::DateTime<Utc> {
-    Utc::now() + Duration::minutes(5)
+fn deadline() -> types::WireTimestamp {
+    types::WireTimestamp::now() + Duration::from_mins(5)
 }
 
 async fn setup(
@@ -171,7 +171,7 @@ async fn cancelled_waiter_reports_interruption_without_an_execution_or_retry_cla
             context.idempotency_key.clone().unwrap(),
             InterfaceOperation::SubmitCommand,
             digest,
-            Utc::now(),
+            types::WireTimestamp::now(),
             context.deadline,
             context.correlation_id.clone(),
         )

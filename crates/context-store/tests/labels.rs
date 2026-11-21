@@ -51,7 +51,7 @@ fn label_keys_are_trimmed_lowercase_and_bounded() {
 #[tokio::test]
 async fn labels_survive_a_reopen() {
     let temp = tempfile::tempdir().unwrap();
-    let today = day_since_epoch(chrono::Utc::now());
+    let today = day_since_epoch(jiff::Timestamp::now());
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
     let written = site(&[("contact email", label("f17", today))]);
     store.upsert_site(SITE, written.clone()).await;
@@ -66,7 +66,7 @@ async fn labels_survive_a_reopen() {
 #[tokio::test]
 async fn sweep_drops_expired_labels_and_keeps_fresh_ones() {
     let temp = tempfile::tempdir().unwrap();
-    let today = day_since_epoch(chrono::Utc::now());
+    let today = day_since_epoch(jiff::Timestamp::now());
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
     store
         .upsert_site(
@@ -96,7 +96,7 @@ async fn sweep_drops_expired_labels_and_keeps_fresh_ones() {
 #[tokio::test]
 async fn an_oversized_label_key_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let today = day_since_epoch(chrono::Utc::now());
+    let today = day_since_epoch(jiff::Timestamp::now());
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
     let key = "x".repeat(MAX_LABEL_BYTES + 1);
     store

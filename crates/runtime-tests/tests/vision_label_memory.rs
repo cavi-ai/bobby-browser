@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use config::{NodeConfig, NodeKind};
+use jiff::SignedDuration as Duration;
 use sdk_core::RuntimeService;
 use test_site::{FixtureSite, Route};
 use types::{
@@ -137,7 +137,7 @@ fn envelope(
         attempt_id: AttemptId::new(),
         session_id: session.clone(),
         page_id: Some(page.clone()),
-        deadline: Utc::now() + Duration::seconds(30),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(30),
         command,
     }
 }

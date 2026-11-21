@@ -154,7 +154,7 @@ pub fn render(bundle: &VerifiedBundle) -> Result<String> {
          signer <code>{signer}</code> ({pinned})</p>",
         id = escape(&summary.workflow_id),
         sessions = escape(&bundle.session_ids.join(", ")),
-        created = escape(&bundle.created_at.to_rfc3339()),
+        created = escape(&bundle.created_at.rfc3339()),
         version = escape(&bundle.bobby_version),
         files = summary.files,
         signer = escape(&summary.public_key),
@@ -267,7 +267,7 @@ pub fn render(bundle: &VerifiedBundle) -> Result<String> {
 mod tests {
     use super::*;
     use crate::audit_bundle::{export, load_or_create_key, open_verified, BundleSources};
-    use chrono::Utc;
+
     use types::{
         AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
         ErrorCode, ErrorLayer, Evidence, NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand,
@@ -297,7 +297,7 @@ mod tests {
             journal
                 .append(JournalRecord {
                     sequence: 0,
-                    recorded_at: Utc::now(),
+                    recorded_at: types::WireTimestamp::now(),
                     command_id: command.clone(),
                     phase: CommandPhase::Executing,
                     envelope: Some(CommandEnvelope {
@@ -307,7 +307,7 @@ mod tests {
                         attempt_id: AttemptId::new(),
                         session_id: session.clone(),
                         page_id: Some(PageId::new()),
-                        deadline: Utc::now() + chrono::Duration::seconds(30),
+                        deadline: types::WireTimestamp::now() + jiff::SignedDuration::from_secs(30),
                         command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(
                             NavigateCommand {
                                 url: url.into(),
@@ -348,7 +348,7 @@ mod tests {
             journal
                 .append(JournalRecord {
                     sequence: 0,
-                    recorded_at: Utc::now(),
+                    recorded_at: types::WireTimestamp::now(),
                     command_id: command.clone(),
                     phase: CommandPhase::Completed,
                     envelope: None,

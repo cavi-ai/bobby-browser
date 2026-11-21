@@ -190,7 +190,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id: session_id.clone(),
                 page_id: Some(page_id),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(
                     CaptureScreenshotCommand {
                         mode,
@@ -421,7 +421,7 @@ impl CdpConnection {
                 attempt_id: AttemptId::new(),
                 session_id: SessionId(session_uuid),
                 page_id: Some(PageId(page_uuid)),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline: types::WireTimestamp::now() + Duration::from_secs(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                     url: url.to_owned(),
                     wait_until: WaitUntil::Interactive,

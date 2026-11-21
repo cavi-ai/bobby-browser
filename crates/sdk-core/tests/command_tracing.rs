@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use observability::test_support::CaptureSink;
 use sdk_core::RuntimeService;
 use types::{
@@ -22,7 +22,7 @@ async fn command_trace_correlates_outcome_without_payloads() {
         attempt_id: AttemptId::new(),
         session_id: SessionId::new(),
         page_id: None,
-        deadline: Utc::now() + Duration::seconds(10),
+        deadline: types::WireTimestamp::now() + Duration::from_secs(10),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
             url: "https://example.com/SECRET_TRACE_CANARY?token=PRIVATE".into(),
             wait_until: WaitUntil::DomContentLoaded,

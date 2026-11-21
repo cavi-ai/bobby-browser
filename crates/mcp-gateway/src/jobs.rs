@@ -219,9 +219,9 @@ fn job_to_wire(job: Job) -> JobStatusWire {
         priority: priority_wire(&job.priority),
         status: status_wire(&job.status),
         payload: job.payload,
-        created_at: job.created_at.to_rfc3339(),
-        started_at: job.started_at.map(|t| t.to_rfc3339()),
-        completed_at: job.completed_at.map(|t| t.to_rfc3339()),
+        created_at: job.created_at.rfc3339(),
+        started_at: job.started_at.map(|t| t.rfc3339()),
+        completed_at: job.completed_at.map(|t| t.rfc3339()),
         retry_count: job.retry_count,
         max_retries: job.max_retries,
         result: job.result.map(|r| {
@@ -230,7 +230,7 @@ fn job_to_wire(job: Job) -> JobStatusWire {
                 "success": r.success,
                 "output": r.output,
                 "error": r.error,
-                "completedAt": r.completed_at.to_rfc3339(),
+                "completedAt": r.completed_at.rfc3339(),
             })
         }),
         error: job.error,

@@ -1,6 +1,5 @@
 //! Interface versioning, correlation, errors, and operation authority.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use uuid::Uuid;
@@ -167,7 +166,7 @@ pub struct RequestContext {
     pub correlation_id: CorrelationId,
     pub principal_id: PrincipalId,
     pub capabilities: CapabilitySet,
-    pub deadline: DateTime<Utc>,
+    pub deadline: crate::WireTimestamp,
     pub idempotency_key: Option<IdempotencyKey>,
 }
 
@@ -175,7 +174,7 @@ impl RequestContext {
     pub fn new_for_test(
         principal_id: PrincipalId,
         capabilities: impl IntoIterator<Item = Capability>,
-        deadline: DateTime<Utc>,
+        deadline: crate::WireTimestamp,
     ) -> Self {
         Self {
             interface_version: InterfaceVersion::CURRENT,
@@ -190,7 +189,7 @@ impl RequestContext {
     /// Checks values whose validity depends on the instant an adapter dispatches the request.
     pub fn validate_at(
         &self,
-        dispatch_time: DateTime<Utc>,
+        dispatch_time: crate::WireTimestamp,
     ) -> Result<(), InterfaceValidationError> {
         if self.deadline <= dispatch_time {
             return Err(InterfaceValidationError::ExpiredDeadline);

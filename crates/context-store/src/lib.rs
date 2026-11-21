@@ -184,8 +184,8 @@ pub struct OpenReport {
 
 /// Days since the Unix epoch for a wall-clock time — the only timestamp
 /// precision this store can express.
-pub fn day_since_epoch(time: chrono::DateTime<chrono::Utc>) -> u32 {
-    (time.timestamp().max(0) / 86_400) as u32
+pub fn day_since_epoch(time: jiff::Timestamp) -> u32 {
+    (time.as_second().max(0) / 86_400) as u32
 }
 
 #[derive(Default)]

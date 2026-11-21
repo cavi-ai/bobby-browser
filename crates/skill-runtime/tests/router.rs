@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration as Duration;
 use skill_runtime::{
     SkillCommandRouter, SkillContext, SkillRegistry, SkillStateStore, SkillZigZagZigController,
 };
@@ -17,7 +17,7 @@ fn session_state(session_id: SessionId) -> SkillSessionState {
         None,
         Vec::new(),
         Vec::new(),
-        Utc::now() + Duration::minutes(1),
+        types::WireTimestamp::now() + Duration::from_mins(1),
     )
     .unwrap()
 }
