@@ -5,12 +5,17 @@
 ### Added
 
 - The Python SDK reads engine-scoped runtime info, remembered form neighbors, and the event stream, and builds intent envelopes.
+
 ### Fixed
 
 - Direct-HTTP `inspect` leaves `script`, `style`, `noscript` and `template` text out of page text, so a client-rendered shell reports that it needs JavaScript.
 - An `intent_complete_form` field whose only hint is an `accessibleName` holding a form-snapshot `controlId` fills that control.
 - A multi-line `setText` verifies against a form snapshot that reads its line breaks as spaces.
 - Chromium `navigate` honors `waitUntil` and finishes within `timeoutMs`; a timeout names the readiness stage it reached.
+- Firefox popup waits use the remaining time to settle. They preserve discovery evidence if settlement times out and keep the workflow on the opener if the bound popup closes during settlement.
+- The TypeScript SDK's session state type includes the selected engine in `execution_policy.engine` when the runtime reports it.
+- Firefox `navigate` uses one timeout for navigation, document settlement, and page metadata.
+- The Python SDK retries event polls interrupted mid-response from the last delivered cursor.
 
 ### Security
 

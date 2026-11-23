@@ -41,7 +41,7 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with `max
 |---|---|
 | `runtime_info()` | `GET /v1/runtime` |
 | `runtime_info_for_engine(engine)` | `GET /v1/runtime?engine=` (`chromium`, `firefox`, or `webKit`) |
-| `events(cursor, limit=100)` | `GET /v1/events`. Iterator; a cursor gap raises `RuntimeClientError` with `event_gap` |
+| `events(cursor, options=None, *, limit=100, max_transport_retries=2, retry_delay_ms=50)` | `GET /v1/events`. Synchronous iterator over events after `cursor` |
 | `create_session(input, options=None)` | `POST /v1/sessions` |
 | `read_session(session_id=None)` | `GET /v1/sessions`. With an ID it filters the list and raises if nothing matches |
 | `delete_session(session_id)` | `DELETE /v1/sessions/{id}` |
@@ -86,9 +86,13 @@ outcome = client.submit_command({
 client.delete_session(session["id"])
 ```
 
-`events` polls `GET /v1/events`. A cursor gap is HTTP 409 and raises `RuntimeClientError` with `event_gap` set.
-
 Intent envelopes come from `bobby_browser.intents` (`locate_envelope`, `fill_envelope`, and the `*_runtime_command` builders). They produce the same `{kind: "intent"}` command as the TypeScript helpers. See [Intent commands](../guides/intents.md).
+
+## Read events
+
+`events` uses one deadline for the iterator's polls and transport retries. If a connection drops during a response, the poll retries from the last delivered cursor within that budget and the retry limit. Pass `RequestOptions(timeout_ms=...)` or an absolute `deadline` to change the default 30-second budget. The SDK accepts a `limit` from 1 to 256, subject to the runtime's configured batch limit.
+
+A cursor gap ends the iterator with HTTP 409 and a `RuntimeClientError` carrying `event_gap`. See [Events and recovery](../guides/events-recovery.md#gaps) for resuming after a gap.
 
 ## Errors
 

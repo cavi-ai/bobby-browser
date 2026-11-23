@@ -37,6 +37,8 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 ## Request details
 
+**Runtime info.** Add `?engine=chromium`, `?engine=firefox` or `?engine=webKit` to `GET /v1/runtime` to scope the browser capability report. The response includes the selected `engineScope`.
+
 **Create a session.** `POST /v1/sessions` takes `{profile, proxy, executionPolicy?, zigzagzig?}`. All `executionPolicy` flags default to off:
 
 ```json
@@ -57,7 +59,7 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 **Recovery.** `GET` returns `{workflowId, checkpoint, receipts}` for a workflow you own. `POST` returns a recovery decision; `needsReconciliation` is HTTP 409.
 
-**Events.** Query `after` (cursor) and `limit`. Add `stream=1` for server-sent events: each frame's `id` is its cursor, and a cursor gap ends the stream with an `event.gap` frame.
+**Events.** Query `after` (exclusive cursor) and `limit`. A JSON poll waits for an event or the request deadline. Add `stream=1` for server-sent events. Each event's `id` is its cursor, and a cursor gap ends the stream with an `event.gap` frame.
 
 **Jobs.** `POST /v1/jobs` takes `{name, payload?, priority?, maxRetries?, timeoutMs?}` and returns `{jobId, status}`. `priority` is `low`, `normal` (default), `high` or `critical`; `maxRetries` defaults to 3. If persisting the job is uncertain, the error carries `jobId` and `reconciliationRequired: true`: query that job before submitting again. A job status with `reconciliationRequired` means the outcome is uncertain, so check the external effect first. `POST /v1/jobs/{job}/resolution` takes `{decision, evidenceSha256}` with `decision` of `effectObserved` or `effectAbsent` and a lowercase hex SHA-256. It records an operator's assertion, marks the job `resolved`, and never runs the handler.
 

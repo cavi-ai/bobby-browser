@@ -2232,10 +2232,19 @@ async fn cancelling_error_rollback_at_each_cleanup_await_restarts_the_same_clean
 
 #[tokio::test]
 async fn open_page_and_navigate_map_to_bidi_context_commands() {
+    let settled = |url: &str| {
+        let page = json!({"url": url, "title": "Original tab title"});
+        let probe = json!({
+            "url": url, "title": "Original tab title", "quiet": true, "begin": page
+        });
+        Ok(json!({"result": {"type": "string", "value": probe.to_string()}}))
+    };
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
         Ok(json!({"url": "https://example.test/final", "navigation": "nav-1"})),
+        settled("https://example.test/final"),
         Ok(json!({"url": "https://example.test/interactive", "navigation": "nav-2"})),
+        settled("https://example.test/interactive"),
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
@@ -2284,23 +2293,15 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
     assert!(calls.iter().any(|call| {
         call.method == "browsingContext.navigate" && call.params["wait"] == "interactive"
     }));
-    let title_evals = calls
-        .iter()
-        .filter(|call| {
-            call.method == "script.evaluate" && call.params["expression"] == "document.title"
-        })
-        .count();
-    assert!(
-        title_evals >= 2,
-        "navigate must read document.title; saw {title_evals} title evaluates: {calls:?}"
-    );
     assert!(complete.iter().any(|item| matches!(
         item,
-        Evidence::Navigation { title, .. } if title == "Original tab title"
+        Evidence::Navigation { url, title }
+            if url == "https://example.test/final" && title == "Original tab title"
     )));
     assert!(interactive.iter().any(|item| matches!(
         item,
-        Evidence::Navigation { title, .. } if title == "Original tab title"
+        Evidence::Navigation { url, title }
+            if url == "https://example.test/interactive" && title == "Original tab title"
     )));
     assert_engine_native(&complete);
     assert_engine_native(&interactive);
@@ -6098,6 +6099,52 @@ async fn navigate_reports_the_document_a_script_redirect_settles_on() {
         )),
         "{evidence:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn navigate_settlement_respects_the_remaining_timeout() {
+    let url = "https://example.test/ready";
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"url": url})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let navigation = bidi.block_once("browsingContext.navigate", None).await;
+    let operation = tokio::spawn(async move {
+        worker_pool::navigation_or_default(worker.navigation())
+            .navigate(
+                &page,
+                &NavigateCommand {
+                    url: url.into(),
+                    wait_until: WaitUntil::DomContentLoaded,
+                    timeout_ms: 100,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_millis(50), navigation.started.notified())
+        .await
+        .expect("BiDi navigation should start");
+    let settle = bidi
+        .block_once("script.evaluate", Some("MutationObserver"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    navigation.release.notify_one();
+    tokio::time::timeout(Duration::from_millis(10), settle.started.notified())
+        .await
+        .expect("settlement should start with time left");
+
+    let error = tokio::time::timeout(Duration::from_millis(30), operation)
+        .await
+        .expect("settlement must finish within the original navigation budget")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
 }
 
 #[tokio::test]
