@@ -308,9 +308,7 @@ struct CheckpointRequest {
     evidence_refs: Vec<types::CommandId>,
 }
 
-/// Must match `mcp_gateway::schema::MAX_EVIDENCE_ITEMS`: both surfaces resolve
-/// through the same journal and bound the work the same way.
-const MAX_EVIDENCE_REFS: usize = 128;
+const MAX_EVIDENCE_REFS: usize = types::MAX_CHECKPOINT_EVIDENCE_REFS;
 
 async fn checkpoint(
     Extension(request): Extension<AuthenticatedRequest>,

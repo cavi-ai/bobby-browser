@@ -16,6 +16,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use types::{SessionId, WorkflowId};
+#[cfg(test)]
 use workflow_journal::JournalRecord;
 
 const MANIFEST: &str = "manifest.json";
@@ -178,17 +179,6 @@ pub fn export(
     key: &Ed25519KeyPair,
     out: &Path,
 ) -> Result<ExportSummary> {
-    let files = workflow_journal::journal_files(&sources.journal)
-        .with_context(|| format!("list {}", sources.journal.display()))?;
-    // Closed segments first, the active file last; a file may be absent.
-    let mut contents: Vec<(Vec<u8>, bool)> = Vec::new();
-    for (position, file) in files.iter().enumerate() {
-        match std::fs::read(file) {
-            Ok(bytes) => contents.push((bytes, position + 1 == files.len())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
-        }
-    }
     let journal_key = match &sources.journal_key {
         Some(path) => match workflow_journal::JournalKey::load(path) {
             Ok(key) => Some(key),
@@ -197,29 +187,8 @@ pub fn export(
         },
         None => None,
     };
-    // Every complete line of every file feeds one opener so the chain covers
-    // the whole journal.
-    let mut opener = workflow_journal::LineOpener::new(journal_key.as_ref());
-    let mut parsed: Vec<(std::borrow::Cow<[u8]>, JournalRecord)> = Vec::new();
-    // Only the active file may end in a write in progress.
-    for (bytes, is_active) in &contents {
-        let complete = if *is_active {
-            bytes
-                .iter()
-                .rposition(|byte| *byte == b'\n')
-                .map_or(&bytes[..0], |end| &bytes[..=end])
-        } else {
-            &bytes[..]
-        };
-        for line in complete.split_inclusive(|byte| *byte == b'\n') {
-            let Some(line) = opener.open(line) else {
-                continue;
-            };
-            if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
-                parsed.push((line, record));
-            }
-        }
-    }
+    let parsed = workflow_journal::read_trusted_records(&sources.journal, journal_key.as_ref())
+        .with_context(|| format!("read {}", sources.journal.display()))?;
     let mut commands = HashSet::new();
     // Keyed by the id's text so the manifest lists sessions in a stable order.
     let mut sessions: BTreeMap<String, SessionId> = BTreeMap::new();

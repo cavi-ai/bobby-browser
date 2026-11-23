@@ -11,7 +11,7 @@ const MAX_CAPABILITIES: usize = 32;
 const MAX_PREFERRED_ENGINES: usize = 8;
 const MAX_PROFILE_VALUES: usize = 64;
 const MAX_TACTICS: usize = 32;
-const MAX_EVIDENCE_REFS: usize = 128;
+const MAX_EVIDENCE_REFS: usize = crate::MAX_CHECKPOINT_EVIDENCE_REFS;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_POSTCONDITION_BYTES: usize = 1024;
 

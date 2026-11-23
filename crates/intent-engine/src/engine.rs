@@ -2,6 +2,7 @@ mod enter_code;
 mod locate;
 mod page_change;
 pub mod submit_settlement;
+mod vision_click;
 use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -1738,25 +1739,6 @@ async fn execute_fill(
 const PASSWORD_MANAGER_PROMPT: &str = "the browser password manager's own prompt that signs in \
     with or fills the saved login; never a field or button of the page";
 
-/// Roles that count as a page control: a password-manager click must never
-/// land on one, and a vision click near one snaps onto it.
-const PAGE_CONTROL_ROLES: &[&str] = &[
-    "textbox",
-    "searchbox",
-    "combobox",
-    "spinbutton",
-    "listbox",
-    "button",
-    "link",
-    "checkbox",
-    "radio",
-    "switch",
-    "slider",
-    "option",
-    "menuitem",
-    "tab",
-];
-
 /// Lower than [`VISION_CONFIDENCE_FLOOR`]: a password-manager click is refused
 /// on any page control and verified by the field's fill or the page moving on,
 /// so a modest self-reported confidence cannot press the wrong control.
@@ -1916,22 +1898,25 @@ async fn fill_with_password_manager(
                 record("visionConfidenceBelowFloor".into(), Some(details)),
             );
         }
-        let VisionAction::Click { x, y } =
-            viewport_action(page_id, browser, frame_width, &proposal.action).await
-        else {
-            return failed(
-                ErrorCode::VisionAssistFailed,
-                "vision did not point at the password manager's prompt".into(),
-                evidence,
-                record("visionNotAClick".into(), Some(details)),
-            );
-        };
-        // The prompt belongs to the password manager, not the page: a point on a
-        // page control would press that control or focus the credential field.
-        match browser.element_at_point(page_id, x, y).await {
-            Ok(None) => {}
-            Ok(Some((role, _))) if !PAGE_CONTROL_ROLES.contains(&role.as_str()) => {}
-            Ok(Some((role, _))) => {
+        let (x, y) = match vision_click::place_click(
+            page_id,
+            browser,
+            frame_width,
+            &proposal.action,
+            vision_click::PlacePolicy::ClearOfPageControls,
+        )
+        .await
+        {
+            vision_click::PlacedClick::Click { x, y } => (x, y),
+            vision_click::PlacedClick::Other(_) => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    "vision did not point at the password manager's prompt".into(),
+                    evidence,
+                    record("visionNotAClick".into(), Some(details)),
+                );
+            }
+            vision_click::PlacedClick::OnPageControl { role } => {
                 return failed(
                     ErrorCode::VisionAssistFailed,
                     format!("vision pointed at a page {role}, not the password manager's prompt"),
@@ -1939,18 +1924,23 @@ async fn fill_with_password_manager(
                     record("visionPointedAtPageControl".into(), Some(details)),
                 );
             }
-            Err(error) => {
+            vision_click::PlacedClick::Unchecked { message } => {
                 return failed(
                     ErrorCode::VisionAssistFailed,
-                    format!(
-                        "cannot confirm the proposed point is clear of page controls: {}",
-                        error.message
-                    ),
+                    message,
                     evidence,
                     record("visionPointUnchecked".into(), Some(details)),
                 );
             }
-        }
+            vision_click::PlacedClick::Ambiguous => {
+                return failed(
+                    ErrorCode::VisionAssistFailed,
+                    "vision pointed between controls".into(),
+                    evidence,
+                    record("visionPointedAtPageControl".into(), Some(details)),
+                );
+            }
+        };
         match browser.click_xy(page_id, x, y).await {
             Ok(mut clicked) => evidence.append(&mut clicked),
             Err(error) => {
@@ -4273,7 +4263,8 @@ async fn execute_solve_challenge(
                     VisionProposalOutcome::Accepted,
                     Some(VerificationMetricResult::Accepted),
                 );
-                let action = viewport_action(page_id, browser, frame_width, action).await;
+                let action =
+                    vision_click::scale_action(page_id, browser, frame_width, action).await;
                 match execute_vision_action(page_id, browser, &action, &[], &[], None).await {
                     Ok(mut step_evidence) => {
                         act_evidence.append(&mut step_evidence);
@@ -5218,59 +5209,67 @@ async fn escalate_with_vision(
 
     // The model indexes into the exact list the prompt carried; resolve
     // against that same view.
-    let mut action = viewport_action(page_id, browser, frame_width, &proposal.action).await;
-    if let VisionAction::Click { x, y } = action {
-        match ground_click(page_id, browser, x, y).await {
-            Grounded::Unchanged => {}
-            Grounded::Snapped { x, y } => action = VisionAction::Click { x, y },
-            Grounded::Ambiguous => {
-                let message = "vision pointed between controls".to_string();
-                record_context_ranked_vision_metric(
-                    metric_context.as_ref(),
-                    context_ranked,
-                    provider_latency_ms,
-                    Some(proposal.confidence),
-                    VisionProposalOutcome::Rejected,
-                    Some(VerificationMetricResult::OtherRejected),
-                );
-                record_escalation(
-                    &corpus,
-                    corpus_inputs.as_ref(),
-                    &purpose,
-                    intent_kind,
-                    kind,
-                    &proposal,
-                    false,
-                    "visionPointAmbiguous",
-                    Some(message.clone()),
-                    None,
-                );
-                let mut evidence = base_evidence;
-                evidence.append(&mut screenshot_evidence);
-                evidence.push(intent_evidence(execution_record_with_path(
-                    intent_kind,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    None,
-                    format!("visionPointAmbiguous:{verification}"),
-                    ResolutionDetails {
-                        path: IntentResolutionPath::VisionFallback,
-                        vision_proposal_sha256: Some(proposal_hash),
-                        artifact_ids: artifact_ids_from(&screenshot_evidence),
-                    },
-                )));
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VisionAssistFailed,
-                        message,
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence,
-                };
-            }
+    let mut action = proposal.action.clone();
+    match vision_click::place_click(
+        page_id,
+        browser,
+        frame_width,
+        &proposal.action,
+        vision_click::PlacePolicy::Snap,
+    )
+    .await
+    {
+        vision_click::PlacedClick::Click { x, y } => action = VisionAction::Click { x, y },
+        vision_click::PlacedClick::Other(scaled) => action = scaled,
+        vision_click::PlacedClick::Ambiguous => {
+            let message = "vision pointed between controls".to_string();
+            record_context_ranked_vision_metric(
+                metric_context.as_ref(),
+                context_ranked,
+                provider_latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
+            record_escalation(
+                &corpus,
+                corpus_inputs.as_ref(),
+                &purpose,
+                intent_kind,
+                kind,
+                &proposal,
+                false,
+                "visionPointAmbiguous",
+                Some(message.clone()),
+                None,
+            );
+            let mut evidence = base_evidence;
+            evidence.append(&mut screenshot_evidence);
+            evidence.push(intent_evidence(execution_record_with_path(
+                intent_kind,
+                purpose,
+                plan_summary,
+                candidates,
+                None,
+                format!("visionPointAmbiguous:{verification}"),
+                ResolutionDetails {
+                    path: IntentResolutionPath::VisionFallback,
+                    vision_proposal_sha256: Some(proposal_hash),
+                    artifact_ids: artifact_ids_from(&screenshot_evidence),
+                },
+            )));
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message,
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence,
+            };
         }
+        vision_click::PlacedClick::OnPageControl { .. }
+        | vision_click::PlacedClick::Unchecked { .. } => {}
     }
     let mut act_evidence = match execute_vision_action(
         page_id,
@@ -5379,60 +5378,6 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
-}
-
-/// CSS-pixel radii probed around a click that lands on no control.
-const GROUNDING_RADII: [f64; 2] = [4.0, 8.0];
-/// Unit offsets of the probe directions.
-const GROUNDING_DIRECTIONS: [(f64, f64); 8] = [
-    (1.0, 0.0),
-    (-1.0, 0.0),
-    (0.0, 1.0),
-    (0.0, -1.0),
-    (DIAGONAL, DIAGONAL),
-    (-DIAGONAL, DIAGONAL),
-    (DIAGONAL, -DIAGONAL),
-    (-DIAGONAL, -DIAGONAL),
-];
-const DIAGONAL: f64 = std::f64::consts::FRAC_1_SQRT_2;
-
-enum Grounded {
-    Unchanged,
-    Snapped { x: f64, y: f64 },
-    Ambiguous,
-}
-
-/// A click on no control snaps to the only control within a few pixels and is
-/// declined when several are; lookup errors leave the click unchanged.
-async fn ground_click(page_id: &PageId, browser: &dyn IntentBrowser, x: f64, y: f64) -> Grounded {
-    let is_control = |hit: &Option<(String, String)>| {
-        hit.as_ref()
-            .is_some_and(|(role, _)| PAGE_CONTROL_ROLES.contains(&role.as_str()))
-    };
-    match browser.element_at_point(page_id, x, y).await {
-        Ok(hit) if !is_control(&hit) => {}
-        _ => return Grounded::Unchanged,
-    }
-    let mut found: Vec<((String, String), (f64, f64))> = Vec::new();
-    for radius in GROUNDING_RADII {
-        for (dx, dy) in GROUNDING_DIRECTIONS {
-            let (px, py) = (x + dx * radius, y + dy * radius);
-            let hit = match browser.element_at_point(page_id, px, py).await {
-                Ok(hit) => hit,
-                Err(_) => return Grounded::Unchanged,
-            };
-            if let (true, Some(pair)) = (is_control(&hit), hit) {
-                if !found.iter().any(|(seen, _)| *seen == pair) {
-                    found.push((pair, (px, py)));
-                }
-            }
-        }
-    }
-    match found.as_slice() {
-        [] => Grounded::Unchanged,
-        [(_, (x, y))] => Grounded::Snapped { x: *x, y: *y },
-        _ => Grounded::Ambiguous,
-    }
 }
 
 /// Intents whose vision answer clicks the picked candidate; `locate` only
@@ -5623,29 +5568,6 @@ fn stuck_label(kind: StuckKind) -> &'static str {
 /// Width in pixels of a viewport screenshot.
 fn frame_width(png: Option<&[u8]>) -> Option<u32> {
     png.and_then(crate::frame::png_size).map(|(width, _)| width)
-}
-
-/// `action` with a click read off a viewport screenshot `frame_width` pixels
-/// wide moved to CSS pixels: screenshots are device pixels, clicks CSS pixels.
-async fn viewport_action(
-    page_id: &PageId,
-    browser: &dyn IntentBrowser,
-    frame_width: Option<u32>,
-    action: &VisionAction,
-) -> VisionAction {
-    let &VisionAction::Click { x, y } = action else {
-        return action.clone();
-    };
-    let ratio = match (frame_width, browser.viewport_size(page_id).await) {
-        (Some(frame_width), Some((css_width, _))) if css_width > 0.0 => {
-            f64::from(frame_width) / css_width
-        }
-        _ => 1.0,
-    };
-    VisionAction::Click {
-        x: x / ratio,
-        y: y / ratio,
-    }
 }
 
 async fn execute_vision_action(

@@ -134,25 +134,6 @@ const MAX_FRAME_PATH_DEPTH: usize = 8;
 const MAX_JS_RESULT_BYTES: usize = 256 * 1024;
 const MAX_JS_TIMEOUT_MS: u64 = 30_000;
 
-fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
-    fn segment(value: &types::SemanticTargetSegment) -> Box<TargetSpec> {
-        Box::new(TargetSpec {
-            role: Some(value.role.clone()),
-            accessible_name: Some(value.accessible_name.clone()),
-            ordinal: value.ordinal,
-            ..Default::default()
-        })
-    }
-    TargetSpec {
-        role: Some(target.role.clone()),
-        attributes: (*target.attributes).clone(),
-        accessible_name: Some(target.accessible_name.clone()),
-        ordinal: target.ordinal,
-        frame_path: target.frame_path.iter().map(segment).collect(),
-        shadow_path: target.shadow_path.iter().map(segment).collect(),
-        ..Default::default()
-    }
-}
 use worker_pool::upload::MAX_UPLOAD_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2195,10 +2176,7 @@ impl FirefoxCompanionWorker {
                 let candidates = self.gather_bidi_context_candidates(&context, true).await?;
                 // Snapshot-stamped unnamed frame hops carry an empty name.
                 // Match Chromium's frame normalization before ranking.
-                let mut normalized_frame = (**frame).clone();
-                if normalized_frame.accessible_name.as_deref() == Some("") {
-                    normalized_frame.accessible_name = None;
-                }
+                let normalized_frame = dom_engine::normalize_frame_hop(frame);
                 match resolve_candidates(
                     &normalized_frame,
                     &candidates,
@@ -5077,7 +5055,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             .action
             .validate()
             .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
-        let target = form_control_target_spec(&command.target);
+        let target = dom_engine::control_target_spec(&command.target);
         if !target.frame_path.is_empty()
             && matches!(command.action, ControlAction::SelectOne { .. })
         {
@@ -5603,7 +5581,7 @@ impl worker_pool::control_action_fill::ControlActionAdapter for FirefoxCompanion
         target: &FormControlTarget,
         _require_visible: bool,
     ) -> Result<FirefoxPreparedControl, CommandError> {
-        let spec = form_control_target_spec(target);
+        let spec = dom_engine::control_target_spec(target);
         let top_context = self.context(page_id).await?;
         let (context, selector) = self
             .resolve_input_target(page_id, &top_context, "", Some(&spec))
@@ -5833,12 +5811,13 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
             expected_url: None,
             modifiers: Vec::new(),
         };
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms.max(1));
         let click = worker_pool::InputEngine::click(self, page_id, &click_command);
         // Consume contextCreated while the popup is still blank. Waiting for
         // native click completion lets its navigation outrun the title proof.
         let bind_popup = async {
-            let timeout = Duration::from_millis(command.timeout_ms.max(1));
-            let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
+            let (popup_context, popup_url) = tokio::time::timeout_at(deadline, async {
                 loop {
                     let event = events.recv().await.map_err(|_| {
                         driver_error(
@@ -5880,14 +5859,47 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
         };
         let (click_evidence, (popup_page_id, title, popup_url)) =
             tokio::try_join!(click, bind_popup)?;
-        let mut evidence = vec![Evidence::Popup {
-            opener_page_id: page_id.clone(),
-            page_id: popup_page_id,
-            url: popup_url,
-            title: page_title_evidence(title),
-        }];
-        evidence.extend(click_evidence);
-        Ok(evidence)
+        let budget = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
+        let settled = if budget.is_zero() {
+            None
+        } else {
+            // A BiDi read can outlast the settle loop's own budget.
+            tokio::time::timeout_at(
+                deadline,
+                worker_pool::NavigationEngine::settle_page(
+                    self,
+                    &popup_page_id,
+                    budget,
+                    Some(&popup_url),
+                ),
+            )
+            .await
+            .ok()
+            .flatten()
+        };
+        // Settlement can return a cached read after the context was destroyed.
+        let fate = match self.context(&popup_page_id).await {
+            Ok(_) => {
+                let (url, title) =
+                    settled.unwrap_or_else(|| (popup_url, page_title_evidence(title)));
+                worker_pool::PopupFate::Open {
+                    page_id: popup_page_id,
+                    url,
+                    title,
+                }
+            }
+            Err(error) if error.code == ErrorCode::NotFound => worker_pool::PopupFate::Closed {
+                page_id: popup_page_id,
+            },
+            Err(error) => return Err(error),
+        };
+        Ok(worker_pool::popup_evidence(
+            page_id.clone(),
+            fate,
+            click_evidence,
+        ))
     }
 
     async fn click_and_wait_for_download(
@@ -6685,15 +6697,7 @@ fn located_candidate(
         },
         frame_path: frame_path
             .iter()
-            .map(|hop| {
-                Box::new(types::TargetSpec {
-                    role: Some(hop.role.clone()),
-                    accessible_name: (!hop.accessible_name.is_empty())
-                        .then(|| hop.accessible_name.clone()),
-                    ordinal: hop.ordinal,
-                    ..Default::default()
-                })
-            })
+            .map(|hop| Box::new(dom_engine::hop_spec(hop)))
             .collect(),
     }
 }

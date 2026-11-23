@@ -1424,13 +1424,9 @@ pub async fn inspect_page_scoped_target(
 /// The hop that re-resolves `frame` among `candidates`: role, name and
 /// ordinal, the shape every frame path carries.
 fn frame_hop(frame: &Candidate, candidates: &[Candidate]) -> Box<TargetSpec> {
-    let segment = semantic_iframe_hop(frame, candidates);
-    Box::new(TargetSpec {
-        role: Some(segment.role),
-        accessible_name: (!segment.accessible_name.is_empty()).then_some(segment.accessible_name),
-        ordinal: segment.ordinal,
-        ..TargetSpec::default()
-    })
+    Box::new(dom_engine::hop_spec(&semantic_iframe_hop(
+        frame, candidates,
+    )))
 }
 
 async fn gather_frame_candidates(

@@ -46,25 +46,7 @@ pub(super) async fn read_code_step(
 }
 
 pub(super) fn target_spec(target: &FormControlTarget) -> TargetSpec {
-    let segment = |segment: &SemanticTargetSegment| {
-        Box::new(TargetSpec {
-            role: Some(segment.role.clone()),
-            accessible_name: (!segment.accessible_name.is_empty())
-                .then(|| segment.accessible_name.clone()),
-            ordinal: segment.ordinal,
-            ..TargetSpec::default()
-        })
-    };
-    // An unnamed box is told apart by the stamp in its attributes.
-    TargetSpec {
-        role: Some(target.role.clone()),
-        accessible_name: Some(target.accessible_name.clone()),
-        attributes: (*target.attributes).clone(),
-        ordinal: target.ordinal,
-        frame_path: target.frame_path.iter().map(segment).collect(),
-        shadow_path: target.shadow_path.iter().map(segment).collect(),
-        ..TargetSpec::default()
-    }
+    dom_engine::control_target_spec(target)
 }
 
 /// `text` with every occurrence of `code` masked. Codes shorter than four
