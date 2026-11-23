@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.28.0 - 2026-11-23
+
 ### Added
 
 - The Python SDK reads engine-scoped runtime info, remembered form neighbors, and the event stream, and builds intent envelopes.
@@ -15,6 +17,7 @@
 - Firefox popup waits use the remaining time to settle. They preserve discovery evidence if settlement times out and keep the workflow on the opener if the bound popup closes during settlement.
 - The TypeScript SDK's session state type includes the selected engine in `execution_policy.engine` when the runtime reports it.
 - Firefox `navigate` uses one timeout for navigation, document settlement, and page metadata.
+- Firefox keeps waiting for the page to settle after a sign-in redirect returns to the requested URL.
 - The Python SDK retries event polls interrupted mid-response from the last delivered cursor.
 
 ### Security
