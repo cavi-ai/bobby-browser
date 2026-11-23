@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Direct-HTTP `inspect` leaves `script`, `style`, `noscript` and `template` text out of page text, so a client-rendered shell reports that it needs JavaScript.
+
 ## 0.27.0
 
 ### Fixed
