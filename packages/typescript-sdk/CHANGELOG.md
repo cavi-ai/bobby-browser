@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.28.0
+
+- Session state includes the selected engine in `execution_policy.engine` when reported.
+
 ## 0.27.0
 
 - Validate response bodies and preserve genuine HTTP errors.

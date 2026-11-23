@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.28.0 - 2026-11-23
+
 ### Added
 
 - The Python SDK reads engine-scoped runtime info, remembered form neighbors, and the event stream, and builds intent envelopes.
