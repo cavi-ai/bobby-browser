@@ -4300,20 +4300,58 @@ impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
         if !self.current_lease().capabilities.navigate {
             return Err(capability_error("navigation"));
         }
-        let context = self.context(page_id).await?;
-        let wait = match command.wait_until {
-            WaitUntil::NetworkIdle => "complete",
-            WaitUntil::Commit | WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
-                "interactive"
-            }
-        };
-        let response = tokio::time::timeout(
-            Duration::from_millis(command.timeout_ms),
-            self.transport.send(
-                "browsingContext.navigate",
-                json!({"context": context, "url": command.url, "wait": wait}),
-            ),
-        )
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms);
+        tokio::time::timeout_at(deadline, async {
+            let context = self.context(page_id).await?;
+            let wait = match command.wait_until {
+                WaitUntil::NetworkIdle => "complete",
+                WaitUntil::Commit | WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
+                    "interactive"
+                }
+            };
+            let response = self
+                .transport
+                .send(
+                    "browsingContext.navigate",
+                    json!({"context": context, "url": command.url, "wait": wait}),
+                )
+                .await?;
+            let response_url = response
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or(&command.url)
+                .to_owned();
+            // A single-page app reports its load state long before it has built
+            // the page, and a redirect chain can still be running. Report the
+            // URL and title read after the document has stopped changing.
+            let settle_budget = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(NAVIGATION_SETTLE_CAP);
+            let settled = settle_document(
+                &self.transport,
+                &context,
+                settle_budget,
+                &command.url,
+                &self.network_quiet,
+            )
+            .await;
+            let (url, title) = match settled {
+                Some(settled) => settled,
+                None => (
+                    context_url(&self.transport, &context)
+                        .await
+                        .unwrap_or(response_url),
+                    capture_context_title(&self.transport, &context).await?,
+                ),
+            };
+            Ok(vec![
+                Evidence::Navigation {
+                    url,
+                    title: page_title_evidence(title),
+                },
+                self.evidence(InteractionPath::EngineNative),
+            ])
+        })
         .await
         .map_err(|_| {
             driver_error(
@@ -4321,40 +4359,7 @@ impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
                 format!("Firefox navigation exceeded {} ms", command.timeout_ms),
                 true,
             )
-        })??;
-        let response_url = response
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or(&command.url)
-            .to_owned();
-        // A single-page app reports its load state long before it has built
-        // the page, and a redirect chain can still be running. Report the
-        // URL and title read after the document has stopped changing.
-        let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        let settled = settle_document(
-            &self.transport,
-            &context,
-            settle_budget,
-            &command.url,
-            &self.network_quiet,
-        )
-        .await;
-        let (url, title) = match settled {
-            Some(settled) => settled,
-            None => (
-                context_url(&self.transport, &context)
-                    .await
-                    .unwrap_or(response_url),
-                capture_context_title(&self.transport, &context).await?,
-            ),
-        };
-        Ok(vec![
-            Evidence::Navigation {
-                url,
-                title: page_title_evidence(title),
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ])
+        })?
     }
 
     async fn settle_page(

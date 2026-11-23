@@ -90,7 +90,7 @@ Intent envelopes come from `bobby_browser.intents` (`locate_envelope`, `fill_env
 
 ## Read events
 
-`events` uses one deadline for the iterator's polls and transport retries. Pass `RequestOptions(timeout_ms=...)` or an absolute `deadline` to change the default 30-second budget. The SDK accepts a `limit` from 1 to 256, subject to the runtime's configured batch limit.
+`events` uses one deadline for the iterator's polls and transport retries. If a connection drops during a response, the poll retries from the last delivered cursor within that budget and the retry limit. Pass `RequestOptions(timeout_ms=...)` or an absolute `deadline` to change the default 30-second budget. The SDK accepts a `limit` from 1 to 256, subject to the runtime's configured batch limit.
 
 A cursor gap ends the iterator with HTTP 409 and a `RuntimeClientError` carrying `event_gap`. See [Events and recovery](../guides/events-recovery.md#gaps) for resuming after a gap.
 

@@ -20,6 +20,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.client import IncompleteRead
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
 from .errors import RuntimeClientError
@@ -158,7 +159,9 @@ def _read_response(response: Any, deadline: float, maximum: int) -> bytes:
     # monotonic budget so a trickling peer cannot extend the request forever.
     read = getattr(response, "read1", response.read)
     _remaining(deadline)
-    length = _header_get(response.headers or {}, "content-length")
+    headers = response.headers or {}
+    length = _header_get(headers, "content-length")
+    expected_length = None
     if length is not None:
         try:
             if re.fullmatch(r"[0-9]+", length) is None:
@@ -168,6 +171,8 @@ def _read_response(response: Any, deadline: float, maximum: int) -> bytes:
             raise RuntimeClientError("protocol", status=response.code, message="response content length is invalid") from None
         if declared > maximum:
             raise RuntimeClientError("protocol", status=response.code, message="response exceeds the client byte limit")
+        if response.code not in (204, 304) and _header_get(headers, "transfer-encoding") is None:
+            expected_length = declared
     data = bytearray()
     while True:
         remaining = _remaining(deadline)
@@ -185,6 +190,8 @@ def _read_response(response: Any, deadline: float, maximum: int) -> bytes:
         chunk = read(min(64 * 1024, maximum - len(data) + 1))
         _remaining(deadline)
         if not chunk:
+            if expected_length is not None and len(data) < expected_length:
+                raise IncompleteRead(b"", expected_length - len(data))
             return bytes(data)
         if len(chunk) > maximum - len(data):
             raise RuntimeClientError("protocol", status=response.code, message="response exceeds the client byte limit")
@@ -648,7 +655,7 @@ class BrowserRuntimeClient:
             if isinstance(error.reason, TimeoutError):
                 raise RuntimeClientError("deadline", message="Request deadline exceeded") from error
             raise RuntimeClientError("transport", message=f"Runtime transport request failed: {error.reason}") from error
-        except ConnectionError as error:
+        except (ConnectionError, IncompleteRead) as error:
             raise RuntimeClientError("transport", message="Runtime transport connection failed") from error
         content_type = _content_type(response_headers)
         return status, content_type, response_headers, raw

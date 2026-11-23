@@ -176,6 +176,42 @@ class ClientUnitTests(unittest.TestCase):
         self.assertEqual([path for path, _ in requests], ["/v1/events?after=3&limit=100"] * 2)
         self.assertEqual(requests[0][1], requests[1][1])
 
+    def test_events_retry_when_the_peer_disconnects_mid_body(self) -> None:
+        for chunked in (False, True):
+            with self.subTest(chunked=chunked):
+                requests = []
+                first = {"cursor": 4, "kind": "command", "payload": {}}
+                second = {"cursor": 5, "kind": "command", "payload": {}}
+
+                def handler(req: _Handler) -> None:
+                    requests.append((req.path, req.headers["x-deadline"]))
+                    if len(requests) == 1:
+                        req.reply_json(200, {"events": [first], "latestAvailable": 4})
+                    elif len(requests) == 2:
+                        req.send_response(200)
+                        req.send_header("Content-Type", "application/json")
+                        if chunked:
+                            req.send_header("Transfer-Encoding", "chunked")
+                        else:
+                            req.send_header("Content-Length", "128")
+                        req.end_headers()
+                        req.wfile.write(b"10\r\n" if chunked else b"")
+                        req.wfile.write(b'{"events":')
+                        req.close_connection = True
+                    else:
+                        req.reply_json(200, {"events": [second], "latestAvailable": 5})
+
+                server = self._serve(handler)
+                client = BrowserRuntimeClient(server.base_url, "test-token")
+                iterator = client.events(3, max_transport_retries=1, retry_delay_ms=0)
+                self.assertEqual(next(iterator), first)
+                self.assertEqual(next(iterator), second)
+                self.assertEqual(
+                    [path for path, _ in requests],
+                    ["/v1/events?after=3&limit=100"] + ["/v1/events?after=4&limit=100"] * 2,
+                )
+                self.assertEqual(len({deadline for _, deadline in requests}), 1)
+
     def test_events_stop_retrying_when_the_deadline_expires_during_backoff(self) -> None:
         class FailingOpener:
             attempts = 0
