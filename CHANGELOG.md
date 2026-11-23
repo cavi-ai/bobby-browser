@@ -7,6 +7,7 @@
 - Direct-HTTP `inspect` leaves `script`, `style`, `noscript` and `template` text out of page text, so a client-rendered shell reports that it needs JavaScript.
 - An `intent_complete_form` field whose only hint is an `accessibleName` holding a form-snapshot `controlId` fills that control.
 - A multi-line `setText` verifies against a form snapshot that reads its line breaks as spaces.
+- Chromium `navigate` honors `waitUntil` and finishes within `timeoutMs`; a timeout names the readiness stage it reached.
 
 ## 0.27.0
 

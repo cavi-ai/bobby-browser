@@ -15,8 +15,8 @@ use std::sync::{Arc, Once, Weak};
 use std::time::{Duration, Instant};
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
-    NAVIGATION_SETTLE_CAP,
+    interactive_settle_expression, navigation_settle_expression, parse_settled, run_settle,
+    ProbeStep, SettleSession, NAVIGATION_SETTLE_CAP,
 };
 use crate::pointer_hit::PointerHit;
 use crate::secret_material::page_title_evidence;
@@ -39,13 +39,15 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, Viewport,
+    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
+    NavigateParams, Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::system_info::GetInfoParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     CreateTargetParams, EventTargetCreated, EventTargetDestroyed, TargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::handler::frame::LifecycleEvent;
 use chromiumoxide::handler::Handler;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
@@ -63,7 +65,7 @@ use types::{
     EvaluateJavaScriptCommand, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
     NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode, SessionId,
     SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WorkerId,
+    UploadFilesCommand, WaitCondition, WaitUntil, WorkerId,
 };
 use zeroize::Zeroizing;
 
@@ -2702,41 +2704,104 @@ impl crate::NavigationEngine for ChromiumWorker {
         page_id: &PageId,
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        tokio::time::timeout(
-            Duration::from_millis(command.timeout_ms),
-            page.goto(command.url.as_str()),
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))?
-        .map_err(|error| navigation_failed(command.url.as_str(), error))?;
-        // A single-page app reports its load state long before it has built
-        // the page, and a redirect chain can still be running. Report the
-        // URL and title read after the document has stopped changing.
-        let budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        let tracker = self.network_trackers.lock().await.get(page_id).cloned();
-        if let Some((url, title)) =
-            settle_document(&page, budget, command.url.as_str(), tracker.as_deref()).await
-        {
-            return Ok(vec![Evidence::Navigation {
+        let timeout = Duration::from_millis(command.timeout_ms);
+        let deadline = Instant::now() + timeout;
+        let mut stage = "page lookup";
+        let result = tokio::time::timeout(timeout, async {
+            let page = self.page_handle(page_id).await?;
+            stage = match command.wait_until {
+                WaitUntil::Commit => "commit",
+                WaitUntil::DomContentLoaded => "DOMContentLoaded",
+                WaitUntil::Interactive => "interactive readiness",
+                WaitUntil::NetworkIdle => "network idle",
+            };
+            let lifecycle = match command.wait_until {
+                WaitUntil::Commit => None,
+                WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
+                    Some(LifecycleEvent::DomcontentLoaded)
+                }
+                WaitUntil::NetworkIdle => Some(LifecycleEvent::NetworkIdle),
+            };
+            let response = page
+                .command_future(NavigateParams::new(command.url.as_str()))
+                .map_err(command_failed)?
+                .with_navigation_options(
+                    lifecycle,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await
+                .map_err(|error| match error {
+                    chromiumoxide::error::CdpError::Timeout => {
+                        navigation_timeout(command.timeout_ms, stage)
+                    }
+                    other => navigation_failed(command.url.as_str(), other),
+                })?;
+            if let Some(error) = response.result.error_text {
+                return Err(navigation_failed(
+                    command.url.as_str(),
+                    chromiumoxide::error::CdpError::ChromeMessage(error),
+                ));
+            }
+            if command.wait_until == WaitUntil::Commit {
+                stage = "committed page metadata";
+                // A committed frame has a URL, but its JavaScript context and
+                // document title need not exist yet.
+                return Ok(vec![Evidence::Navigation {
+                    url: page
+                        .url()
+                        .await
+                        .map_err(command_failed)?
+                        .unwrap_or_default(),
+                    title: String::new(),
+                }]);
+            }
+            // Interactive and network-idle navigations also let the app finish
+            // rendering, using only the caller's remaining time.
+            if matches!(
+                command.wait_until,
+                WaitUntil::Interactive | WaitUntil::NetworkIdle
+            ) {
+                stage = "document settling";
+                let tracker = self.network_trackers.lock().await.get(page_id).cloned();
+                let budget = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(NAVIGATION_SETTLE_CAP);
+                if let Some((url, title)) = run_settle(
+                    "chromium",
+                    budget,
+                    command.url.as_str(),
+                    &mut ChromiumSettle {
+                        page: &page,
+                        tracker: tracker.as_deref(),
+                        interactive: command.wait_until == WaitUntil::Interactive,
+                    },
+                )
+                .await
+                {
+                    return Ok(vec![Evidence::Navigation {
+                        url,
+                        title: page_title_evidence(title),
+                    }]);
+                }
+            }
+            stage = "page metadata";
+            let url = page
+                .url()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default();
+            let title = page
+                .get_title()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default();
+            Ok(vec![Evidence::Navigation {
                 url,
                 title: page_title_evidence(title),
-            }]);
-        }
-        let url = page
-            .url()
-            .await
-            .map_err(command_failed)?
-            .unwrap_or_default();
-        let title = page
-            .get_title()
-            .await
-            .map_err(command_failed)?
-            .unwrap_or_default();
-        Ok(vec![Evidence::Navigation {
-            url,
-            title: page_title_evidence(title),
-        }])
+            }])
+        })
+        .await;
+        result.map_err(|_| navigation_timeout(command.timeout_ms, stage))?
     }
 
     async fn settle_page(
@@ -4783,6 +4848,7 @@ fn redact_secret_material(value: String) -> String {
 struct ChromiumSettle<'a> {
     page: &'a Page,
     tracker: Option<&'a crate::network_quiet::NetworkQuietTracker>,
+    interactive: bool,
 }
 
 #[async_trait]
@@ -4791,10 +4857,13 @@ impl SettleSession for ChromiumSettle<'_> {
         if self.page.is_closed() {
             return ProbeStep::Closed;
         }
-        let mut params = EvaluateParams::new(navigation_settle_expression(
-            remaining.as_millis().max(1),
-            requested_url,
-        ));
+        let expression = if self.interactive {
+            interactive_settle_expression
+        } else {
+            navigation_settle_expression
+        };
+        let mut params =
+            EvaluateParams::new(expression(remaining.as_millis().max(1), requested_url));
         params.await_promise = Some(true);
         params.return_by_value = Some(true);
         let closed = async {
@@ -4878,7 +4947,11 @@ async fn settle_document(
         "chromium",
         budget,
         requested_url,
-        &mut ChromiumSettle { page, tracker },
+        &mut ChromiumSettle {
+            page,
+            tracker,
+            interactive: false,
+        },
     )
     .await
 }
@@ -5200,6 +5273,13 @@ fn timeout_error(timeout_ms: u64) -> CommandError {
         message: format!("browser command exceeded {timeout_ms}ms"),
         layer: ErrorLayer::Driver,
         retryable: true,
+    }
+}
+
+fn navigation_timeout(timeout_ms: u64, stage: &str) -> CommandError {
+    CommandError {
+        message: format!("navigation exceeded {timeout_ms}ms during {stage}"),
+        ..timeout_error(timeout_ms)
     }
 }
 
