@@ -41,6 +41,15 @@ pub use shadow_segment::{
 /// element keeps its number across snapshots.
 pub const CONTROL_STAMP_ATTRIBUTE: &str = "data-bobby-control";
 
+/// The text a form snapshot reports for a control holding `value`: each
+/// control character, a line break included, reads as a space.
+pub fn snapshot_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// The target a snapshot returns for a stamped control: role, name and stamp.
 /// The stamp decides over the name and ordinal while an element carries it.
 pub fn is_stamped_control_target(target: &types::TargetSpec) -> bool {

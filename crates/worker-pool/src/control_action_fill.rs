@@ -330,15 +330,18 @@ fn postcondition(message: &str) -> CommandError {
 }
 
 /// A read-back the strict equality check would reject, but that still shows
-/// the typed value: an input mask's phone formatting, or a field whose text
-/// contains what was typed. The evidence state stays the read-back.
+/// the typed value: an input mask's phone formatting, a field whose text
+/// contains what was typed, or line breaks the snapshot reads as spaces. The
+/// evidence state stays the read-back.
 fn evidence_action<'a>(action: &'a ControlAction, control: &FormControl) -> Cow<'a, ControlAction> {
     match (action, &control.state) {
         (
             ControlAction::SetText { value, clear_first },
             FormControlState::Text { value: actual },
         ) if actual != value
-            && (actual.contains(value.as_str()) || same_phone_number(value, actual)) =>
+            && (actual.contains(value.as_str())
+                || actual.contains(dom_engine::snapshot_text(value).as_str())
+                || same_phone_number(value, actual)) =>
         {
             Cow::Owned(ControlAction::SetText {
                 value: actual.clone(),
