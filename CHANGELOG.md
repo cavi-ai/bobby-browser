@@ -5,6 +5,7 @@
 ### Fixed
 
 - Direct-HTTP `inspect` leaves `script`, `style`, `noscript` and `template` text out of page text, so a client-rendered shell reports that it needs JavaScript.
+- An `intent_complete_form` field whose only hint is an `accessibleName` holding a form-snapshot `controlId` fills that control.
 
 ## 0.27.0
 
