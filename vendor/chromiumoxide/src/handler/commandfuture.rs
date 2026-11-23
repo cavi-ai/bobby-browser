@@ -7,10 +7,13 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::error::Result;
+use crate::handler::frame::LifecycleEvent;
 use crate::handler::target::TargetMessage;
+use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use chromiumoxide_cdp::cdp::browser_protocol::target::SessionId;
 use chromiumoxide_types::{Command, CommandResponse, MethodId, Response};
 
@@ -59,6 +62,25 @@ impl<T: Command> CommandFuture<T> {
             method,
             _marker: PhantomData,
         })
+    }
+}
+
+impl CommandFuture<NavigateParams> {
+    /// Wait for the selected lifecycle event, or the committed frame when
+    /// `wait_until` is `None`, within one command-specific budget.
+    pub fn with_navigation_options(
+        mut self,
+        wait_until: Option<LifecycleEvent>,
+        timeout: Duration,
+    ) -> Self {
+        if let Some(TargetMessage::Command(message)) = self.message.as_mut() {
+            message.navigation = Some(crate::cmd::NavigationOptions {
+                wait_until,
+                deadline: Instant::now() + timeout,
+            });
+        }
+        self.delay.reset(timeout);
+        self
     }
 }
 

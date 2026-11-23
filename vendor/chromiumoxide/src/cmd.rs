@@ -12,6 +12,13 @@ use chromiumoxide_types::{Command, CommandResponse, Method, MethodId, Request, R
 
 use crate::error::{CdpError, DeadlineExceeded, Result};
 use crate::handler::REQUEST_TIMEOUT;
+use crate::handler::frame::LifecycleEvent;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NavigationOptions {
+    pub wait_until: Option<LifecycleEvent>,
+    pub deadline: Instant,
+}
 
 /// Deserialize a response
 pub(crate) fn to_command_response<T: Command>(
@@ -42,6 +49,8 @@ pub struct CommandMessage<T = Result<Response>> {
     pub params: serde_json::Value,
     #[serde(skip_serializing)]
     pub sender: OneshotSender<T>,
+    #[serde(skip_serializing)]
+    pub(crate) navigation: Option<NavigationOptions>,
 }
 
 impl<T> CommandMessage<T> {
@@ -51,6 +60,7 @@ impl<T> CommandMessage<T> {
             session_id: None,
             params: serde_json::to_value(cmd)?,
             sender,
+            navigation: None,
         })
     }
 
@@ -69,6 +79,7 @@ impl<T> CommandMessage<T> {
             session_id,
             params: serde_json::to_value(cmd)?,
             sender,
+            navigation: None,
         })
     }
 

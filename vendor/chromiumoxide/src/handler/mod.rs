@@ -359,13 +359,20 @@ impl Handler {
     fn on_target_message(&mut self, target: &mut Target, msg: CommandMessage, now: Instant) {
         // if let some
         if msg.is_navigation() {
+            let options = msg.navigation.unwrap_or(crate::cmd::NavigationOptions {
+                wait_until: Some(frame::LifecycleEvent::Load),
+                deadline: now + self.config.request_timeout,
+            });
             let (req, tx) = msg.split();
             let id = self.next_navigation_id();
-            target.goto(FrameNavigationRequest::new(id, req));
             self.navigations.insert(
                 id,
-                NavigationRequest::Navigate(NavigationInProgress::new(tx)),
+                NavigationRequest::Navigate(NavigationInProgress::new(tx, options.deadline)),
             );
+            let mut navigation = FrameNavigationRequest::new(id, req);
+            navigation.deadline = options.deadline;
+            navigation.wait_until = options.wait_until;
+            target.goto(navigation);
         } else {
             let _ = self.submit_external_command(msg, now);
         }
@@ -503,7 +510,18 @@ impl Handler {
         let timed_out = self
             .pending_commands
             .iter()
-            .filter(|(_, (_, _, timestamp))| now > (*timestamp + self.config.request_timeout))
+            .filter(|(_, (request, _, timestamp))| {
+                let deadline = match request {
+                    PendingRequest::Navigate(id, _) => {
+                        self.navigations.get(id).map(|nav| match nav {
+                            NavigationRequest::Navigate(nav) => nav.deadline,
+                        })
+                    }
+                    _ => None,
+                }
+                .unwrap_or(*timestamp + self.config.request_timeout);
+                now > deadline
+            })
             .map(|(k, _)| *k)
             .collect::<Vec<_>>();
         for call in timed_out {
@@ -868,6 +886,7 @@ impl Default for HandlerConfig {
 /// Wraps the sender half of the channel who requested a navigation
 #[derive(Debug)]
 pub struct NavigationInProgress<T> {
+    deadline: Instant,
     /// Marker to indicate whether a navigation lifecycle has completed
     navigated: bool,
     /// The response of the issued navigation request
@@ -877,8 +896,9 @@ pub struct NavigationInProgress<T> {
 }
 
 impl<T> NavigationInProgress<T> {
-    fn new(tx: OneshotSender<T>) -> Self {
+    fn new(tx: OneshotSender<T>, deadline: Instant) -> Self {
         Self {
+            deadline,
             navigated: false,
             response: None,
             tx,

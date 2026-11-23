@@ -1376,6 +1376,86 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_verifies_a_multi_line_textarea_value() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<textarea id=essay aria-label=Essay></textarea>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let form_snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
+    let target = form_snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => snapshot
+                .unowned_controls
+                .iter()
+                .find(|control| control.accessible_name.as_deref() == Some("Essay"))
+                .and_then(|control| control.target.clone()),
+            _ => None,
+        })
+        .expect("Essay control target");
+
+    let essay = "First paragraph.\n\nSecond paragraph.";
+    let result = worker_pool::input_or_default(worker.input())
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target,
+                action: ControlAction::SetText {
+                    value: essay.into(),
+                    clear_first: true,
+                },
+            },
+        )
+        .await;
+    assert!(result.is_ok(), "{result:?}");
+    let shown = worker_pool::observation_or_default(worker.observation())
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("#essay".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(&shown[0], Evidence::Inspection { text, .. } if text == essay));
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_clear_empties_a_text_input() {
     let profiles = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

@@ -43,7 +43,21 @@ const CHURN_TRACKED_ATTRIBUTE_NAMES: usize = 64;
 /// result adds `churn`: the counted changes by kind, whether they were inside
 /// or outside `main`, and the most changed attribute names with counts.
 pub fn navigation_settle_expression(cap_ms: u128, requested_url: &str) -> String {
+    settle_expression(cap_ms, requested_url, false)
+}
+
+/// The same quiet-window probe without waiting for images or other load blockers.
+pub(crate) fn interactive_settle_expression(cap_ms: u128, requested_url: &str) -> String {
+    settle_expression(cap_ms, requested_url, true)
+}
+
+fn settle_expression(cap_ms: u128, requested_url: &str, interactive: bool) -> String {
     let requested = serde_json::to_string(requested_url).unwrap_or_else(|_| "\"\"".into());
+    let ready = if interactive {
+        "document.readyState!=='loading'"
+    } else {
+        "document.readyState==='complete'"
+    };
     format!(
         "new Promise(resolve=>{{let timer;let done=false;\
 const page=()=>({{url:location.href,title:document.title}});const begin=page();\
@@ -56,7 +70,7 @@ try{{moved=moved||new URL({requested}).href!==location.href;}}catch(e){{}}\
 const bare=url=>String(url).split('#')[0];\
 const inPlace=!!entry&&bare(entry.name)!==bare(location.href);\
 const quietMs=moved?{REDIRECTED_QUIET_MS}:inPlace?{SAME_DOCUMENT_QUIET_MS}:{NAVIGATION_QUIET_MS};\
-const restart=()=>{{clearTimeout(timer);if(document.readyState==='complete')timer=setTimeout(()=>finish(true),quietMs);}};\
+const restart=()=>{{clearTimeout(timer);if({ready})timer=setTimeout(()=>finish(true),quietMs);}};\
 const edited=new WeakSet();const textEdited=new WeakSet();\
 const restyle=r=>r.type==='characterData'||r.attributeName==='class'||r.attributeName==='style';\
 const note=r=>{{try{{const node=r.target.nodeType===1?r.target:r.target.parentElement;\

@@ -115,14 +115,25 @@ impl Server {
                     .map(|field| field.name.clone())
                     .collect::<Vec<_>>();
                 // A field addressed by a form-snapshot controlId (as its bare
-                // `name`, with no other hints) needs the control's real
-                // target -- otherwise the compiler falls back to
-                // `accessible_name = name`, and nothing on the page is
+                // `name` with no hints, or as its only hint `accessibleName`)
+                // needs the control's real target -- nothing on the page is
                 // accessibly named "control-1". One snapshot serves every
                 // qualifying field in the call; zero when none qualify.
-                if input.fields.iter().any(|field| {
-                    hints_are_empty(&field.hints) && looks_like_control_id(&field.name)
-                }) {
+                let control_id = |field: &types::CompleteFormField| -> Option<String> {
+                    if hints_are_empty(&field.hints) && looks_like_control_id(&field.name) {
+                        return Some(field.name.clone());
+                    }
+                    field
+                        .hints
+                        .accessible_name
+                        .as_deref()
+                        .filter(|name| {
+                            looks_like_control_id(name)
+                                && hints_locator_empty_besides_name(&field.hints)
+                        })
+                        .map(str::to_owned)
+                };
+                if input.fields.iter().any(|field| control_id(field).is_some()) {
                     if let Ok(snapshot) = self
                         .runtime
                         .form_snapshot(
@@ -134,12 +145,10 @@ impl Server {
                         .await
                     {
                         for field in &mut input.fields {
-                            if hints_are_empty(&field.hints) && looks_like_control_id(&field.name) {
-                                if let Some(target) =
-                                    control_target_from_snapshot(&snapshot, &field.name)
-                                {
-                                    apply_control_target(&mut field.hints, target);
-                                }
+                            if let Some(target) = control_id(field)
+                                .and_then(|id| control_target_from_snapshot(&snapshot, &id))
+                            {
+                                apply_control_target(&mut field.hints, target);
                             }
                         }
                     }
