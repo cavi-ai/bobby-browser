@@ -4826,13 +4826,13 @@ impl SettleSession for ChromiumSettle<'_> {
         if self.page.is_closed() {
             return ProbeStep::Closed;
         }
+        let cap_ms = remaining.as_millis().max(1);
         let expression = if self.interactive {
-            interactive_settle_expression
+            interactive_settle_expression(cap_ms, requested_url)
         } else {
-            navigation_settle_expression
+            navigation_settle_expression(cap_ms, requested_url, false)
         };
-        let mut params =
-            EvaluateParams::new(expression(remaining.as_millis().max(1), requested_url));
+        let mut params = EvaluateParams::new(expression);
         params.await_promise = Some(true);
         params.return_by_value = Some(true);
         let closed = async {

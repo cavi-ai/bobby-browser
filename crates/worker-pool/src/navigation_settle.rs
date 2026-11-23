@@ -35,23 +35,29 @@ const CHURN_TRACKED_ATTRIBUTE_NAMES: usize = 64;
 /// clocks); a node's first one in a probe still counts. `begin` is the URL
 /// and title the probe started on. The window is [`REDIRECTED_QUIET_MS`] when
 /// the document was reached through a server redirect (`performance`
-/// navigation timing) or sits on a URL other than `requested_url`,
+/// navigation timing), sits on a URL other than `requested_url`, or the
+/// adapter observed a redirect earlier in this settle. Otherwise it uses
 /// [`SAME_DOCUMENT_QUIET_MS`] when its URL (fragment aside) differs from the
 /// one it loaded at, and [`NAVIGATION_QUIET_MS`] otherwise. Scripts and
 /// fetch/XHR the page loads after its load are the caller's to wait for: each
 /// engine sees them in its network tracker and runs the probe again. A capped
 /// result adds `churn`: the counted changes by kind, whether they were inside
 /// or outside `main`, and the most changed attribute names with counts.
-pub fn navigation_settle_expression(cap_ms: u128, requested_url: &str) -> String {
-    settle_expression(cap_ms, requested_url, false)
+pub fn navigation_settle_expression(cap_ms: u128, requested_url: &str, redirected: bool) -> String {
+    settle_expression(cap_ms, requested_url, false, redirected)
 }
 
 /// The same quiet-window probe without waiting for images or other load blockers.
 pub(crate) fn interactive_settle_expression(cap_ms: u128, requested_url: &str) -> String {
-    settle_expression(cap_ms, requested_url, true)
+    settle_expression(cap_ms, requested_url, true, false)
 }
 
-fn settle_expression(cap_ms: u128, requested_url: &str, interactive: bool) -> String {
+fn settle_expression(
+    cap_ms: u128,
+    requested_url: &str,
+    interactive: bool,
+    redirected: bool,
+) -> String {
     let requested = serde_json::to_string(requested_url).unwrap_or_else(|_| "\"\"".into());
     let ready = if interactive {
         "document.readyState!=='loading'"
@@ -65,7 +71,7 @@ const tally={{added:0,removed:0,attributes:0,characterData:0,insideMain:0,outsid
 const churn=()=>({{...tally,topAttributes:[...names].sort((a,b)=>b[1]-a[1]).slice(0,{CHURN_TOP_ATTRIBUTES})}});\
 const finish=quiet=>{{if(done)return;done=true;observer.disconnect();document.removeEventListener('readystatechange',restart);clearTimeout(timer);clearTimeout(cap);resolve(JSON.stringify(quiet?{{...page(),quiet,begin}}:{{...page(),quiet,begin,churn:churn()}}));}};\
 const entry=performance.getEntriesByType('navigation')[0];\
-let moved=!!entry&&entry.redirectCount>0;\
+let moved={redirected}||!!entry&&entry.redirectCount>0;\
 try{{moved=moved||new URL({requested}).href!==location.href;}}catch(e){{}}\
 const bare=url=>String(url).split('#')[0];\
 const inPlace=!!entry&&bare(entry.name)!==bare(location.href);\
@@ -633,7 +639,7 @@ mod tests {
 
     #[test]
     fn settle_expression_deduplicates_pure_text_child_list_replacements() {
-        let js = navigation_settle_expression(5_000, "https://a.test/");
+        let js = navigation_settle_expression(5_000, "https://a.test/", false);
         assert!(js.contains("textEdited=new WeakSet()"));
         assert!(js.contains("nodeType===3"));
         assert!(js.contains("textEdited.has(r.target)||!textEdited.add(r.target)"));

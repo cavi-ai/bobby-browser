@@ -63,7 +63,7 @@ To allow Chromium as well, use `{"preference":{"mode":"prefer","engines":["firef
 
 ### Navigation
 
-Firefox uses BiDi's `interactive` readiness for `commit`, `domContentLoaded` and `interactive`. It uses BiDi's `complete` readiness for `networkIdle`. Each readiness check is followed by document settlement, which also considers in-flight scripts and fetch/XHR requests. Navigation, settlement, and page metadata share the `timeoutMs` budget.
+Firefox uses BiDi's `interactive` readiness for `commit`, `domContentLoaded` and `interactive`. It uses BiDi's `complete` readiness for `networkIdle`. Each readiness check is followed by document settlement, which also considers in-flight scripts and fetch/XHR requests. Settlement keeps the longer redirect window when a sign-in page returns to the requested URL. Navigation, settlement, and page metadata share the `timeoutMs` budget.
 
 ### Toolbar popup
 

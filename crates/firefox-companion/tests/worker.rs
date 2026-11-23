@@ -5276,10 +5276,19 @@ async fn cancelled_close_waiter_and_worker_drop_do_not_cancel_owned_shutdown() {
 
 #[tokio::test]
 async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
+    let url = "https://example.test/live";
+    let probe = json!({
+        "url": url, "title": "Live", "quiet": true,
+        "begin": {"url": url, "title": "Live"}
+    });
+    let settled = json!({"result": {"type": "string", "value": probe.to_string()}});
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-stale"})),
         Ok(json!({"context": "context-live"})),
-        Ok(json!({"url": "https://example.test/live"})),
+        Ok(json!({"url": url})),
+        Ok(settled.clone()),
+        // A lagged event stream leaves the load count unknown for one probe.
+        Ok(settled),
     ]);
     let observer = FakeObserver::new(observation());
     let releases = Arc::clone(&observer.releases);
@@ -5295,7 +5304,7 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
         .await
         .unwrap();
     bidi.set_tree(json!({
-        "contexts": [{"context": "context-live", "children": []}]
+        "contexts": [{"context": "context-live", "url": url, "children": []}]
     }))
     .await;
 
@@ -6043,7 +6052,7 @@ async fn click_on_a_target_past_the_control_walk_uses_the_located_selector() {
 }
 
 #[tokio::test]
-async fn navigate_reports_the_document_a_script_redirect_settles_on() {
+async fn navigate_keeps_redirect_quiet_after_returning_to_the_requested_url() {
     let login = "https://example.test/login?next=/feed";
     let feed = "https://example.test/feed";
     let settled = json!({
@@ -6092,6 +6101,17 @@ async fn navigate_reports_the_document_a_script_redirect_settles_on() {
         .unwrap();
     flipper.await.unwrap();
 
+    let calls = bidi.calls().await;
+    let probes: Vec<_> = calls
+        .iter()
+        .filter_map(|call| call.params["expression"].as_str())
+        .filter(|expression| expression.contains("MutationObserver"))
+        .collect();
+    assert!(probes.len() >= 2);
+    assert!(
+        probes.last().unwrap().contains("let moved=true||"),
+        "the final probe must retain the redirected quiet window after returning to the requested URL"
+    );
     assert!(
         evidence.iter().any(|item| matches!(
             item,

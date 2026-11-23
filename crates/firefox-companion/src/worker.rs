@@ -3466,16 +3466,36 @@ struct FirefoxSettle<'a> {
     transport: &'a Arc<dyn BidiTransport>,
     context: &'a str,
     network: &'a AsyncMutex<FirefoxNetworkQuiet>,
+    // A new document's performance entries cannot describe an earlier redirect.
+    redirected: bool,
+}
+
+fn navigation_url_changed(requested: &str, observed: &str) -> bool {
+    let (Ok(mut requested), Ok(mut observed)) =
+        (url::Url::parse(requested), url::Url::parse(observed))
+    else {
+        return false;
+    };
+    requested.set_fragment(None);
+    observed.set_fragment(None);
+    requested != observed
 }
 
 #[async_trait]
 impl SettleSession for FirefoxSettle<'_> {
     async fn probe(&mut self, remaining: Duration, requested_url: &str) -> ProbeStep {
-        let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
         // redirect replaces the document under it, so the probe races a watch
         // on the context's URL and restarts in the new document when it moves.
         let started_at = context_url(self.transport, self.context).await;
+        self.redirected |= started_at
+            .as_deref()
+            .is_some_and(|current| navigation_url_changed(requested_url, current));
+        let expression = navigation_settle_expression(
+            remaining.as_millis().max(1),
+            requested_url,
+            self.redirected,
+        );
         let probe = tokio::time::timeout(
             remaining + Duration::from_secs(1),
             self.transport.send(
@@ -3490,15 +3510,15 @@ impl SettleSession for FirefoxSettle<'_> {
         );
         let moved = async {
             let Some(started_at) = started_at else {
-                return std::future::pending::<()>().await;
+                return std::future::pending::<bool>().await;
             };
             loop {
                 tokio::time::sleep(SETTLE_URL_WATCH_INTERVAL).await;
-                if context_url(self.transport, self.context)
+                if let Some(current) = context_url(self.transport, self.context)
                     .await
-                    .is_some_and(|current| current != started_at)
+                    .filter(|current| current != &started_at)
                 {
-                    return;
+                    return navigation_url_changed(&started_at, &current);
                 }
             }
         };
@@ -3515,7 +3535,10 @@ impl SettleSession for FirefoxSettle<'_> {
                 };
                 ProbeStep::Finished(read)
             }
-            () = moved => ProbeStep::Replaced,
+            redirected = moved => {
+                self.redirected |= redirected;
+                ProbeStep::Replaced
+            },
         }
     }
 
@@ -3544,6 +3567,7 @@ async fn settle_document(
     context: &str,
     budget: Duration,
     requested_url: &str,
+    redirected: bool,
     network: &AsyncMutex<FirefoxNetworkQuiet>,
 ) -> Option<(String, String)> {
     run_settle(
@@ -3554,6 +3578,7 @@ async fn settle_document(
             transport,
             context,
             network,
+            redirected,
         },
     )
     .await
@@ -4332,6 +4357,7 @@ impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
                 &context,
                 settle_budget,
                 &command.url,
+                navigation_url_changed(&command.url, &response_url),
                 &self.network_quiet,
             )
             .await;
@@ -4377,6 +4403,7 @@ impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
             &context,
             budget,
             requested_url.unwrap_or_default(),
+            false,
             &self.network_quiet,
         )
         .await?;
