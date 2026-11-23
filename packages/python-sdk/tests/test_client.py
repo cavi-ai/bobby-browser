@@ -104,6 +104,57 @@ class ClientUnitTests(unittest.TestCase):
         client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
         self.assertEqual(client.context_site("https://example.com/account")["siteKey"], "https://example.com/account")
 
+    def test_runtime_info_for_engine_sends_the_engine_query(self) -> None:
+        def handler(req: _Handler) -> None:
+            self.assertEqual(req.path, "/v1/runtime?engine=firefox")
+            req.reply_json(200, {"engineScope": "firefox", "version": "test", "capabilities": []})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        self.assertEqual(client.runtime_info_for_engine("firefox")["engineScope"], "firefox")
+        with self.assertRaises(RuntimeClientError):
+            client.runtime_info_for_engine("webkit")
+
+    def test_context_neighbors_encodes_the_same_query_as_ask(self) -> None:
+        def handler(req: _Handler) -> None:
+            self.assertEqual(
+                req.path,
+                "/v1/context/neighbors?sessionId=sess&pageId=page&description=Continue",
+            )
+            req.reply_json(200, {"hit": False, "neighbors": None, "pageDerived": True})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        with self.assertRaises(RuntimeClientError):
+            client.context_neighbors("sess", "page", "")
+        self.assertFalse(client.context_neighbors("sess", "page", "Continue")["hit"])
+
+    def test_events_yields_a_batch_and_raises_on_a_cursor_gap(self) -> None:
+        calls = {"n": 0}
+
+        def handler(req: _Handler) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self.assertEqual(req.path, "/v1/events?after=0&limit=100")
+                req.reply_json(200, {"events": [{"cursor": 1, "kind": "command", "payload": {}}], "latestAvailable": 1})
+                return
+            req.reply_json(
+                409,
+                {
+                    "error": {"code": "invalidRequest"},
+                    "gap": {"reason": "historyLost", "earliestAvailable": 1},
+                },
+            )
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        iterator = client.events(0)
+        self.assertEqual(next(iterator)["cursor"], 1)
+        with self.assertRaises(RuntimeClientError) as raised:
+            next(iterator)
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.event_gap["reason"], "historyLost")
+        with self.assertRaises(RuntimeClientError):
+            list(client.events(-1))
+
     def test_shared_reconciliation_fixtures(self) -> None:
         fixture_path = Path(__file__).resolve().parents[3] / "crates/bobby-browser-client/tests/fixtures/sdk-responses.json"
         fixtures = json.loads(fixture_path.read_text())

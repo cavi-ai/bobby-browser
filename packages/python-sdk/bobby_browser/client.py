@@ -20,7 +20,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
 from .errors import RuntimeClientError
 from .session_capabilities import is_session_capabilities
@@ -48,6 +48,44 @@ _COMMAND_STATUS_HTTP: Dict[str, int] = {
 # RecoveryDecision.status -> expected HTTP status, mirroring client.ts's
 # `recover()` mapping.
 _RECOVERY_NEEDS_RECONCILIATION_STATUS = "needsReconciliation"
+_MAX_SAFE_INTEGER = 2**53 - 1
+_MAX_EVENT_LIMIT = 256
+_MAX_EVENT_TRANSPORT_RETRIES = 10
+_MAX_EVENT_RETRY_DELAY_MS = 60_000
+_EVENT_GAP_REASONS = ("historyLost", "invalidLimit", "invalidCursor")
+
+
+def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+
+
+def _is_event_gap(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"reason", "earliestAvailable"}
+        and value["reason"] in _EVENT_GAP_REASONS
+        and _bounded_int(value["earliestAvailable"], 0, _MAX_SAFE_INTEGER)
+    )
+
+
+def _is_event_batch(value: object, after: int, limit: int) -> bool:
+    if not isinstance(value, dict) or set(value) != {"events", "latestAvailable"}:
+        return False
+    latest = value["latestAvailable"]
+    events = value["events"]
+    if not _bounded_int(latest, after, _MAX_SAFE_INTEGER) or not isinstance(events, list):
+        return False
+    if not events or len(events) > limit:
+        return False
+    previous = after
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"cursor", "kind", "payload"}:
+            return False
+        cursor = event["cursor"]
+        if not _bounded_int(cursor, previous + 1, latest) or not isinstance(event["kind"], str):
+            return False
+        previous = cursor
+    return True
 
 
 @dataclass
@@ -220,6 +258,78 @@ class BrowserRuntimeClient:
         """``GET /v1/runtime`` -- version, capabilities, and load counters."""
         return self._json("GET", "/v1/runtime", None, options, expected_status=200)
 
+    def runtime_info_for_engine(
+        self, engine: str, options: Optional[RequestOptions] = None
+    ) -> Dict[str, Any]:
+        """``GET /v1/runtime?engine=`` -- guarantees for one engine's candidates.
+
+        ``engine`` is ``chromium``, ``firefox``, or ``webKit``, the same
+        tokens the Rust and TypeScript clients send.
+        """
+        if engine not in ("chromium", "firefox", "webKit"):
+            raise self._protocol("engine must be chromium, firefox, or webKit")
+        return self._json(
+            "GET", f"/v1/runtime?engine={engine}", None, options, expected_status=200
+        )
+
+    def events(
+        self,
+        cursor: int,
+        options: Optional[RequestOptions] = None,
+        *,
+        limit: int = 100,
+        max_transport_retries: int = 2,
+        retry_delay_ms: int = 50,
+    ) -> Iterator[Dict[str, Any]]:
+        """``GET /v1/events`` -- yield events after ``cursor``.
+
+        A cursor gap is HTTP 409 with ``error`` and ``gap``. That raises
+        :class:`RuntimeClientError` with ``event_gap`` set and stops the
+        iterator. Transport failures retry up to ``max_transport_retries``.
+        """
+        if not _bounded_int(cursor, 0, _MAX_SAFE_INTEGER):
+            raise self._protocol("event cursor is outside SDK bounds")
+        if not _bounded_int(limit, 1, _MAX_EVENT_LIMIT):
+            raise self._protocol("event limit is outside SDK bounds")
+        if not _bounded_int(max_transport_retries, 0, _MAX_EVENT_TRANSPORT_RETRIES):
+            raise self._protocol("event retry count is outside SDK bounds")
+        if not _bounded_int(retry_delay_ms, 0, _MAX_EVENT_RETRY_DELAY_MS):
+            raise self._protocol("event retry delay is outside SDK bounds")
+        after = cursor
+        failures = 0
+        while True:
+            try:
+                status, payload = self._request(
+                    "GET",
+                    f"/v1/events?after={after}&limit={limit}",
+                    None,
+                    options,
+                )
+            except RuntimeClientError as error:
+                if error.kind != "transport" or failures >= max_transport_retries:
+                    raise
+                failures += 1
+                time.sleep(retry_delay_ms / 1000)
+                continue
+            failures = 0
+            if status == 409 and isinstance(payload, dict) and set(payload) == {"error", "gap"}:
+                gap = payload["gap"]
+                error_body = payload["error"]
+                if not _is_event_gap(gap) or not isinstance(error_body, dict):
+                    raise self._protocol("event gap response has an unexpected shape", status)
+                raise RuntimeClientError(
+                    "http",
+                    status=status,
+                    code=error_body.get("code") if isinstance(error_body.get("code"), str) else None,
+                    message="event history has a cursor gap",
+                    event_gap=gap,
+                )
+            if status != 200 or not _is_event_batch(payload, after, limit):
+                raise self._protocol("event batch has an unexpected shape", status)
+            for event in payload["events"]:
+                after = event["cursor"]
+                yield event
+
     def create_session(
         self, input: Mapping[str, Any], options: Optional[RequestOptions] = None
     ) -> Dict[str, Any]:
@@ -375,6 +485,27 @@ class BrowserRuntimeClient:
             {"sessionId": session_id, "pageId": page_id, "description": description}
         )
         return self._json("GET", f"/v1/context/ask?{query}", None, options, expected_status=200)
+
+    def context_neighbors(
+        self,
+        session_id: str,
+        page_id: str,
+        description: str,
+        options: Optional[RequestOptions] = None,
+    ) -> Dict[str, Any]:
+        """``GET /v1/context/neighbors`` -- remembered form around a control.
+
+        The result carries ``pageDerived: true`` on either a hit or miss.
+        """
+        encoded = len(description.encode("utf-8"))
+        if not (1 <= encoded <= 256):
+            raise self._protocol("description must contain between 1 and 256 bytes")
+        query = urllib.parse.urlencode(
+            {"sessionId": session_id, "pageId": page_id, "description": description}
+        )
+        return self._json(
+            "GET", f"/v1/context/neighbors?{query}", None, options, expected_status=200
+        )
 
     def context_site(
         self, site_key: str, options: Optional[RequestOptions] = None
