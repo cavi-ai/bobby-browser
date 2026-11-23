@@ -9,6 +9,10 @@
 - A multi-line `setText` verifies against a form snapshot that reads its line breaks as spaces.
 - Chromium `navigate` honors `waitUntil` and finishes within `timeoutMs`; a timeout names the readiness stage it reached.
 
+### Security
+
+- Updated `url` and `cookie` past their open advisories.
+
 ## 0.27.0
 
 ### Fixed
