@@ -13,10 +13,13 @@ import hashlib
 import json
 import sys
 import threading
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.error import URLError
 
 # `python3 -m unittest discover -s packages/python-sdk/tests` (the CI /
 # check-version-agreement.py-adjacent gate) runs straight from a checkout
@@ -154,6 +157,72 @@ class ClientUnitTests(unittest.TestCase):
         self.assertEqual(raised.exception.event_gap["reason"], "historyLost")
         with self.assertRaises(RuntimeClientError):
             list(client.events(-1))
+
+    def test_events_retry_when_the_peer_disconnects_before_headers(self) -> None:
+        requests = []
+        event = {"cursor": 4, "kind": "command", "payload": {}}
+
+        def handler(req: _Handler) -> None:
+            requests.append((req.path, req.headers["x-deadline"]))
+            if len(requests) == 1:
+                req.close_connection = True
+                return
+            req.reply_json(200, {"events": [event], "latestAvailable": 4})
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "test-token")
+        iterator = client.events(3, max_transport_retries=1, retry_delay_ms=20)
+        self.assertEqual(next(iterator), event)
+        self.assertEqual([path for path, _ in requests], ["/v1/events?after=3&limit=100"] * 2)
+        self.assertEqual(requests[0][1], requests[1][1])
+
+    def test_events_stop_retrying_when_the_deadline_expires_during_backoff(self) -> None:
+        class FailingOpener:
+            attempts = 0
+
+            def open(self, request, timeout):
+                self.attempts += 1
+                raise URLError(ConnectionRefusedError("connection refused"))
+
+        for absolute in (False, True):
+            with self.subTest(absolute=absolute):
+                opener = FailingOpener()
+                client = BrowserRuntimeClient("http://127.0.0.1", "test-token", opener=opener)
+                options = RequestOptions(
+                    deadline=(datetime.now(timezone.utc) + timedelta(milliseconds=150)).isoformat()
+                ) if absolute else RequestOptions(timeout_ms=150)
+
+                started = time.monotonic()
+                with self.assertRaises(RuntimeClientError) as raised:
+                    next(client.events(0, options, max_transport_retries=1, retry_delay_ms=1000))
+                self.assertEqual(raised.exception.kind, "deadline")
+                self.assertEqual(opener.attempts, 1)
+                self.assertLess(time.monotonic() - started, 0.8)
+
+    def test_events_preserve_structured_broker_errors(self) -> None:
+        def handler(req: _Handler) -> None:
+            req.reply_json(403, {"error": {
+                "code": "missingCapability",
+                "layer": "interface",
+                "message": "Missing capability session:read",
+                "correlationId": req.headers["x-correlation-id"],
+                "commandId": None,
+                "retryable": False,
+                "retryAfterMs": None,
+                "reconciliationRequired": False,
+                "requiredCapability": "session:read",
+            }})
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "test-token")
+        with self.assertRaises(RuntimeClientError) as raised:
+            next(client.events(0, RequestOptions(correlation_id="events-test")))
+        error = raised.exception
+        self.assertEqual(error.kind, "http")
+        self.assertEqual(error.status, 403)
+        self.assertEqual(error.code, "missingCapability")
+        self.assertEqual(error.required_capability, "session:read")
+        self.assertEqual(error.correlation_id, "events-test")
 
     def test_shared_reconciliation_fixtures(self) -> None:
         fixture_path = Path(__file__).resolve().parents[3] / "crates/bobby-browser-client/tests/fixtures/sdk-responses.json"

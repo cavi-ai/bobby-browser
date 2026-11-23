@@ -111,7 +111,7 @@ def _uuid4() -> str:
     return str(uuid.uuid4())
 
 
-def _effective_deadline(options: Optional[RequestOptions], default_timeout_ms: int) -> tuple:
+def _effective_deadline(options: Optional[RequestOptions], default_timeout_ms: int) -> tuple[datetime, float]:
     now = datetime.now(timezone.utc)
     monotonic_now = time.monotonic()
     timeout_ms = options.timeout_ms if options else None
@@ -148,7 +148,7 @@ def _deadline_header(options: Optional[RequestOptions], default_timeout_ms: int)
 def _remaining(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise TimeoutError("Request deadline exceeded")
+        raise RuntimeClientError("deadline", message="Request deadline exceeded")
     return remaining
 
 
@@ -286,6 +286,7 @@ class BrowserRuntimeClient:
         A cursor gap is HTTP 409 with ``error`` and ``gap``. That raises
         :class:`RuntimeClientError` with ``event_gap`` set and stops the
         iterator. Transport failures retry up to ``max_transport_retries``.
+        The iterator shares one deadline across all polls and retries.
         """
         if not _bounded_int(cursor, 0, _MAX_SAFE_INTEGER):
             raise self._protocol("event cursor is outside SDK bounds")
@@ -295,6 +296,7 @@ class BrowserRuntimeClient:
             raise self._protocol("event retry count is outside SDK bounds")
         if not _bounded_int(retry_delay_ms, 0, _MAX_EVENT_RETRY_DELAY_MS):
             raise self._protocol("event retry delay is outside SDK bounds")
+        deadline_budget = _effective_deadline(options, self._timeout_ms)
         after = cursor
         failures = 0
         while True:
@@ -304,12 +306,13 @@ class BrowserRuntimeClient:
                     f"/v1/events?after={after}&limit={limit}",
                     None,
                     options,
+                    deadline_budget=deadline_budget,
                 )
             except RuntimeClientError as error:
                 if error.kind != "transport" or failures >= max_transport_retries:
                     raise
                 failures += 1
-                time.sleep(retry_delay_ms / 1000)
+                time.sleep(min(retry_delay_ms / 1000, _remaining(deadline_budget[1])))
                 continue
             failures = 0
             if status == 409 and isinstance(payload, dict) and set(payload) == {"error", "gap"}:
@@ -324,7 +327,9 @@ class BrowserRuntimeClient:
                     message="event history has a cursor gap",
                     event_gap=gap,
                 )
-            if status != 200 or not _is_event_batch(payload, after, limit):
+            if status != 200:
+                raise self._response_error(status, payload)
+            if not _is_event_batch(payload, after, limit):
                 raise self._protocol("event batch has an unexpected shape", status)
             for event in payload["events"]:
                 after = event["cursor"]
@@ -617,10 +622,11 @@ class BrowserRuntimeClient:
         options: Optional[RequestOptions],
         *,
         max_bytes: Optional[int] = None,
+        deadline_budget: Optional[tuple[datetime, float]] = None,
     ) -> tuple:
         """Returns (status, content_type, headers, raw_bytes)."""
         url = f"{self._base_url}{path}"
-        deadline, budget = _effective_deadline(options, self._timeout_ms)
+        deadline, budget = deadline_budget or _effective_deadline(options, self._timeout_ms)
         headers = self._headers(options, body is not None, _format_deadline(deadline))
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -642,6 +648,8 @@ class BrowserRuntimeClient:
             if isinstance(error.reason, TimeoutError):
                 raise RuntimeClientError("deadline", message="Request deadline exceeded") from error
             raise RuntimeClientError("transport", message=f"Runtime transport request failed: {error.reason}") from error
+        except ConnectionError as error:
+            raise RuntimeClientError("transport", message="Runtime transport connection failed") from error
         content_type = _content_type(response_headers)
         return status, content_type, response_headers, raw
 
@@ -659,9 +667,13 @@ class BrowserRuntimeClient:
         path: str,
         body: Optional[Mapping[str, Any]],
         options: Optional[RequestOptions],
+        *,
+        deadline_budget: Optional[tuple[datetime, float]] = None,
     ) -> tuple:
         """Returns (status, parsed_json_payload)."""
-        status, content_type, _headers, raw = self._request_raw(method, path, body, options)
+        status, content_type, _headers, raw = self._request_raw(
+            method, path, body, options, deadline_budget=deadline_budget
+        )
         if not _JSON_CONTENT_TYPE.match(content_type):
             raise self._protocol("response content type must be application/json", status)
         try:
