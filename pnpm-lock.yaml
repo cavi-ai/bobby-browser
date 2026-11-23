@@ -18,8 +18,8 @@ importers:
   examples/cavi-api-client:
     dependencies:
       '@cavi-ai/api-client':
-        specifier: 0.22.0
-        version: 0.22.0
+        specifier: 0.22.1
+        version: 0.22.1
       '@cavi-ai/bobby-browser':
         specifier: workspace:*
         version: link:../../packages/typescript-sdk
@@ -75,8 +75,8 @@ importers:
 
 packages:
 
-  '@cavi-ai/api-client@0.22.0':
-    resolution: {integrity: sha512-GCp8qg2me4koz2wWF0iqJIr53Q2WzaacHy8IUO5LNFWqXryQpwmH1HJE5YMZNglbGPp32gOvllSe2r2Zv47j6w==}
+  '@cavi-ai/api-client@0.22.1':
+    resolution: {integrity: sha512-97PoBojsnwZqPQAskraQVBAPXspD1EmixtSP03OkVn+Vbj22HMPEPt/rUHyx2LHGXdE7hYocaGjcwjHLnQUOGQ==}
     engines: {node: '>=20.0.0'}
     hasBin: true
     peerDependencies:
@@ -635,7 +635,7 @@ packages:
 
 snapshots:
 
-  '@cavi-ai/api-client@0.22.0': {}
+  '@cavi-ai/api-client@0.22.1': {}
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true

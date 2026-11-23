@@ -9,7 +9,7 @@
     "start": "node dist/src/cli.js"
   },
   "dependencies": {
-    "@cavi-ai/api-client": "0.22.0",
+    "@cavi-ai/api-client": "0.22.1",
     "@cavi-ai/bobby-browser": "workspace:*"
   },
   "devDependencies": { "@types/node": "26.6.6" }
