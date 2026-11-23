@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::protocol::MAX_EVENT_LIMIT;
 use crate::workflow_handles::{workflow_scope_for_tool, WorkflowScope};
 
-pub(crate) const MAX_EVIDENCE_ITEMS: usize = 128;
+pub(crate) use types::MAX_CHECKPOINT_EVIDENCE_REFS as MAX_EVIDENCE_ITEMS;
 const MAX_COLLECTION_ITEMS: usize = 128;
 const MAX_STRING_BYTES: usize = 4096;
 const MAX_URL_BYTES: usize = 8192;
@@ -20,7 +20,7 @@ pub(crate) const MAX_WORKFLOW_GOAL_SCALARS: usize = 256;
 // never from a tool argument.
 const MAX_RECOVERY_RECEIPTS: usize = 64;
 /// Cap on workflows a single `recovery_status` discovery answers with.
-pub(crate) const MAX_RECOVERABLE_WORKFLOWS: usize = 32;
+pub(crate) use types::MAX_RECOVERY_DISCOVERY as MAX_RECOVERABLE_WORKFLOWS;
 
 pub(crate) fn validate_tool_arguments(
     name: &str,

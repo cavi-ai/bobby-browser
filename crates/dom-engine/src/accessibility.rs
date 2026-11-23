@@ -92,15 +92,7 @@ pub fn accessibility_candidates(
                     target
                         .frame_path
                         .iter()
-                        .map(|segment| {
-                            Box::new(types::TargetSpec {
-                                role: Some(segment.role.clone()),
-                                accessible_name: (!segment.accessible_name.is_empty())
-                                    .then(|| segment.accessible_name.clone()),
-                                ordinal: segment.ordinal,
-                                ..types::TargetSpec::default()
-                            })
-                        })
+                        .map(|segment| Box::new(crate::hop_spec(segment)))
                         .collect()
                 })
                 .unwrap_or_default();

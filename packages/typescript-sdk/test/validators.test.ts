@@ -206,6 +206,7 @@ test("deep validators accept every exact public response variant", () => {
     storageIntegrity: [{ store: "commandIdempotency", reason: "unreadableLedger" }],
   }), true);
   assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false, passwordManager: false } }), true);
+  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false, passwordManager: false, engine: "firefox" } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
 
   assert.equal(new Set(evidenceFixtures().map((evidence) => evidence.kind)).size, 34);

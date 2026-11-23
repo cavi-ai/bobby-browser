@@ -7,6 +7,7 @@ use types::{PageId, SessionId, WorkflowId};
 
 use crate::RuntimeService;
 
+/// Restart impact. Not [`types::MAX_RECOVERY_DISCOVERY`].
 const MAX_RECOVERABLE_WORKFLOWS: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]

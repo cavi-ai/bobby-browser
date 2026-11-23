@@ -1248,29 +1248,6 @@ impl ChromiumWorker {
             .ok_or_else(closed_error)
     }
 
-    fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
-        // Preserve role/ordinal resolution for unnamed frame hops. File
-        // targets themselves retain their exact empty name and type filter.
-        fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
-            Box::new(TargetSpec {
-                role: Some(segment.role.clone()),
-                accessible_name: (!segment.accessible_name.is_empty())
-                    .then(|| segment.accessible_name.clone()),
-                ordinal: segment.ordinal,
-                ..Default::default()
-            })
-        }
-        TargetSpec {
-            role: Some(target.role.clone()),
-            attributes: (*target.attributes).clone(),
-            accessible_name: Some(target.accessible_name.clone()),
-            ordinal: target.ordinal,
-            frame_path: target.frame_path.iter().map(segment).collect(),
-            shadow_path: target.shadow_path.iter().map(segment).collect(),
-            ..Default::default()
-        }
-    }
-
     /// Humanized click: curved approach to the target's clickable point, hover
     /// dwell, then the press, over CDP mouse events. `target` is resolved by
     /// the caller, so every read of the resolved element happens before any
@@ -3691,7 +3668,7 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
     ) -> Result<ChromiumPreparedControl, CommandError> {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
-        let spec = Self::control_target_spec(target);
+        let spec = dom_engine::control_target_spec(target);
         let resolved = resolve_target_with_visibility(
             page_id,
             &page,
@@ -4065,13 +4042,11 @@ impl crate::EventsEngine for ChromiumWorker {
         let Some(popup) = popup else {
             self.forget_closed_page(&popup_id, &event.target_info.target_id)
                 .await;
-            return Ok(vec![
-                Evidence::PopupClosed {
-                    opener_page_id: page_id.clone(),
-                    popup_page_id: popup_id,
-                },
-                resolved.evidence,
-            ]);
+            return Ok(crate::popup_evidence(
+                page_id.clone(),
+                crate::PopupFate::Closed { page_id: popup_id },
+                std::iter::once(resolved.evidence),
+            ));
         };
         let registered = tokio::time::timeout_at(
             deadline.into(),
@@ -4089,13 +4064,11 @@ impl crate::EventsEngine for ChromiumWorker {
             if error.code == ErrorCode::NotFound || is_closed_page_message(&error.message) {
                 self.forget_closed_page(&popup_id, &event.target_info.target_id)
                     .await;
-                return Ok(vec![
-                    Evidence::PopupClosed {
-                        opener_page_id: page_id.clone(),
-                        popup_page_id: popup_id,
-                    },
-                    resolved.evidence,
-                ]);
+                return Ok(crate::popup_evidence(
+                    page_id.clone(),
+                    crate::PopupFate::Closed { page_id: popup_id },
+                    std::iter::once(resolved.evidence),
+                ));
             }
             return Err(error.clone());
         }
@@ -4124,13 +4097,11 @@ impl crate::EventsEngine for ChromiumWorker {
                 Ok(Err(error)) if popup.is_closed() || is_closed_page_message(&error.message) => {
                     self.forget_closed_page(&popup_id, &event.target_info.target_id)
                         .await;
-                    return Ok(vec![
-                        Evidence::PopupClosed {
-                            opener_page_id: page_id.clone(),
-                            popup_page_id: popup_id,
-                        },
-                        resolved.evidence,
-                    ]);
+                    return Ok(crate::popup_evidence(
+                        page_id.clone(),
+                        crate::PopupFate::Closed { page_id: popup_id },
+                        std::iter::once(resolved.evidence),
+                    ));
                 }
                 Ok(Err(error)) => {
                     self.unregister_page(&popup_id).await;
@@ -4143,23 +4114,21 @@ impl crate::EventsEngine for ChromiumWorker {
         if popup.is_closed() {
             self.forget_closed_page(&popup_id, &event.target_info.target_id)
                 .await;
-            return Ok(vec![
-                Evidence::PopupClosed {
-                    opener_page_id: page_id.clone(),
-                    popup_page_id: popup_id,
-                },
-                resolved.evidence,
-            ]);
+            return Ok(crate::popup_evidence(
+                page_id.clone(),
+                crate::PopupFate::Closed { page_id: popup_id },
+                std::iter::once(resolved.evidence),
+            ));
         }
-        Ok(vec![
-            Evidence::Popup {
-                opener_page_id: page_id.clone(),
+        Ok(crate::popup_evidence(
+            page_id.clone(),
+            crate::PopupFate::Open {
                 page_id: popup_id,
                 url,
                 title,
             },
-            resolved.evidence,
-        ])
+            std::iter::once(resolved.evidence),
+        ))
     }
 
     async fn click_and_wait_for_download(

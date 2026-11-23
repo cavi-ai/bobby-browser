@@ -9,6 +9,10 @@ use crate::{
 };
 
 pub const MAX_RECOVERY_RECEIPTS: usize = 64;
+/// Evidence refs one checkpoint may name. MCP, HTTP, and ACP share this cap.
+pub const MAX_CHECKPOINT_EVIDENCE_REFS: usize = 128;
+/// Workflows one recovery discovery lists. Not the restart-impact bound.
+pub const MAX_RECOVERY_DISCOVERY: usize = 32;
 pub const MAX_RECOVERY_RECEIPT_EVIDENCE: usize = 32;
 pub const MAX_RECOVERY_RECEIPT_BYTES: usize = 256 * 1024;
 

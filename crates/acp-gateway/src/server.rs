@@ -857,8 +857,8 @@ impl AcpServer {
         operation: PromptOperation,
         prompt_turn: &mut PromptLease,
     ) -> Result<PromptResponse, agent_client_protocol::Error> {
-        const MAX_EVIDENCE_REFS: usize = 128;
-        const MAX_RECOVERABLE_WORKFLOWS: usize = 32;
+        const MAX_EVIDENCE_REFS: usize = types::MAX_CHECKPOINT_EVIDENCE_REFS;
+        const MAX_RECOVERABLE_WORKFLOWS: usize = types::MAX_RECOVERY_DISCOVERY;
 
         let payload = async {
             let payload = match operation {
@@ -922,9 +922,9 @@ impl AcpServer {
                         )));
                     }
                     if evidence_refs.len() > MAX_EVIDENCE_REFS {
-                        return Err(PromptStepError::Failed(invalid_request(
-                            "evidenceRefs exceeds 128 entries",
-                        )));
+                        return Err(PromptStepError::Failed(invalid_request(format!(
+                            "evidenceRefs exceeds {MAX_EVIDENCE_REFS} entries"
+                        ))));
                     }
                     let evidence = prompt_turn
                         .wait(
@@ -963,9 +963,9 @@ impl AcpServer {
                     } else {
                         let limit = limit.unwrap_or(MAX_RECOVERABLE_WORKFLOWS);
                         if !(1..=MAX_RECOVERABLE_WORKFLOWS).contains(&limit) {
-                            return Err(PromptStepError::Failed(invalid_request(
-                                "limit must be between 1 and 32",
-                            )));
+                            return Err(PromptStepError::Failed(invalid_request(format!(
+                                "limit must be between 1 and {MAX_RECOVERABLE_WORKFLOWS}"
+                            ))));
                         }
                         let workflows = prompt_turn
                             .wait(self.runtime.workflows_for_session(

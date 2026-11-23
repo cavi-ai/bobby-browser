@@ -104,6 +104,45 @@ pub fn control_stamp_selector(target: &types::TargetSpec) -> Option<String> {
         })
 }
 
+/// An unnamed frame or shadow hop. An empty name can never match a frame, so it means any.
+pub fn hop_spec(segment: &types::SemanticTargetSegment) -> types::TargetSpec {
+    types::TargetSpec {
+        role: Some(segment.role.clone()),
+        accessible_name: unnamed_hop_name(&segment.accessible_name),
+        ordinal: segment.ordinal,
+        ..types::TargetSpec::default()
+    }
+}
+
+/// Empty hop names are unnamed. Ranking treats them as absent.
+pub fn unnamed_hop_name(name: &str) -> Option<String> {
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// A frame hop that arrived with a snapshot's empty name, ranked the same way as [`hop_spec`].
+pub fn normalize_frame_hop(hop: &types::TargetSpec) -> types::TargetSpec {
+    let mut hop = hop.clone();
+    if hop.accessible_name.as_deref() == Some("") {
+        hop.accessible_name = None;
+    }
+    hop
+}
+
+/// A control as the resolver reads it. The control keeps an empty name (a file input).
+/// Its frame and shadow hops do not.
+pub fn control_target_spec(target: &types::FormControlTarget) -> types::TargetSpec {
+    let segment = |segment: &types::SemanticTargetSegment| Box::new(hop_spec(segment));
+    types::TargetSpec {
+        role: Some(target.role.clone()),
+        attributes: (*target.attributes).clone(),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..types::TargetSpec::default()
+    }
+}
+
 /// The exact structural target a snapshot returns for an unnamed native file input.
 pub fn is_unnamed_file_target(target: &types::TargetSpec) -> bool {
     target.role.as_deref() == Some("button")
@@ -115,4 +154,52 @@ pub fn is_unnamed_file_target(target: &types::TargetSpec) -> bool {
         && target.label.is_none()
         && target.text.is_none()
         && !target.allow_best_match
+}
+
+#[cfg(test)]
+mod hop_tests {
+    use super::{control_target_spec, hop_spec, normalize_frame_hop};
+
+    #[test]
+    fn an_empty_hop_name_means_any_frame() {
+        let unnamed = hop_spec(&types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: String::new(),
+            ordinal: Some(1),
+        });
+        assert_eq!(unnamed.role.as_deref(), Some("iframe"));
+        assert_eq!(unnamed.accessible_name, None);
+        assert_eq!(unnamed.ordinal, Some(1));
+
+        let named = hop_spec(&types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: "Widget".into(),
+            ordinal: None,
+        });
+        assert_eq!(named.accessible_name.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn a_control_keeps_an_empty_name_and_its_hops_do_not() {
+        let target = types::FormControlTarget {
+            attributes: Box::default(),
+            role: "button".into(),
+            accessible_name: String::new(),
+            ordinal: None,
+            frame_path: vec![types::SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: String::new(),
+                ordinal: None,
+            }],
+            shadow_path: Vec::new(),
+        };
+        let spec = control_target_spec(&target);
+        assert_eq!(spec.accessible_name.as_deref(), Some(""));
+        assert_eq!(spec.frame_path[0].accessible_name, None);
+        let arrived = types::TargetSpec {
+            accessible_name: Some(String::new()),
+            ..types::TargetSpec::default()
+        };
+        assert_eq!(normalize_frame_hop(&arrived).accessible_name, None);
+    }
 }

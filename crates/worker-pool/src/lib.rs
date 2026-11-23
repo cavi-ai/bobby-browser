@@ -17,6 +17,7 @@ mod network_quiet;
 mod obstruction;
 mod pointer_hit;
 pub mod policy;
+mod popup;
 pub mod process_registry;
 pub mod secret_material;
 mod selection;
@@ -66,6 +67,7 @@ pub use obstruction::{
     FIREFOX_POINTER_OBSCURED, FIREFOX_POINTER_OUT_OF_BOUNDS, MODAL_OBSTRUCTION,
 };
 pub use pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
+pub use popup::{popup_evidence, PopupFate};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_LEASE_LAUNCH_TIMEOUT, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,

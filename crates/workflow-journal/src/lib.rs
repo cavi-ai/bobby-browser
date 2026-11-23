@@ -103,6 +103,42 @@ pub struct JournalScan {
     pub incompatible_records: usize,
 }
 
+/// Trusted records across closed segments and the active file, one chain.
+/// Only the active file may end in a write in progress; that tail is not a record.
+pub fn read_trusted_records(
+    path: &Path,
+    key: Option<&JournalKey>,
+) -> std::io::Result<Vec<(Vec<u8>, JournalRecord)>> {
+    let files = segments::journal_files(path)?;
+    let mut opener = LineOpener::new(key);
+    let mut records = Vec::new();
+    for (position, file) in files.iter().enumerate() {
+        let bytes = match std::fs::read(file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let is_active = position + 1 == files.len();
+        let complete: &[u8] = if is_active {
+            match bytes.iter().rposition(|byte| *byte == b'\n') {
+                Some(end) => &bytes[..=end],
+                None => &[],
+            }
+        } else {
+            &bytes
+        };
+        for line in complete.split_inclusive(|byte| *byte == b'\n') {
+            let Some(opened) = opener.open(line) else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_slice::<JournalRecord>(&opened) {
+                records.push((opened.into_owned(), record));
+            }
+        }
+    }
+    Ok(records)
+}
+
 /// Read-only health of a journal file. Never truncates or creates the path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalHealth {

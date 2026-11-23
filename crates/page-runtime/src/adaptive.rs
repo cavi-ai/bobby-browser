@@ -17,9 +17,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ControlActionCommand,
-    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason,
-    FormControlTarget, PageId, PageState, PrimitiveCommand, RuntimeCommand, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason, PageId,
+    PageState, PrimitiveCommand, RuntimeCommand, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand,
 };
 use worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP;
 use worker_pool::WorkerLease;
@@ -223,7 +223,7 @@ fn primitive_action_target(command: &PrimitiveCommand) -> Option<TargetSpec> {
         PrimitiveCommand::ClickAndWaitForPopup(command) => (&command.selector, &command.target),
         PrimitiveCommand::ClickAndWaitForDownload(command) => (&command.selector, &command.target),
         PrimitiveCommand::ControlAction(command) => {
-            return Some(control_target_spec(&command.target))
+            return Some(dom_engine::control_target_spec(&command.target))
         }
         _ => return None,
     };
@@ -233,29 +233,6 @@ fn primitive_action_target(command: &PrimitiveCommand) -> Option<TargetSpec> {
             ..TargetSpec::default()
         })
     })
-}
-
-/// A control target as the target resolver reads it. An unnamed frame or
-/// shadow hop carries an empty name, which can never match; it means any.
-fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
-    fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
-        Box::new(TargetSpec {
-            role: Some(segment.role.clone()),
-            accessible_name: (!segment.accessible_name.is_empty())
-                .then(|| segment.accessible_name.clone()),
-            ordinal: segment.ordinal,
-            ..TargetSpec::default()
-        })
-    }
-    TargetSpec {
-        role: Some(target.role.clone()),
-        attributes: (*target.attributes).clone(),
-        accessible_name: Some(target.accessible_name.clone()),
-        ordinal: target.ordinal,
-        frame_path: target.frame_path.iter().map(segment).collect(),
-        shadow_path: target.shadow_path.iter().map(segment).collect(),
-        ..TargetSpec::default()
-    }
 }
 
 #[async_trait]
