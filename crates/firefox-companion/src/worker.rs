@@ -5811,12 +5811,13 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
             expected_url: None,
             modifiers: Vec::new(),
         };
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms.max(1));
         let click = worker_pool::InputEngine::click(self, page_id, &click_command);
         // Consume contextCreated while the popup is still blank. Waiting for
         // native click completion lets its navigation outrun the title proof.
         let bind_popup = async {
-            let timeout = Duration::from_millis(command.timeout_ms.max(1));
-            let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
+            let (popup_context, popup_url) = tokio::time::timeout_at(deadline, async {
                 loop {
                     let event = events.recv().await.map_err(|_| {
                         driver_error(
@@ -5858,35 +5859,41 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
         };
         let (click_evidence, (popup_page_id, title, popup_url)) =
             tokio::try_join!(click, bind_popup)?;
-        let budget = Duration::from_millis(command.timeout_ms.max(1))
+        let budget = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
             .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
-        let fate = if self.context(&popup_page_id).await.is_err() {
-            worker_pool::PopupFate::Closed {
-                page_id: popup_page_id,
-            }
-        } else if let Some((url, title)) = worker_pool::NavigationEngine::settle_page(
-            self,
-            &popup_page_id,
-            budget,
-            Some(&popup_url),
-        )
-        .await
-        {
-            worker_pool::PopupFate::Open {
-                page_id: popup_page_id,
-                url,
-                title,
-            }
-        } else if self.context(&popup_page_id).await.is_err() {
-            worker_pool::PopupFate::Closed {
-                page_id: popup_page_id,
-            }
+        let settled = if budget.is_zero() {
+            None
         } else {
-            worker_pool::PopupFate::Open {
-                page_id: popup_page_id,
-                url: popup_url,
-                title: page_title_evidence(title),
+            // A BiDi read can outlast the settle loop's own budget.
+            tokio::time::timeout_at(
+                deadline,
+                worker_pool::NavigationEngine::settle_page(
+                    self,
+                    &popup_page_id,
+                    budget,
+                    Some(&popup_url),
+                ),
+            )
+            .await
+            .ok()
+            .flatten()
+        };
+        // Settlement can return a cached read after the context was destroyed.
+        let fate = match self.context(&popup_page_id).await {
+            Ok(_) => {
+                let (url, title) =
+                    settled.unwrap_or_else(|| (popup_url, page_title_evidence(title)));
+                worker_pool::PopupFate::Open {
+                    page_id: popup_page_id,
+                    url,
+                    title,
+                }
             }
+            Err(error) if error.code == ErrorCode::NotFound => worker_pool::PopupFate::Closed {
+                page_id: popup_page_id,
+            },
+            Err(error) => return Err(error),
         };
         Ok(worker_pool::popup_evidence(
             page_id.clone(),

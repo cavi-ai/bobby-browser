@@ -3786,6 +3786,122 @@ async fn popup_timeout_never_replays_the_boundary_click() {
     );
 }
 
+async fn start_popup_click(
+    bidi: &Arc<FakeBidi>,
+    observer: Arc<FakeObserver>,
+) -> (
+    tokio::task::JoinHandle<Result<Vec<Evidence>, CommandError>>,
+    BlockControl,
+) {
+    let click = bidi.block_once("input.performActions", None).await;
+    let worker = worker(bidi.clone(), observer).await;
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let operation = tokio::spawn(async move {
+        worker_pool::events_or_default(worker.events())
+            .click_and_wait_for_popup(
+                &page,
+                &ClickAndWaitForPopupCommand {
+                    selector: String::new(),
+                    target: Some(TargetSpec {
+                        test_id: Some("popup-open".into()),
+                        ..Default::default()
+                    }),
+                    timeout_ms: 1_000,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), click.started.notified())
+        .await
+        .expect("native popup click should start");
+    (operation, click)
+}
+
+fn emit_popup_created(bidi: &FakeBidi) {
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({
+            "context": "popup-context",
+            "url": "https://example.test/popup",
+            "originalOpener": "context-1",
+        }),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn popup_closed_during_settlement_overrides_a_cached_probe() {
+    let settled = json!({
+        "url": "https://example.test/popup", "title": "Popup", "quiet": true,
+        "begin": {"url": "https://example.test/popup", "title": "Popup"}
+    });
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "string", "value": settled.to_string()}})),
+    ]);
+    let observer = FakeObserver::new(observation());
+    let releases = Arc::clone(&observer.releases);
+    let (operation, click) = start_popup_click(&bidi, observer).await;
+    let probe = bidi
+        .block_once("script.evaluate", Some("MutationObserver"))
+        .await;
+    emit_popup_created(&bidi);
+    click.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), probe.started.notified())
+        .await
+        .expect("popup settlement probe should start");
+
+    // The first probe's response is already in flight when the context closes.
+    // Later reads of the closed context have no result.
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "popup-context"}),
+    );
+    wait_for_release_count(&releases, 1).await;
+    probe.release.notify_one();
+
+    let evidence = operation.await.unwrap().unwrap();
+    assert!(
+        matches!(evidence[0], Evidence::PopupClosed { .. }),
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn popup_settlement_uses_the_remaining_timeout_and_preserves_evidence() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let (operation, click) = start_popup_click(&bidi, FakeObserver::new(observation())).await;
+    let stalled_probe = bidi
+        .block_once("script.evaluate", Some("MutationObserver"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    emit_popup_created(&bidi);
+    click.release.notify_one();
+    tokio::time::timeout(Duration::from_millis(100), stalled_probe.started.notified())
+        .await
+        .expect("late popup should still start settling");
+
+    let evidence = tokio::time::timeout(Duration::from_millis(300), operation)
+        .await
+        .expect("stalled settle must finish within the original popup budget")
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&evidence[0], Evidence::Popup { url, title, .. }
+            if url == "https://example.test/popup" && title == "Original tab title"),
+        "{evidence:?}"
+    );
+}
+
 #[tokio::test]
 async fn list_pages_excludes_a_closed_context_and_releases_its_binding() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
