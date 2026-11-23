@@ -61,6 +61,10 @@ To allow Chromium as well, use `{"preference":{"mode":"prefer","engines":["firef
 - All runtime sessions on a profile share one BiDi connection, because Firefox accepts one BiDi session per browser. Page attachments stay per session and renew before they expire.
 - If pairing is interrupted by a restart or a rotated descriptor, the extension retries with a bounded cooldown.
 
+### Navigation
+
+Firefox uses BiDi's `interactive` readiness for `commit`, `domContentLoaded` and `interactive`. It uses BiDi's `complete` readiness for `networkIdle`. Each readiness check is followed by document settlement, which also considers in-flight scripts and fetch/XHR requests.
+
 ### Toolbar popup
 
 | Section | Shows |

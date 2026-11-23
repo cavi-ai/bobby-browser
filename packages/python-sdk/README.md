@@ -30,7 +30,7 @@ client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RU
 ```
 
 Full method catalog, headers, and error shape:
-[Python SDK reference](https://github.com/cavi-ai/bobby-browser/blob/main/docs/bobby-browser/source/pages/surfaces/python-sdk.md).
+[Python SDK reference](https://cavi-ai.xyz/docs/bobby-browser/surfaces/python-sdk/).
 
 ## Test
 

@@ -140,8 +140,11 @@ paths:
       operationId: getRuntime
       tags: [runtime]
       summary: Runtime info
-      description: Requires capability `session:read`.
+      description: Requires capability `session:read`. Pass `engine` to scope the reported browser capabilities.
       parameters:
+        - name: engine
+          in: query
+          schema: { type: string, enum: [chromium, firefox, webKit] }
         - $ref: "#/components/parameters/Authorization"
         - $ref: "#/components/parameters/InterfaceVersion"
         - $ref: "#/components/parameters/CorrelationId"
@@ -157,6 +160,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/sessions:
@@ -688,16 +693,19 @@ paths:
       tags: [events]
       summary: Read events
       description: |
-        Requires `session:read`. Query `after` and `limit` (max 256).
-        Pass `stream=1` for SSE (`text/event-stream`); otherwise JSON
-        `EventBatch`. Cursor gaps return **409** with an event-gap body.
+        Requires `session:read`. `after` is exclusive. The maximum `limit` is
+        configured by `interface.max_event_batch` (default 256).
+        With `stream=1` the response is SSE (`text/event-stream`).
+        A JSON poll waits for events until the request deadline. Cursor gaps
+        return **409** with an event-gap body.
       parameters:
         - name: after
           in: query
-          schema: { type: integer, minimum: 0 }
+          schema: { type: integer, minimum: 0, default: 0 }
         - name: limit
           in: query
-          schema: { type: integer, minimum: 1, maximum: 256 }
+          description: Defaults to the configured maximum.
+          schema: { type: integer, minimum: 1 }
         - name: stream
           in: query
           schema: { type: string, enum: ["1"] }
@@ -717,8 +725,8 @@ paths:
               schema:
                 type: string
                 description: |
-                  SSE frames; event `id` is the cursor. Idle heartbeats and
-                  terminal `event.gap` close the stream.
+                  Each event's `id` is its cursor. Keep-alive comments are sent
+                  while idle. An `event.gap` frame ends the stream.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -726,7 +734,7 @@ paths:
         "408":
           $ref: "#/components/responses/DeadlineExceeded"
         "409":
-          description: Event cursor gap (history lost / invalid cursor or limit)
+          description: Event cursor gap (history lost or invalid cursor)
           content:
             application/json:
               schema:
@@ -737,6 +745,8 @@ paths:
                     $ref: "#/components/schemas/InterfaceError"
                   gap:
                     $ref: "#/components/schemas/EventGap"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1344,6 +1354,7 @@ components:
       properties:
         events:
           type: array
+          minItems: 1
           items:
             $ref: "#/components/schemas/Event"
         latestAvailable:
@@ -1423,6 +1434,10 @@ components:
       type: object
       additionalProperties: true
       properties:
+        engineScope:
+          type: string
+          enum: [chromium, firefox, webKit]
+          description: Present when the request specifies an engine.
         storageIntegrity:
           type: array
           maxItems: 4

@@ -8,7 +8,7 @@ Read the runtime's event stream to follow what happened, and use checkpoints to 
 
 ## Read events
 
-`GET /v1/events?after=<cursor>&limit=<n>` returns a batch. It needs `session:read`. `limit` is capped by `interface.max_event_batch` (default 256).
+`GET /v1/events?after=<cursor>&limit=<n>` waits for events after the supplied cursor. It requires `session:read`. The request returns HTTP 408 if the deadline expires first. The maximum `limit` is set by `interface.max_event_batch` (default 256).
 
 ```ts
 for await (const event of client.events(0, { limit: 100 })) {
@@ -16,13 +16,13 @@ for await (const event of client.events(0, { limit: 100 })) {
 }
 ```
 
-Store the last cursor you processed and resume from it. Over MCP, `events_read` takes `cursor` and `limit` and waits for a newer event or its deadline. `notifications/bobby/event` pushes the same events.
+Store the last cursor you processed and resume from it. The [Python SDK](../surfaces/python-sdk.md#read-events) uses the same cursor with a synchronous iterator. Over MCP, `events_read` takes `cursor` and `limit` and waits for a newer event or its deadline. `notifications/bobby/event` pushes the same events.
 
-For a push stream over HTTP, add `stream=1`. Each server-sent frame has the event's cursor as its `id`.
+For a push stream over HTTP, add `stream=1`. Each event has its cursor as its `id`. Keep-alive comments are sent while idle.
 
 ### Gaps
 
-If retention has moved past your cursor, the API returns HTTP 409 with the earliest available cursor. A stream ends with an `event.gap` frame. The TypeScript client throws `RuntimeClientError` with `eventGap`. Re-read durable state (sessions, checkpoints), then resume from the earliest cursor. Do not guess across a gap. `invalidCursor` and `invalidLimit` are caller errors.
+If retention has moved past your cursor, the API returns HTTP 409 with `reason: "historyLost"` and `earliestAvailable`. A stream ends with an `event.gap` frame. The TypeScript client throws `RuntimeClientError` with `eventGap`. Re-read durable state such as sessions and checkpoints. To include the first retained event, resume with `after` set to `max(0, earliestAvailable - 1)`. An invalid cursor needs a new starting point.
 
 ## Save a checkpoint
 
