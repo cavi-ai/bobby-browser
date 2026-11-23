@@ -25,3 +25,6 @@ __pycache__/
 
 scripts/vision-mlx/data/
 scripts/vision-mlx/promoted/
+
+# Local spec workflow. Never publish these.
+.specs/

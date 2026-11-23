@@ -40,6 +40,8 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with `max
 | Method | Route |
 |---|---|
 | `runtime_info()` | `GET /v1/runtime` |
+| `runtime_info_for_engine(engine)` | `GET /v1/runtime?engine=` (`chromium`, `firefox`, or `webKit`) |
+| `events(cursor, limit=100)` | `GET /v1/events`. Iterator; a cursor gap raises `RuntimeClientError` with `event_gap` |
 | `create_session(input, options=None)` | `POST /v1/sessions` |
 | `read_session(session_id=None)` | `GET /v1/sessions`. With an ID it filters the list and raises if nothing matches |
 | `delete_session(session_id)` | `DELETE /v1/sessions/{id}` |
@@ -50,6 +52,7 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with `max
 | `recovery_status(workflow_id)` | `GET /v1/recovery/{id}` |
 | `recover_workflow(workflow_id)` | `POST /v1/recovery/{id}`. `needsReconciliation` is HTTP 409 |
 | `context_ask(session_id, page_id, description)` | `GET /v1/context/ask` |
+| `context_neighbors(session_id, page_id, description)` | `GET /v1/context/neighbors` |
 | `context_site(site_key)` | `GET /v1/context/site/{key}` |
 | `read_artifact(reference)` | `GET /v1/artifacts/{id}` |
 | `submit_job`, `job_status`, `cancel_job` | `/v1/jobs` |
@@ -83,7 +86,9 @@ outcome = client.submit_command({
 client.delete_session(session["id"])
 ```
 
-The SDK has no event stream, engine-scoped runtime info, context-neighbor method, or intent helpers. The TypeScript SDK supports event reads, and the Rust and TypeScript SDKs support engine-scoped runtime info and context neighbors. Send intent envelopes the same way (see [Intent commands](../guides/intents.md)), or use the MCP `intent_*` tools.
+`events` polls `GET /v1/events`. A cursor gap is HTTP 409 and raises `RuntimeClientError` with `event_gap` set.
+
+Intent envelopes come from `bobby_browser.intents` (`locate_envelope`, `fill_envelope`, and the `*_runtime_command` builders). They produce the same `{kind: "intent"}` command as the TypeScript helpers. See [Intent commands](../guides/intents.md).
 
 ## Errors
 

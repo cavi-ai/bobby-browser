@@ -20,7 +20,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
 from .errors import RuntimeClientError
 from .session_capabilities import is_session_capabilities
@@ -48,6 +48,44 @@ _COMMAND_STATUS_HTTP: Dict[str, int] = {
 # RecoveryDecision.status -> expected HTTP status, mirroring client.ts's
 # `recover()` mapping.
 _RECOVERY_NEEDS_RECONCILIATION_STATUS = "needsReconciliation"
+_MAX_SAFE_INTEGER = 2**53 - 1
+_MAX_EVENT_LIMIT = 256
+_MAX_EVENT_TRANSPORT_RETRIES = 10
+_MAX_EVENT_RETRY_DELAY_MS = 60_000
+_EVENT_GAP_REASONS = ("historyLost", "invalidLimit", "invalidCursor")
+
+
+def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+
+
+def _is_event_gap(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"reason", "earliestAvailable"}
+        and value["reason"] in _EVENT_GAP_REASONS
+        and _bounded_int(value["earliestAvailable"], 0, _MAX_SAFE_INTEGER)
+    )
+
+
+def _is_event_batch(value: object, after: int, limit: int) -> bool:
+    if not isinstance(value, dict) or set(value) != {"events", "latestAvailable"}:
+        return False
+    latest = value["latestAvailable"]
+    events = value["events"]
+    if not _bounded_int(latest, after, _MAX_SAFE_INTEGER) or not isinstance(events, list):
+        return False
+    if not events or len(events) > limit:
+        return False
+    previous = after
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"cursor", "kind", "payload"}:
+            return False
+        cursor = event["cursor"]
+        if not _bounded_int(cursor, previous + 1, latest) or not isinstance(event["kind"], str):
+            return False
+        previous = cursor
+    return True
 
 
 @dataclass
@@ -73,7 +111,7 @@ def _uuid4() -> str:
     return str(uuid.uuid4())
 
 
-def _effective_deadline(options: Optional[RequestOptions], default_timeout_ms: int) -> tuple:
+def _effective_deadline(options: Optional[RequestOptions], default_timeout_ms: int) -> tuple[datetime, float]:
     now = datetime.now(timezone.utc)
     monotonic_now = time.monotonic()
     timeout_ms = options.timeout_ms if options else None
@@ -110,7 +148,7 @@ def _deadline_header(options: Optional[RequestOptions], default_timeout_ms: int)
 def _remaining(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise TimeoutError("Request deadline exceeded")
+        raise RuntimeClientError("deadline", message="Request deadline exceeded")
     return remaining
 
 
@@ -219,6 +257,83 @@ class BrowserRuntimeClient:
     def runtime_info(self, options: Optional[RequestOptions] = None) -> Dict[str, Any]:
         """``GET /v1/runtime`` -- version, capabilities, and load counters."""
         return self._json("GET", "/v1/runtime", None, options, expected_status=200)
+
+    def runtime_info_for_engine(
+        self, engine: str, options: Optional[RequestOptions] = None
+    ) -> Dict[str, Any]:
+        """``GET /v1/runtime?engine=`` -- guarantees for one engine's candidates.
+
+        ``engine`` is ``chromium``, ``firefox``, or ``webKit``, the same
+        tokens the Rust and TypeScript clients send.
+        """
+        if engine not in ("chromium", "firefox", "webKit"):
+            raise self._protocol("engine must be chromium, firefox, or webKit")
+        return self._json(
+            "GET", f"/v1/runtime?engine={engine}", None, options, expected_status=200
+        )
+
+    def events(
+        self,
+        cursor: int,
+        options: Optional[RequestOptions] = None,
+        *,
+        limit: int = 100,
+        max_transport_retries: int = 2,
+        retry_delay_ms: int = 50,
+    ) -> Iterator[Dict[str, Any]]:
+        """``GET /v1/events`` -- yield events after ``cursor``.
+
+        A cursor gap is HTTP 409 with ``error`` and ``gap``. That raises
+        :class:`RuntimeClientError` with ``event_gap`` set and stops the
+        iterator. Transport failures retry up to ``max_transport_retries``.
+        The iterator shares one deadline across all polls and retries.
+        """
+        if not _bounded_int(cursor, 0, _MAX_SAFE_INTEGER):
+            raise self._protocol("event cursor is outside SDK bounds")
+        if not _bounded_int(limit, 1, _MAX_EVENT_LIMIT):
+            raise self._protocol("event limit is outside SDK bounds")
+        if not _bounded_int(max_transport_retries, 0, _MAX_EVENT_TRANSPORT_RETRIES):
+            raise self._protocol("event retry count is outside SDK bounds")
+        if not _bounded_int(retry_delay_ms, 0, _MAX_EVENT_RETRY_DELAY_MS):
+            raise self._protocol("event retry delay is outside SDK bounds")
+        deadline_budget = _effective_deadline(options, self._timeout_ms)
+        after = cursor
+        failures = 0
+        while True:
+            try:
+                status, payload = self._request(
+                    "GET",
+                    f"/v1/events?after={after}&limit={limit}",
+                    None,
+                    options,
+                    deadline_budget=deadline_budget,
+                )
+            except RuntimeClientError as error:
+                if error.kind != "transport" or failures >= max_transport_retries:
+                    raise
+                failures += 1
+                time.sleep(min(retry_delay_ms / 1000, _remaining(deadline_budget[1])))
+                continue
+            failures = 0
+            if status == 409 and isinstance(payload, dict) and set(payload) == {"error", "gap"}:
+                gap = payload["gap"]
+                error_body = payload["error"]
+                if not _is_event_gap(gap) or not isinstance(error_body, dict):
+                    raise self._protocol("event gap response has an unexpected shape", status)
+                raise RuntimeClientError(
+                    "http",
+                    status=status,
+                    code=error_body.get("code") if isinstance(error_body.get("code"), str) else None,
+                    message="event history has a cursor gap",
+                    event_gap=gap,
+                )
+            if status != 200:
+                raise self._response_error(status, payload)
+            if not _is_event_batch(payload, after, limit):
+                raise self._protocol("event batch has an unexpected shape", status)
+            for event in payload["events"]:
+                after = event["cursor"]
+                yield event
 
     def create_session(
         self, input: Mapping[str, Any], options: Optional[RequestOptions] = None
@@ -376,6 +491,27 @@ class BrowserRuntimeClient:
         )
         return self._json("GET", f"/v1/context/ask?{query}", None, options, expected_status=200)
 
+    def context_neighbors(
+        self,
+        session_id: str,
+        page_id: str,
+        description: str,
+        options: Optional[RequestOptions] = None,
+    ) -> Dict[str, Any]:
+        """``GET /v1/context/neighbors`` -- remembered form around a control.
+
+        The result carries ``pageDerived: true`` on either a hit or miss.
+        """
+        encoded = len(description.encode("utf-8"))
+        if not (1 <= encoded <= 256):
+            raise self._protocol("description must contain between 1 and 256 bytes")
+        query = urllib.parse.urlencode(
+            {"sessionId": session_id, "pageId": page_id, "description": description}
+        )
+        return self._json(
+            "GET", f"/v1/context/neighbors?{query}", None, options, expected_status=200
+        )
+
     def context_site(
         self, site_key: str, options: Optional[RequestOptions] = None
     ) -> Dict[str, Any]:
@@ -486,10 +622,11 @@ class BrowserRuntimeClient:
         options: Optional[RequestOptions],
         *,
         max_bytes: Optional[int] = None,
+        deadline_budget: Optional[tuple[datetime, float]] = None,
     ) -> tuple:
         """Returns (status, content_type, headers, raw_bytes)."""
         url = f"{self._base_url}{path}"
-        deadline, budget = _effective_deadline(options, self._timeout_ms)
+        deadline, budget = deadline_budget or _effective_deadline(options, self._timeout_ms)
         headers = self._headers(options, body is not None, _format_deadline(deadline))
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -511,6 +648,8 @@ class BrowserRuntimeClient:
             if isinstance(error.reason, TimeoutError):
                 raise RuntimeClientError("deadline", message="Request deadline exceeded") from error
             raise RuntimeClientError("transport", message=f"Runtime transport request failed: {error.reason}") from error
+        except ConnectionError as error:
+            raise RuntimeClientError("transport", message="Runtime transport connection failed") from error
         content_type = _content_type(response_headers)
         return status, content_type, response_headers, raw
 
@@ -528,9 +667,13 @@ class BrowserRuntimeClient:
         path: str,
         body: Optional[Mapping[str, Any]],
         options: Optional[RequestOptions],
+        *,
+        deadline_budget: Optional[tuple[datetime, float]] = None,
     ) -> tuple:
         """Returns (status, parsed_json_payload)."""
-        status, content_type, _headers, raw = self._request_raw(method, path, body, options)
+        status, content_type, _headers, raw = self._request_raw(
+            method, path, body, options, deadline_budget=deadline_budget
+        )
         if not _JSON_CONTENT_TYPE.match(content_type):
             raise self._protocol("response content type must be application/json", status)
         try:

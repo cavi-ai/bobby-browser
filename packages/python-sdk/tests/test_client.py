@@ -13,10 +13,13 @@ import hashlib
 import json
 import sys
 import threading
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.error import URLError
 
 # `python3 -m unittest discover -s packages/python-sdk/tests` (the CI /
 # check-version-agreement.py-adjacent gate) runs straight from a checkout
@@ -103,6 +106,123 @@ class ClientUnitTests(unittest.TestCase):
         server = self._serve(handler)
         client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
         self.assertEqual(client.context_site("https://example.com/account")["siteKey"], "https://example.com/account")
+
+    def test_runtime_info_for_engine_sends_the_engine_query(self) -> None:
+        def handler(req: _Handler) -> None:
+            self.assertEqual(req.path, "/v1/runtime?engine=firefox")
+            req.reply_json(200, {"engineScope": "firefox", "version": "test", "capabilities": []})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        self.assertEqual(client.runtime_info_for_engine("firefox")["engineScope"], "firefox")
+        with self.assertRaises(RuntimeClientError):
+            client.runtime_info_for_engine("webkit")
+
+    def test_context_neighbors_encodes_the_same_query_as_ask(self) -> None:
+        def handler(req: _Handler) -> None:
+            self.assertEqual(
+                req.path,
+                "/v1/context/neighbors?sessionId=sess&pageId=page&description=Continue",
+            )
+            req.reply_json(200, {"hit": False, "neighbors": None, "pageDerived": True})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        with self.assertRaises(RuntimeClientError):
+            client.context_neighbors("sess", "page", "")
+        self.assertFalse(client.context_neighbors("sess", "page", "Continue")["hit"])
+
+    def test_events_yields_a_batch_and_raises_on_a_cursor_gap(self) -> None:
+        calls = {"n": 0}
+
+        def handler(req: _Handler) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self.assertEqual(req.path, "/v1/events?after=0&limit=100")
+                req.reply_json(200, {"events": [{"cursor": 1, "kind": "command", "payload": {}}], "latestAvailable": 1})
+                return
+            req.reply_json(
+                409,
+                {
+                    "error": {"code": "invalidRequest"},
+                    "gap": {"reason": "historyLost", "earliestAvailable": 1},
+                },
+            )
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        iterator = client.events(0)
+        self.assertEqual(next(iterator)["cursor"], 1)
+        with self.assertRaises(RuntimeClientError) as raised:
+            next(iterator)
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.event_gap["reason"], "historyLost")
+        with self.assertRaises(RuntimeClientError):
+            list(client.events(-1))
+
+    def test_events_retry_when_the_peer_disconnects_before_headers(self) -> None:
+        requests = []
+        event = {"cursor": 4, "kind": "command", "payload": {}}
+
+        def handler(req: _Handler) -> None:
+            requests.append((req.path, req.headers["x-deadline"]))
+            if len(requests) == 1:
+                req.close_connection = True
+                return
+            req.reply_json(200, {"events": [event], "latestAvailable": 4})
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "test-token")
+        iterator = client.events(3, max_transport_retries=1, retry_delay_ms=20)
+        self.assertEqual(next(iterator), event)
+        self.assertEqual([path for path, _ in requests], ["/v1/events?after=3&limit=100"] * 2)
+        self.assertEqual(requests[0][1], requests[1][1])
+
+    def test_events_stop_retrying_when_the_deadline_expires_during_backoff(self) -> None:
+        class FailingOpener:
+            attempts = 0
+
+            def open(self, request, timeout):
+                self.attempts += 1
+                raise URLError(ConnectionRefusedError("connection refused"))
+
+        for absolute in (False, True):
+            with self.subTest(absolute=absolute):
+                opener = FailingOpener()
+                client = BrowserRuntimeClient("http://127.0.0.1", "test-token", opener=opener)
+                options = RequestOptions(
+                    deadline=(datetime.now(timezone.utc) + timedelta(milliseconds=150)).isoformat()
+                ) if absolute else RequestOptions(timeout_ms=150)
+
+                started = time.monotonic()
+                with self.assertRaises(RuntimeClientError) as raised:
+                    next(client.events(0, options, max_transport_retries=1, retry_delay_ms=1000))
+                self.assertEqual(raised.exception.kind, "deadline")
+                self.assertEqual(opener.attempts, 1)
+                self.assertLess(time.monotonic() - started, 0.8)
+
+    def test_events_preserve_structured_broker_errors(self) -> None:
+        def handler(req: _Handler) -> None:
+            req.reply_json(403, {"error": {
+                "code": "missingCapability",
+                "layer": "interface",
+                "message": "Missing capability session:read",
+                "correlationId": req.headers["x-correlation-id"],
+                "commandId": None,
+                "retryable": False,
+                "retryAfterMs": None,
+                "reconciliationRequired": False,
+                "requiredCapability": "session:read",
+            }})
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "test-token")
+        with self.assertRaises(RuntimeClientError) as raised:
+            next(client.events(0, RequestOptions(correlation_id="events-test")))
+        error = raised.exception
+        self.assertEqual(error.kind, "http")
+        self.assertEqual(error.status, 403)
+        self.assertEqual(error.code, "missingCapability")
+        self.assertEqual(error.required_capability, "session:read")
+        self.assertEqual(error.correlation_id, "events-test")
 
     def test_shared_reconciliation_fixtures(self) -> None:
         fixture_path = Path(__file__).resolve().parents[3] / "crates/bobby-browser-client/tests/fixtures/sdk-responses.json"

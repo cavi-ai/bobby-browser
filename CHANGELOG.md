@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+
+- The Python SDK reads engine-scoped runtime info, remembered form neighbors, and the event stream, and builds intent envelopes.
 ### Fixed
 
 - Direct-HTTP `inspect` leaves `script`, `style`, `noscript` and `template` text out of page text, so a client-rendered shell reports that it needs JavaScript.
