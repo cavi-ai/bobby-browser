@@ -1156,8 +1156,9 @@ them -- send one name.
 With no name hint at all, the intent falls back to matching on `purpose`,
 which is looser and more likely to go ambiguous.
 
-`intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName`
-hint may instead be a `controlId` a prior `workflow_observe`
+`intent_complete_form`'s field `name`, and the `accessibleName` hint of
+`intent_fill` or of an `intent_complete_form` field, may instead be a
+`controlId` a prior `workflow_observe`
 (`includeForms: true`) or `form_snapshot` call returned. When every other
 hint is empty, the gateway resolves that id against a fresh form snapshot
 and fills in `role`/`accessibleName`/`ordinal`/`framePath`/`shadowPath` from

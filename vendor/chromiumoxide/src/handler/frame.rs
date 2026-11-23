@@ -113,6 +113,8 @@ impl Frame {
     }
 
     fn navigated(&mut self, frame: &CdpFrame) {
+        // Lifecycle init can arrive before this frame and its URL commit.
+        self.loader_id = Some(frame.loader_id.clone());
         self.name.clone_from(&frame.name);
         let url = if let Some(ref fragment) = frame.url_fragment {
             format!("{}{fragment}", frame.url)
@@ -328,7 +330,15 @@ impl FrameManager {
             }
         } else if let Some((req, watcher)) = self.pending_navigations.pop_front() {
             // queue in the next navigation that is must be fulfilled until `deadline`
-            let deadline = Instant::now() + req.timeout;
+            let deadline = req.deadline;
+            if now >= deadline {
+                return Some(FrameEvent::NavigationResult(Err(
+                    NavigationError::Timeout {
+                        err: DeadlineExceeded::new(now, deadline),
+                        id: req.id,
+                    },
+                )));
+            }
             self.navigation = Some((watcher, deadline));
             return Some(FrameEvent::NavigationRequest(req.id, req.req));
         }
@@ -361,7 +371,12 @@ impl FrameManager {
     /// Navigate a specific frame
     pub fn navigate_frame(&mut self, frame_id: FrameId, mut req: FrameNavigationRequest) {
         let loader_id = self.frames.get(&frame_id).and_then(|f| f.loader_id.clone());
-        let watcher = NavigationWatcher::until_page_load(req.id, frame_id.clone(), loader_id);
+        let mut watcher = NavigationWatcher::until_page_load(req.id, frame_id.clone(), loader_id);
+        watcher.expected_lifecycle = req
+            .wait_until
+            .into_iter()
+            .map(|event| event.as_ref().to_owned().into())
+            .collect();
         // insert the frame_id in the request if not present
         req.set_frame_id(frame_id);
         self.pending_navigations.push_back((req, watcher))
@@ -522,7 +537,6 @@ impl FrameManager {
     pub fn on_page_lifecycle_event(&mut self, event: &EventLifecycleEvent) {
         if let Some(frame) = self.frames.get_mut(&event.frame_id) {
             if event.name == "init" {
-                frame.loader_id = Some(event.loader_id.clone());
                 frame.lifecycle_events.clear();
             }
             frame.lifecycle_events.insert(event.name.clone().into());
@@ -669,7 +683,9 @@ pub struct FrameNavigationRequest {
     /// the cdp request that will trigger the navigation
     pub req: Request,
     /// The timeout after which the request will be considered timed out
-    pub timeout: Duration,
+    pub deadline: Instant,
+    /// The lifecycle event required for completion.
+    pub wait_until: Option<LifecycleEvent>,
 }
 
 impl FrameNavigationRequest {
@@ -677,7 +693,8 @@ impl FrameNavigationRequest {
         Self {
             id,
             req,
-            timeout: Duration::from_millis(REQUEST_TIMEOUT),
+            deadline: Instant::now() + Duration::from_millis(REQUEST_TIMEOUT),
+            wait_until: Some(LifecycleEvent::Load),
         }
     }
 
@@ -743,5 +760,118 @@ mod tests {
             Some(FrameEvent::NavigationRequest(id, _)) => assert_eq!(id, NavigationId(2)),
             other => panic!("expected the second navigation request after abort, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn navigation_readiness_requires_a_new_document_and_the_selected_event() {
+        for wait_until in [
+            None,
+            Some(LifecycleEvent::DomcontentLoaded),
+            Some(LifecycleEvent::Load),
+            Some(LifecycleEvent::NetworkIdle),
+        ] {
+            let mut manager = FrameManager::new(Duration::from_secs(30));
+            let frame_id = FrameId::new("main");
+            let mut frame = Frame::new(frame_id.clone());
+            frame.url = Some("http://example.test/".into());
+            frame.loader_id = Some(LoaderId::new("old"));
+            manager.main_frame = Some(frame_id.clone());
+            manager.frames.insert(frame_id.clone(), frame);
+            let mut request = navigation_request(1);
+            request.wait_until = wait_until;
+            manager.goto(request);
+            assert!(matches!(
+                manager.poll(Instant::now()),
+                Some(FrameEvent::NavigationRequest(..))
+            ));
+            assert!(
+                manager.poll(Instant::now()).is_none(),
+                "the previous document cannot satisfy readiness"
+            );
+            manager.frames.get_mut(&frame_id).unwrap().loader_id = Some(LoaderId::new("new"));
+            if wait_until.is_some() {
+                assert!(
+                    manager.poll(Instant::now()).is_none(),
+                    "commit cannot satisfy a lifecycle wait"
+                );
+                manager
+                    .frames
+                    .get_mut(&frame_id)
+                    .unwrap()
+                    .lifecycle_events
+                    .insert("DOMContentLoaded".into());
+                if wait_until != Some(LifecycleEvent::DomcontentLoaded) {
+                    assert!(
+                        manager.poll(Instant::now()).is_none(),
+                        "DOMContentLoaded cannot satisfy a later lifecycle wait"
+                    );
+                    let event = if wait_until == Some(LifecycleEvent::Load) {
+                        "load"
+                    } else {
+                        "networkIdle"
+                    };
+                    manager
+                        .frames
+                        .get_mut(&frame_id)
+                        .unwrap()
+                        .lifecycle_events
+                        .insert(event.into());
+                }
+            }
+            assert!(matches!(
+                manager.poll(Instant::now()),
+                Some(FrameEvent::NavigationResult(Ok(
+                    NavigationOk::NewDocumentNavigation(NavigationId(1))
+                )))
+            ));
+        }
+    }
+
+    #[test]
+    fn lifecycle_init_does_not_commit_navigation() {
+        let mut manager = FrameManager::new(Duration::from_secs(30));
+        let frame_id = FrameId::new("main");
+        let mut frame = Frame::new(frame_id.clone());
+        frame.url = Some("about:blank".into());
+        frame.loader_id = Some(LoaderId::new("old"));
+        manager.main_frame = Some(frame_id.clone());
+        manager.frames.insert(frame_id.clone(), frame);
+        let mut request = navigation_request(1);
+        request.wait_until = None;
+        manager.goto(request);
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationRequest(..))
+        ));
+        // CDP's init lifecycle event can introduce the provisional loader
+        // before frameNavigated commits the new document and URL.
+        let init = serde_json::from_value(serde_json::json!({
+            "frameId": "main", "loaderId": "new", "name": "init", "timestamp": 0.0
+        }))
+        .unwrap();
+        manager.on_page_lifecycle_event(&init);
+        assert!(
+            manager.poll(Instant::now()).is_none(),
+            "a provisional loader is not a committed document"
+        );
+    }
+
+    #[test]
+    fn expired_queued_navigation_is_not_dispatched() {
+        let mut manager = FrameManager::new(Duration::from_secs(30));
+        manager.main_frame = Some(FrameId::new("main"));
+        let mut request = navigation_request(1);
+        request.deadline = Instant::now() - Duration::from_millis(1);
+        manager.goto(request);
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Err(
+                NavigationError::Timeout {
+                    id: NavigationId(1),
+                    ..
+                }
+            )))
+        ));
+        assert!(manager.poll(Instant::now()).is_none());
     }
 }

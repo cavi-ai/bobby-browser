@@ -2998,6 +2998,81 @@ async fn intent_complete_form_leaves_hints_untouched_for_an_unknown_control_id()
     );
 }
 
+// A field whose only hint is `accessibleName` holding a form-snapshot
+// controlId fills the control that id names.
+#[tokio::test]
+async fn intent_complete_form_resolves_a_control_id_accessible_name_hint_to_its_target() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .unwrap()
+        .push(types::FormControl {
+            control_kind: types::FormControlKind::Text,
+            state: types::FormControlState::Empty,
+            supported_operations: vec![
+                types::FormControlOperation::SetText,
+                types::FormControlOperation::Clear,
+            ],
+            ..file_snapshot_control("control-46", "textbox", "Why this team?")
+        });
+    live.probe
+        .candidates
+        .lock()
+        .unwrap()
+        .push(dom_engine::Candidate {
+            id: "essay".into(),
+            css: Some("#essay".into()),
+            tag: Some("textarea".into()),
+            test_id: None,
+            role: Some("textbox".into()),
+            name: Some("Why this team?".into()),
+            label: None,
+            text: String::new(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        });
+    let mut next_id = 1020;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1021,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"answer the application question",
+                    "fields":[{
+                        "name":"essay",
+                        "purpose":"why this team",
+                        "hints":{"accessibleName":"control-46"},
+                        "value":{"kind":"setText","value":"Distributed systems."}
+                    }]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["status"], "completed",
+        "{response}"
+    );
+    assert_eq!(
+        live.probe.last_typed_text.lock().unwrap().as_deref(),
+        Some("Distributed systems.")
+    );
+}
+
 // A field name that is not control-id-shaped must never trigger the
 // snapshot lookup at all -- zero snapshots.
 #[tokio::test]

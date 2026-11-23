@@ -1,5 +1,26 @@
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use types::{Evidence, ExecutionReason, InspectCommand};
+
+/// Elements whose contents a browser with scripting on never renders as text.
+const UNRENDERED: [&str; 4] = ["script", "style", "noscript", "template"];
+
+/// The text a browser renders for `element`, trimmed parts joined by spaces.
+fn rendered_text(element: ElementRef<'_>) -> String {
+    element
+        .descendants()
+        .filter(|node| {
+            !node.ancestors().any(|ancestor| {
+                ancestor
+                    .value()
+                    .as_element()
+                    .is_some_and(|tag| UNRENDERED.contains(&tag.name()))
+            })
+        })
+        .filter_map(|node| node.value().as_text().map(|text| text.trim()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 pub(crate) fn inspect_document(
     url: &str,
@@ -24,14 +45,9 @@ pub(crate) fn inspect_document(
     } else {
         document.root_element()
     };
-    let text = selected
-        .text()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let text = rendered_text(selected);
     let script_selector = Selector::parse("script").expect("static selector");
-    let scripts = document.select(&script_selector).collect::<Vec<_>>();
+    let has_scripts = document.select(&script_selector).next().is_some();
     // A whole-page inspect selects the document root, whose text includes
     // <head>. Head chrome such as <title> must not make an otherwise empty
     // client-rendered shell look like a complete direct-HTTP response.
@@ -40,21 +56,12 @@ pub(crate) fn inspect_document(
         document
             .select(&body_selector)
             .next()
-            .map(|body| {
-                body.text()
-                    .map(str::trim)
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
+            .map(rendered_text)
             .unwrap_or_default()
     } else {
         text.clone()
     };
-    let meaningful = scripts.iter().fold(shell_probe, |remaining, script| {
-        remaining.replace(&script.text().collect::<String>(), "")
-    });
-    if meaningful.trim().is_empty() && !scripts.is_empty() {
+    if shell_probe.is_empty() && has_scripts {
         return Err(ExecutionReason::JavascriptRequired);
     }
 
@@ -98,5 +105,24 @@ mod tests {
             Evidence::Inspection { text, .. } => assert!(text.contains("All green")),
             other => panic!("unexpected evidence: {other:?}"),
         }
+    }
+
+    #[test]
+    fn body_inspect_of_a_client_rendered_shell_requires_javascript() {
+        let html = r#"<!doctype html><html><head><title>Posting</title></head>
+<body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div>
+<script>window.__appData = {"posting":{"title":"Platform Engineer"}};</script></body></html>"#;
+
+        let result = inspect_document(
+            "https://example.test/posting",
+            html,
+            &InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: false,
+            },
+        );
+
+        assert_eq!(result, Err(ExecutionReason::JavascriptRequired));
     }
 }

@@ -453,6 +453,7 @@ fn verify_control_text(
         FormControlState::Text { value }
             if value == expected
                 || value.contains(expected)
+                || value.contains(dom_engine::snapshot_text(expected).as_str())
                 || (!clear_first && value.ends_with(expected))
                 || same_phone_number(expected, value) =>
         {
@@ -571,6 +572,40 @@ mod typed_value_tests {
             text: Some("[redacted]".into()),
         }];
         assert!(verify_typed_value("ada@example.com", true, &evidence).is_err());
+    }
+
+    #[test]
+    fn a_multi_line_value_verifies_against_its_snapshot_read_back() {
+        let evidence = vec![Evidence::ControlAction {
+            action: types::ControlActionEvidence {
+                operation: FormControlOperation::SetText,
+                target: types::FormControlTarget {
+                    attributes: Default::default(),
+                    role: "textbox".into(),
+                    accessible_name: "Essay".into(),
+                    ordinal: None,
+                    frame_path: Vec::new(),
+                    shadow_path: Vec::new(),
+                },
+                state: FormControlState::Text {
+                    value: "First paragraph.  Second paragraph.".into(),
+                },
+                validity: types::FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
+        }];
+        let essay = ControlAction::SetText {
+            value: "First paragraph.\n\nSecond paragraph.".into(),
+            clear_first: true,
+        };
+        assert_eq!(verify_fill(&essay, &evidence), Ok(()));
     }
 }
 
