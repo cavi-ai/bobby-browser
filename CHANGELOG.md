@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
+- Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
+- `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
+- Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
+
 ## 0.28.0 - 2026-11-23
 
 ### Added

@@ -1371,6 +1371,57 @@ async fn boundary_click_through_a_handle_returns_checkpoint_and_binding_workflow
     );
 }
 
+/// `recovery_status` resolves a `workflowHandle` to the workflow it is bound to.
+#[tokio::test]
+async fn recovery_status_reads_the_checkpoint_through_a_workflow_handle() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 92, json!({"profile":"harness"})).await;
+    let start_result = &started["result"]["structuredContent"];
+    let clicked = call_tool(
+        &live.server,
+        93,
+        "click",
+        json!({
+            "workflowHandle":start_result["workflowHandle"],
+            "selector":"#go",
+            "boundary":true,
+            "autoCheckpoint":true
+        }),
+    )
+    .await;
+    let checkpoint_id = &clicked["result"]["structuredContent"]["checkpointId"];
+    assert!(checkpoint_id.is_string(), "{clicked}");
+
+    let status = call_tool(
+        &live.server,
+        94,
+        "recovery_status",
+        json!({"workflowHandle":start_result["workflowHandle"]}),
+    )
+    .await;
+    let result = &status["result"]["structuredContent"];
+    assert_eq!(result["workflowId"], start_result["workflowId"], "{status}");
+    assert_eq!(
+        result["checkpoint"]["checkpointId"], *checkpoint_id,
+        "{status}"
+    );
+
+    let mixed = call_tool(
+        &live.server,
+        95,
+        "recovery_status",
+        json!({
+            "workflowHandle":start_result["workflowHandle"],
+            "workflowId":start_result["workflowId"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        mixed["error"]["data"]["reason"], "workflowBindingConflict",
+        "{mixed}"
+    );
+}
+
 /// A Boundary submit runs through the auto-checkpoint path by default; its
 /// idempotency key must hold there too, or a retried order clicks twice.
 #[tokio::test]

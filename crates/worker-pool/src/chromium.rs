@@ -1248,6 +1248,23 @@ impl ChromiumWorker {
             .ok_or_else(closed_error)
     }
 
+    /// Page text followed by the page's filled form-field values. A failed
+    /// form read leaves the text as it was.
+    async fn with_form_values(&self, page_id: &PageId, text: String) -> String {
+        let snapshot = crate::ObservationEngine::form_snapshot(
+            self,
+            page_id,
+            Some(crate::form_values::FORM_VALUE_CONTROLS),
+        )
+        .await;
+        match snapshot.as_deref() {
+            Ok([Evidence::FormSnapshot { snapshot }]) => {
+                crate::form_values::with_form_values(text, snapshot)
+            }
+            _ => text,
+        }
+    }
+
     /// Humanized click: curved approach to the target's clickable point, hover
     /// dwell, then the press, over CDP mouse events. `target` is resolved by
     /// the caller, so every read of the resolved element happens before any
@@ -1386,7 +1403,7 @@ impl ChromiumWorker {
                 "target has no clickable point",
             )
         })?;
-        pointer_miss(resolved.receives_pointer(page).await?)?;
+        pointer_check(page, &resolved, resolved.receives_pointer(page).await?).await?;
         self.dispatch_click(page, target, &command.modifiers)
             .await
             .map_err(|(_, error)| error)
@@ -2277,14 +2294,27 @@ async fn press(
     if let Err(error) = resolved.scroll_into_view(page).await {
         tracing::debug!(?error, "scroll-into-view before press failed");
     }
-    pointer_miss(resolved.receives_pointer(page).await?)?;
+    pointer_check(page, resolved, resolved.receives_pointer(page).await?).await?;
     resolved.click(page).await
+}
+
+/// [`pointer_miss`], naming the element that covers an obscured target.
+async fn pointer_check(
+    page: &Page,
+    resolved: &crate::targeting::ResolvedTarget,
+    hit: PointerHit,
+) -> Result<(), CommandError> {
+    if hit == PointerHit::Obscured {
+        let cover = resolved.covering_element(page).await;
+        return Err(obscured_click_target(cover.as_ref()));
+    }
+    pointer_miss(hit)
 }
 
 fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
     match hit {
         PointerHit::Reachable => Ok(()),
-        PointerHit::Obscured => Err(obscured_click_target()),
+        PointerHit::Obscured => Err(obscured_click_target(None)),
         PointerHit::OutOfBounds => Err(CommandError {
             code: ErrorCode::TargetOutOfBounds,
             message: crate::CLICK_OUTSIDE_VIEWPORT.into(),
@@ -2846,12 +2876,18 @@ impl crate::ObservationEngine for ChromiumWorker {
                 Some(&browser),
             )
             .await?;
+            let text = if target.frame_path.is_empty() {
+                self.with_form_values(page_id, text).await
+            } else {
+                text
+            };
             (text, html, Some(resolution))
         } else if is_document_body_inspect(command) {
             // `find_element("body")` builds a chromiumoxide Element via
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
             let text = read_page_body_text(&page).await?;
+            let text = self.with_form_values(page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
             } else {
@@ -3333,7 +3369,7 @@ impl crate::InputEngine for ChromiumWorker {
             };
             match resolved.receives_pointer(&page).await {
                 Ok(hit) => {
-                    if let Err(error) = pointer_miss(hit) {
+                    if let Err(error) = pointer_check(&page, &resolved, hit).await {
                         if should_retry_click_target_detach(detach_retried, &error) {
                             detach_retried = true;
                             continue;
@@ -5187,10 +5223,10 @@ fn driver_error_is_retryable(code: ErrorCode) -> bool {
     )
 }
 
-fn obscured_click_target() -> CommandError {
+fn obscured_click_target(cover: Option<&crate::CoveringElement>) -> CommandError {
     CommandError {
         code: ErrorCode::TargetObscured,
-        message: crate::COVERED_CLICK.into(),
+        message: crate::covered_click(cover),
         layer: ErrorLayer::Driver,
         retryable: false,
     }

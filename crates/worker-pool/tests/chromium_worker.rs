@@ -2583,6 +2583,164 @@ async fn click_fails_without_dispatch_when_the_re_resolved_target_detaches_again
     worker.close().await.unwrap();
 }
 
+/// A click on a button an open dialog covers fails `TargetObscured`, and the
+/// message names the covering dialog by role, name and a short descriptor.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_covered_click_names_the_covering_element() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,<title>Covered</title>",
+                    "<button id=go style='position:fixed;left:20px;top:20px;width:120px;height:40px'>",
+                    "Continue</button>",
+                    "<div id=code class='modal wide' role=dialog aria-label='Enter the code' ",
+                    "style='position:fixed;left:0;top:0;width:400px;height:200px;background:white'>",
+                    "<p>We sent a code.</p></div>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker_pool::input_or_default(worker.input())
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#go".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetObscured, "{error:?}");
+    assert!(
+        error
+            .message
+            .ends_with(r#": dialog "Enter the code" (div#code.modal.wide)"#),
+        "{error:?}"
+    );
+
+    worker.close().await.unwrap();
+}
+
+/// Page text lists the values of filled form fields under a marked section,
+/// and leaves out passwords, one-time codes, saved-password fields and any
+/// field named as a secret.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn page_inspect_lists_form_values_without_secrets() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,<title>Account</title><p>Your account</p>",
+                    "<label>Email <input id=email type=email></label>",
+                    "<label>Password <input id=pass type=password></label>",
+                    "<label>Code <input id=otp autocomplete=one-time-code></label>",
+                    "<label>Saved <input id=saved autocomplete=current-password></label>",
+                    "<label>API token <input id=key></label>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: concat!(
+                    "(() => {const set=(id,value)=>{document.getElementById(id).value=value};",
+                    "set('email','ada@example.com');set('pass','orchid-lantern');",
+                    "set('otp','424242');set('saved','maple-harbor');",
+                    "set('key','violet-meadow');return true})()"
+                )
+                .into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::Inspection { text, .. } = &evidence[0] else {
+        panic!("expected Evidence::Inspection, got {evidence:?}");
+    };
+    assert!(text.contains("Your account"), "{text}");
+    assert!(
+        text.contains("Form field values:\nEmail: \"ada@example.com\""),
+        "{text}"
+    );
+    for secret in ["orchid-lantern", "424242", "maple-harbor", "violet-meadow"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn page_scoped_text_wait_sees_async_body_updates() {

@@ -9,6 +9,32 @@ pub const FIREFOX_POINTER_OBSCURED: &str =
 pub const FIREFOX_POINTER_OUT_OF_BOUNDS: &str =
     "Firefox native click target has no clickable point in the viewport";
 
+/// [`COVERED_CLICK`], naming the covering element as `role "name" (descriptor)`
+/// when it is known. A part that discloses a credential is left out.
+pub fn covered_click(cover: Option<&crate::CoveringElement>) -> String {
+    let Some(cover) = cover else {
+        return COVERED_CLICK.to_owned();
+    };
+    fn shown(part: &Option<String>) -> Option<&str> {
+        part.as_deref().map(str::trim).filter(|text| {
+            !text.is_empty() && !crate::secret_material::contains_secret_material(text)
+        })
+    }
+    let parts: Vec<String> = [
+        shown(&cover.role).map(str::to_owned),
+        shown(&cover.name).map(|name| format!("\"{name}\"")),
+        shown(&cover.descriptor).map(|descriptor| format!("({descriptor})")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        COVERED_CLICK.to_owned()
+    } else {
+        format!("{COVERED_CLICK}: {}", parts.join(" "))
+    }
+}
+
 /// A target missing from the accessibility tree is obscured when a modal is open.
 pub fn accessibility_miss(modal_open: bool) -> (ErrorCode, &'static str) {
     if modal_open {
@@ -31,6 +57,33 @@ mod tests {
         assert_eq!(
             accessibility_miss(false),
             (ErrorCode::TargetNotFound, ACCESSIBILITY_MISS)
+        );
+    }
+
+    #[test]
+    fn a_covered_click_names_the_cover_without_secrets() {
+        assert_eq!(covered_click(None), COVERED_CLICK);
+        let dialog = crate::CoveringElement {
+            role: Some("dialog".into()),
+            name: Some("Enter the code".into()),
+            descriptor: Some("div#code.modal".into()),
+        };
+        assert_eq!(
+            covered_click(Some(&dialog)),
+            format!("{COVERED_CLICK}: dialog \"Enter the code\" (div#code.modal)")
+        );
+        let secret = crate::CoveringElement {
+            role: None,
+            name: Some("token=AbCdEfGh12345678".into()),
+            descriptor: Some("div.banner".into()),
+        };
+        assert_eq!(
+            covered_click(Some(&secret)),
+            format!("{COVERED_CLICK}: (div.banner)")
+        );
+        assert_eq!(
+            covered_click(Some(&crate::CoveringElement::default())),
+            COVERED_CLICK
         );
     }
 }

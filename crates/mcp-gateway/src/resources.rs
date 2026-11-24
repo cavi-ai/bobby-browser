@@ -830,7 +830,9 @@ tools most likely to produce it.
   also reports `target is behind an open modal dialog; dismiss it first`
   when the accessibility tree omits the target while a modal node is open,
   and `click target is covered by another element` when the pointer hit finds
-  another element at the target's center. Firefox reports
+  another element at the target's center, followed by
+  `: <role> "<name>" (<tag#id.class>)` for that element or the dialog that
+  holds it. Firefox reports
   `Firefox native click target is obscured after viewport preflight` and the
   content search when a rendered target is hidden from assistive technology
   by an open modal. Repair: clear whatever is on top (for example

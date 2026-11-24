@@ -16,9 +16,32 @@ const PROMPT: (f64, f64) = (612.0, 40.0);
 
 /// A login page with a password-manager extension: its prompt sits in the
 /// extension's own frame, and only a click on it fills the password field.
+/// With `submits`, the manager also submits the form, and the page opens a
+/// code dialog over it while the password field stays.
 struct ExtensionPage {
     prompt: Option<(f64, f64)>,
     filled: Mutex<bool>,
+    submits: bool,
+}
+
+fn candidate(id: &str, role: &str, name: &str) -> Candidate {
+    Candidate {
+        id: id.into(),
+        css: Some(format!("#{id}")),
+        tag: None,
+        test_id: None,
+        role: Some(role.into()),
+        name: Some(name.into()),
+        label: None,
+        text: name.into(),
+        attributes: BTreeMap::new(),
+        state: CandidateState {
+            attached: true,
+            visible: true,
+            enabled: true,
+        },
+        frame_path: Vec::new(),
+    }
 }
 
 #[async_trait]
@@ -28,23 +51,13 @@ impl IntentBrowser for ExtensionPage {
         _page_id: &PageId,
         _target: &TargetSpec,
     ) -> Result<Vec<Candidate>, CommandError> {
-        Ok(vec![Candidate {
-            id: "pass".into(),
-            css: Some("#pass".into()),
-            tag: None,
-            test_id: None,
-            role: Some("textbox".into()),
-            name: Some("Password".into()),
-            label: None,
-            text: "Password".into(),
-            attributes: BTreeMap::from([("type".into(), "password".into())]),
-            state: CandidateState {
-                attached: true,
-                visible: true,
-                enabled: true,
-            },
-            frame_path: Vec::new(),
-        }])
+        let mut password = candidate("pass", "textbox", "Password");
+        password.attributes = BTreeMap::from([("type".into(), "password".into())]);
+        let mut census = vec![password];
+        if self.submits && *self.filled.lock().expect("fill state") {
+            census.push(candidate("code", "dialog", "Enter the code"));
+        }
+        Ok(census)
     }
 
     async fn click(
@@ -149,11 +162,20 @@ fn password_manager_fill() -> IntentCommand {
     })
 }
 
+/// The `verification` of the fill's intent execution record.
+fn verification(evidence: &[Evidence]) -> Option<&str> {
+    evidence.iter().rev().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record.verification.as_str()),
+        _ => None,
+    })
+}
+
 #[tokio::test]
 async fn a_located_manager_prompt_is_pressed_without_vision() {
     let page = ExtensionPage {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
+        submits: false,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),
@@ -162,11 +184,35 @@ async fn a_located_manager_prompt_is_pressed_without_vision() {
         &VisionContext::default(),
     )
     .await;
-    assert!(
-        matches!(outcome, IntentOutcome::Completed { .. }),
-        "the extension prompt was not pressed: {outcome:?}"
-    );
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the extension prompt was not pressed: {outcome:?}");
+    };
     assert!(*page.filled.lock().expect("fill state"));
+    assert_eq!(verification(&evidence), Some("passwordManagerFilled"));
+}
+
+#[tokio::test]
+async fn a_manager_submit_that_opens_a_dialog_is_reported_as_submitted() {
+    let page = ExtensionPage {
+        prompt: Some(PROMPT),
+        filled: Mutex::new(false),
+        submits: true,
+    };
+    let outcome = IntentEngine::execute(
+        &password_manager_fill(),
+        &PageId::new(),
+        &page,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the manager fill did not complete: {outcome:?}");
+    };
+    assert_eq!(
+        verification(&evidence),
+        Some("passwordManagerSubmitted"),
+        "{evidence:?}"
+    );
 }
 
 #[tokio::test]
@@ -174,6 +220,7 @@ async fn without_a_located_prompt_the_fill_still_asks_for_vision() {
     let page = ExtensionPage {
         prompt: None,
         filled: Mutex::new(false),
+        submits: false,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),

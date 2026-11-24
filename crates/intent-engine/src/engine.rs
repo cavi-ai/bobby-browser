@@ -1672,6 +1672,7 @@ async fn execute_fill(
                 plan_summary,
                 resolution,
                 candidate_evidence,
+                open_dialogs,
             },
         )
         .await;
@@ -1751,12 +1752,16 @@ struct PasswordManagerFill<'a> {
     plan_summary: String,
     resolution: Evidence,
     candidate_evidence: types::CandidateEvidence,
+    /// Dialogs open when the field resolved.
+    open_dialogs: Vec<types::CandidateEvidence>,
 }
 
 /// Signs in through the browser's password manager without touching the
 /// credential field, whose focus raises the browser's own credential dialogs.
 /// Vision finds the manager's prompt, one trusted click accepts it, and the
 /// field is watched until it holds a value or the manager's submit replaces it.
+/// A filled field that stays is still a submit when the page then moves on:
+/// a new URL, other form fields, or a dialog that was not open before.
 async fn fill_with_password_manager(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -1770,9 +1775,13 @@ async fn fill_with_password_manager(
         plan_summary,
         resolution,
         candidate_evidence,
+        open_dialogs,
     } = fill;
-    let record = |verification: String, details: Option<ResolutionDetails>| {
-        let candidates = vec![candidate_evidence.clone()];
+    let record_with = |verification: String,
+                       details: Option<ResolutionDetails>,
+                       opened: Vec<types::CandidateEvidence>| {
+        let mut candidates = vec![candidate_evidence.clone()];
+        candidates.extend(opened);
         intent_evidence(match details {
             Some(details) => execution_record_with_path(
                 "fill",
@@ -1793,6 +1802,9 @@ async fn fill_with_password_manager(
             ),
         })
     };
+    let record = |verification: String, details: Option<ResolutionDetails>| {
+        record_with(verification, details, Vec::new())
+    };
     let failed =
         |code: ErrorCode, message: String, mut evidence: Vec<Evidence>, record: Evidence| {
             evidence.push(record);
@@ -1807,6 +1819,7 @@ async fn fill_with_password_manager(
             }
         };
     let mut evidence = vec![resolution];
+    let before = page_change::baseline(page_id, browser).await;
 
     // A worker that sees the manager's own prompt frame presses it directly;
     // vision is the fallback for prompts it cannot locate.
@@ -1985,7 +1998,22 @@ async fn fill_with_password_manager(
                 );
             }
             evidence.append(&mut watched);
-            evidence.push(record("passwordManagerFilled".into(), details));
+            let Some((mut moved, opened)) =
+                page_change::submitted_after_fill(page_id, browser, target, &before, &open_dialogs)
+                    .await
+            else {
+                evidence.push(record("passwordManagerFilled".into(), details));
+                return IntentOutcome::Completed { evidence };
+            };
+            evidence.append(&mut moved);
+            if let Ok(mut settled) = browser.inspect_settled_page(page_id).await {
+                evidence.append(&mut settled);
+            }
+            evidence.push(record_with(
+                "passwordManagerSubmitted".into(),
+                details,
+                opened,
+            ));
             IntentOutcome::Completed { evidence }
         }
         // The manager submitted the form and the field left with the page.

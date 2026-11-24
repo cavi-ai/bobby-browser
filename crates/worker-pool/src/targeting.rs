@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
+use crate::pointer_hit::{
+    covering_element_function, parse_pointer_hit, pointer_hit_function, CoveringElement, PointerHit,
+};
 use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
@@ -284,6 +286,19 @@ impl ResolvedTarget {
             }
         }
         Ok(PointerHit::Reachable)
+    }
+
+    /// The element covering the target's center in the target's own
+    /// document, or its enclosing dialog. `None` when nothing there covers it
+    /// or the read fails.
+    pub async fn covering_element(&self, page: &Page) -> Option<CoveringElement> {
+        self.eval::<Option<CoveringElement>>(
+            page,
+            &format!("return ({})(el);", covering_element_function()),
+        )
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Scrolls the target to the viewport center and reports whether its

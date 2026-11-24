@@ -1142,14 +1142,18 @@ fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
     required.retain(|field| field != "sessionId" && field != "pageId");
 
     let explicit_required = match scope {
-        WorkflowScope::SessionPage => json!(["sessionId", "pageId"]),
-        WorkflowScope::SessionPageWorkflow => json!(["sessionId", "pageId", "workflowId"]),
+        WorkflowScope::SessionPage => Some(json!(["sessionId", "pageId"])),
+        WorkflowScope::SessionPageWorkflow => Some(json!(["sessionId", "pageId", "workflowId"])),
+        // The tool's own dispatch requires exactly one of its explicit ids.
+        WorkflowScope::Workflow => None,
     };
     schema["if"] = json!({"required":["workflowHandle"]});
     schema["then"] = json!({"properties":{
         "sessionId":false,"pageId":false,"workflowId":false
     }});
-    schema["else"] = json!({"required":explicit_required});
+    if let Some(explicit_required) = explicit_required {
+        schema["else"] = json!({"required":explicit_required});
+    }
 }
 
 /// Advertised workflow-handle shape. Runtime lookup intentionally uses the

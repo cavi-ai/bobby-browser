@@ -138,6 +138,32 @@ pub(super) async fn await_change(
     }
 }
 
+/// After a password-manager fill that kept its field: how the page moved on
+/// once the network settled, if the manager also submitted. A new URL or
+/// other form fields come back as evidence; a dialog that was not open when
+/// the field resolved comes back as a candidate. `None` when the page stayed.
+pub(super) async fn submitted_after_fill(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    field: &TargetSpec,
+    before: &Baseline,
+    open_dialogs: &[types::CandidateEvidence],
+) -> Option<(Vec<Evidence>, Vec<types::CandidateEvidence>)> {
+    let started = tokio::time::Instant::now();
+    network_quiet(page_id, browser, SETTLE_MS).await;
+    if let Some(PageChange::Changed { evidence, .. }) =
+        url_changed(page_id, browser, before, started, 1).await
+    {
+        return Some((evidence, Vec::new()));
+    }
+    let settlement = read_settlement(page_id, browser, before).await;
+    if let Some(evidence) = changed_fields(page_id, browser, &settlement).await {
+        return Some((evidence, Vec::new()));
+    }
+    let opened = dialogs_opened(page_id, browser, field, open_dialogs).await;
+    (!opened.is_empty()).then_some((Vec::new(), opened))
+}
+
 /// Names the invalid fields of a rejected submit, with the page's message.
 pub(super) fn describe_rejection(issues: &[types::FormValidationIssue]) -> String {
     issues
