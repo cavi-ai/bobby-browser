@@ -6,9 +6,10 @@ use dom_engine::{Candidate, CandidateState};
 use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
-    ControlActionEvidence, ErrorCode, Evidence, FillIntent, FormControlOperation, FormControlState,
-    FormControlValidity, IntentCommand, IntentHints, PageId, TargetSpec, TypeTextCommand,
-    UploadFilesCommand, WaitForCommand,
+    ControlActionEvidence, ErrorCode, Evidence, ExecutionRecord, FillIntent, FormControl,
+    FormControlKind, FormControlOperation, FormControlState, FormControlValidity, FormSnapshot,
+    IntentCommand, IntentHints, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand,
 };
 
 /// Where the worker found the manager's own prompt frame on the page.
@@ -22,6 +23,32 @@ struct ExtensionPage {
     prompt: Option<(f64, f64)>,
     filled: Mutex<bool>,
     submits: bool,
+}
+
+fn control(name: &str, control_kind: FormControlKind) -> FormControl {
+    FormControl {
+        id: name.into(),
+        form_id: None,
+        group_id: None,
+        target: None,
+        control_kind,
+        accessible_name: Some(name.into()),
+        label: None,
+        description: None,
+        placeholder: None,
+        autocomplete: None,
+        state: FormControlState::Empty,
+        constraints: Default::default(),
+        validity: FormControlValidity {
+            will_validate: false,
+            valid: true,
+            flags: Vec::new(),
+            message: None,
+            described_by: Vec::new(),
+        },
+        options: Vec::new(),
+        supported_operations: Vec::new(),
+    }
 }
 
 fn candidate(id: &str, role: &str, name: &str) -> Candidate {
@@ -58,6 +85,24 @@ impl IntentBrowser for ExtensionPage {
             census.push(candidate("code", "dialog", "Enter the code"));
         }
         Ok(census)
+    }
+
+    async fn form_snapshot(&self, page_id: &PageId) -> Result<Option<FormSnapshot>, CommandError> {
+        let mut controls = vec![control("Password", FormControlKind::Password)];
+        if *self.filled.lock().expect("fill state") {
+            controls.push(if self.submits {
+                control("Code", FormControlKind::Text)
+            } else {
+                control("Show password", FormControlKind::Other)
+            });
+        }
+        Ok(Some(FormSnapshot {
+            schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
+            page_id: page_id.clone(),
+            forms: Vec::new(),
+            unowned_controls: controls,
+            truncated: false,
+        }))
     }
 
     async fn click(
@@ -162,16 +207,19 @@ fn password_manager_fill() -> IntentCommand {
     })
 }
 
-/// The `verification` of the fill's intent execution record.
-fn verification(evidence: &[Evidence]) -> Option<&str> {
-    evidence.iter().rev().find_map(|item| match item {
-        Evidence::IntentExecution { record } => Some(record.verification.as_str()),
-        _ => None,
-    })
+fn execution_record(evidence: &[Evidence]) -> &ExecutionRecord {
+    evidence
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("fill execution record")
 }
 
 #[tokio::test]
-async fn a_located_manager_prompt_is_pressed_without_vision() {
+async fn fill_only_with_a_new_show_password_button_is_reported_as_filled() {
     let page = ExtensionPage {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
@@ -188,11 +236,14 @@ async fn a_located_manager_prompt_is_pressed_without_vision() {
         panic!("the extension prompt was not pressed: {outcome:?}");
     };
     assert!(*page.filled.lock().expect("fill state"));
-    assert_eq!(verification(&evidence), Some("passwordManagerFilled"));
+    assert_eq!(
+        execution_record(&evidence).verification,
+        "passwordManagerFilled"
+    );
 }
 
 #[tokio::test]
-async fn a_manager_submit_that_opens_a_dialog_is_reported_as_submitted() {
+async fn a_manager_submit_that_opens_a_dialog_with_a_new_field_reports_both() {
     let page = ExtensionPage {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
@@ -208,11 +259,21 @@ async fn a_manager_submit_that_opens_a_dialog_is_reported_as_submitted() {
     let IntentOutcome::Completed { evidence } = outcome else {
         panic!("the manager fill did not complete: {outcome:?}");
     };
+    let record = execution_record(&evidence);
     assert_eq!(
-        verification(&evidence),
-        Some("passwordManagerSubmitted"),
+        record.verification, "passwordManagerSubmitted",
         "{evidence:?}"
     );
+    assert!(
+        record.candidates.iter().any(|candidate| {
+            candidate.role.as_deref() == Some("dialog")
+                && candidate.name.as_deref() == Some("Enter the code")
+        }),
+        "{evidence:?}"
+    );
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::SubmitSettlement { .. })));
 }
 
 #[tokio::test]

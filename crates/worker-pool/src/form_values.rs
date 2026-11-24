@@ -3,19 +3,20 @@
 //! them by field name under [`FORM_VALUES_HEADING`].
 //!
 //! Left out: password fields; fields whose `autocomplete` asks for a
-//! one-time code, a password or payment card data; fields whose name, label,
-//! placeholder, description or `autocomplete` names a secret; values shaped
+//! one-time code, a password or payment card data; fields whose identifiers,
+//! accessible name, label, placeholder or description name a secret; values shaped
 //! like a credential or card number; fields inside frames; and controls whose
 //! text the page already shows.
 
-use types::{FormControl, FormControlKind, FormControlState, FormSnapshot};
+use types::{FormControl, FormControlKind, FormControlState, FormSnapshot, PageId};
 
+use crate::form_snapshot::{normalize_form_snapshot, RawFormSnapshot};
 use crate::secret_material::contains_secret_material;
 
 /// Heading of the field-values section in page text.
 pub(crate) const FORM_VALUES_HEADING: &str = "Form field values:";
 /// Controls read from the page for the section.
-pub(crate) const FORM_VALUE_CONTROLS: u32 = 64;
+pub(crate) const FORM_VALUE_CONTROLS: usize = 64;
 const MAX_FIELDS: usize = 50;
 const MAX_VALUE_CHARS: usize = 256;
 const MAX_NAME_CHARS: usize = 80;
@@ -56,9 +57,27 @@ const SECRET_MARKERS: &[&str] = &[
 /// Whole words in a field's metadata that mark it as a code or card field.
 const SECRET_WORDS: &[&str] = &["otp", "totp", "2fa", "mfa", "cvc", "cvv", "csc", "pin"];
 
+/// Filter DOM identifiers before normalizing the snapshot for display.
+pub(crate) fn with_inspection_form_values(text: String, page_id: &PageId, encoded: &str) -> String {
+    let Ok(mut raw) = serde_json::from_str::<RawFormSnapshot>(encoded) else {
+        return text;
+    };
+    raw.controls.retain(|control| {
+        control.frame_path.is_empty()
+            && ![control.dom_id.as_deref(), control.dom_name.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(identifier_names_a_secret)
+    });
+    match normalize_form_snapshot(page_id.clone(), raw, FORM_VALUE_CONTROLS) {
+        Ok(snapshot) => with_form_values(text, &snapshot),
+        Err(_) => text,
+    }
+}
+
 /// `text` followed by the snapshot's listed field values, or `text` as it
 /// was when no field is listed.
-pub(crate) fn with_form_values(mut text: String, snapshot: &FormSnapshot) -> String {
+fn with_form_values(mut text: String, snapshot: &FormSnapshot) -> String {
     let lines: Vec<String> = snapshot
         .forms
         .iter()
@@ -90,7 +109,11 @@ fn listed_value(control: &FormControl) -> Option<String> {
     if value.is_empty() || !LISTED_KINDS.contains(&control.control_kind) {
         return None;
     }
-    if !control.target.as_ref()?.frame_path.is_empty() {
+    if control
+        .target
+        .as_ref()
+        .is_some_and(|target| !target.frame_path.is_empty())
+    {
         return None;
     }
     if control
@@ -147,6 +170,26 @@ fn names_a_secret(text: &str) -> bool {
         || lower
             .split(|c: char| !c.is_alphanumeric())
             .any(|word| SECRET_WORDS.contains(&word))
+}
+
+/// DOM identifiers also use camel case, including acronyms like loginOTPCode.
+fn identifier_names_a_secret(identifier: &str) -> bool {
+    let mut words = String::with_capacity(identifier.len());
+    let mut chars = identifier.chars().peekable();
+    let mut previous = ' ';
+    while let Some(current) = chars.next() {
+        if current.is_ascii_uppercase()
+            && (previous.is_ascii_lowercase()
+                || previous.is_ascii_digit()
+                || (previous.is_ascii_uppercase()
+                    && chars.peek().is_some_and(char::is_ascii_lowercase)))
+        {
+            words.push(' ');
+        }
+        words.push(current);
+        previous = current;
+    }
+    names_a_secret(identifier) || names_a_secret(&words)
 }
 
 /// Twelve or more digits in a run broken only by single spaces or dashes,

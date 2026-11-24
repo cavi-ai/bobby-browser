@@ -1250,18 +1250,20 @@ impl ChromiumWorker {
 
     /// Page text followed by the page's filled form-field values. A failed
     /// form read leaves the text as it was.
-    async fn with_form_values(&self, page_id: &PageId, text: String) -> String {
-        let snapshot = crate::ObservationEngine::form_snapshot(
-            self,
-            page_id,
-            Some(crate::form_values::FORM_VALUE_CONTROLS),
-        )
-        .await;
-        match snapshot.as_deref() {
-            Ok([Evidence::FormSnapshot { snapshot }]) => {
-                crate::form_values::with_form_values(text, snapshot)
+    async fn with_form_values(&self, page: &Page, page_id: &PageId, text: String) -> String {
+        let expression = crate::form_snapshot::inspection_form_expression(
+            crate::form_values::FORM_VALUE_CONTROLS,
+        );
+        let encoded = page
+            .evaluate(expression)
+            .await
+            .ok()
+            .and_then(|result| result.into_value::<String>().ok());
+        match encoded {
+            Some(encoded) => {
+                crate::form_values::with_inspection_form_values(text, page_id, &encoded)
             }
-            _ => text,
+            None => text,
         }
     }
 
@@ -1403,7 +1405,7 @@ impl ChromiumWorker {
                 "target has no clickable point",
             )
         })?;
-        pointer_check(page, &resolved, resolved.receives_pointer(page).await?).await?;
+        pointer_check(resolved.receives_pointer(page).await?)?;
         self.dispatch_click(page, target, &command.modifiers)
             .await
             .map_err(|(_, error)| error)
@@ -2294,27 +2296,16 @@ async fn press(
     if let Err(error) = resolved.scroll_into_view(page).await {
         tracing::debug!(?error, "scroll-into-view before press failed");
     }
-    pointer_check(page, resolved, resolved.receives_pointer(page).await?).await?;
+    pointer_check(resolved.receives_pointer(page).await?)?;
     resolved.click(page).await
 }
 
-/// [`pointer_miss`], naming the element that covers an obscured target.
-async fn pointer_check(
-    page: &Page,
-    resolved: &crate::targeting::ResolvedTarget,
-    hit: PointerHit,
+fn pointer_check(
+    (hit, cover): (PointerHit, Option<crate::CoveringElement>),
 ) -> Result<(), CommandError> {
-    if hit == PointerHit::Obscured {
-        let cover = resolved.covering_element(page).await;
-        return Err(obscured_click_target(cover.as_ref()));
-    }
-    pointer_miss(hit)
-}
-
-fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
     match hit {
         PointerHit::Reachable => Ok(()),
-        PointerHit::Obscured => Err(obscured_click_target(None)),
+        PointerHit::Obscured => Err(obscured_click_target(cover.as_ref())),
         PointerHit::OutOfBounds => Err(CommandError {
             code: ErrorCode::TargetOutOfBounds,
             message: crate::CLICK_OUTSIDE_VIEWPORT.into(),
@@ -2877,7 +2868,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             )
             .await?;
             let text = if target.frame_path.is_empty() {
-                self.with_form_values(page_id, text).await
+                self.with_form_values(&page, page_id, text).await
             } else {
                 text
             };
@@ -2887,7 +2878,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
             let text = read_page_body_text(&page).await?;
-            let text = self.with_form_values(page_id, text).await;
+            let text = self.with_form_values(&page, page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
             } else {
@@ -3369,7 +3360,7 @@ impl crate::InputEngine for ChromiumWorker {
             };
             match resolved.receives_pointer(&page).await {
                 Ok(hit) => {
-                    if let Err(error) = pointer_check(&page, &resolved, hit).await {
+                    if let Err(error) = pointer_check(hit) {
                         if should_retry_click_target_detach(detach_retried, &error) {
                             detach_retried = true;
                             continue;
@@ -6572,7 +6563,8 @@ mod tests {
 
         assert!(should_retry_click_target_detach(false, &detached));
         assert!(!should_retry_click_target_detach(true, &detached));
-        let preflight_detached = super::pointer_miss(super::PointerHit::Detached).unwrap_err();
+        let preflight_detached =
+            super::pointer_check((super::PointerHit::Detached, None)).unwrap_err();
         assert!(should_retry_click_target_detach(false, &preflight_detached));
         assert!(!should_retry_click_target_detach(true, &preflight_detached));
         let page_lost = types::CommandError {

@@ -29,11 +29,41 @@ pub struct CoveringElement {
     pub descriptor: Option<String>,
 }
 
-/// JavaScript function `(element) -> {role, name, descriptor} | null`: the
-/// element at the target's center when it is not the target or inside it,
-/// widened to the dialog that holds it. Text is clipped to 60 characters.
+/// Describes the element covering a target's center, or a hit already
+/// identified by CDP in an ancestor frame. An enclosing dialog takes priority.
 pub fn covering_element_function() -> &'static str {
-    "function(element){if(!(element instanceof Element)||!element.isConnected)return null;const rect=element.getBoundingClientRect();const width=document.documentElement.clientWidth;const height=document.documentElement.clientHeight;const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);const root=element.getRootNode();const hit=typeof root.elementFromPoint==='function'?root.elementFromPoint(x,y):document.elementFromPoint(x,y);if(hit===null||hit===element||element.contains(hit))return null;const cover=hit.closest('dialog,[role=dialog],[role=alertdialog],[aria-modal=true]')||hit;const clip=value=>{const text=String(value||'').replace(/\\s+/g,' ').trim();return text?text.slice(0,60):null;};const scope=cover.getRootNode();const labelled=(cover.getAttribute('aria-labelledby')||'').split(/\\s+/).filter(Boolean).map(id=>scope.getElementById?.(id)?.textContent||'').join(' ');const heading=cover.querySelector('h1,h2,h3,h4,h5,h6,[role=heading]');const tag=cover.localName;const role=cover.getAttribute('role')||(tag==='dialog'?'dialog':null);const name=clip(cover.getAttribute('aria-label'))||clip(labelled)||clip(cover.getAttribute('title'))||clip(heading?.textContent)||clip(cover.innerText);const classes=[...cover.classList].slice(0,2).map(name=>'.'+name).join('');return {role:clip(role),name,descriptor:clip(tag+(cover.id?'#'+cover.id:'')+classes)};}"
+    r#"function(element, hit) {
+      if (hit === undefined) {
+        if (!(element instanceof Element) || !element.isConnected) return null;
+        const rect = element.getBoundingClientRect();
+        const width = document.documentElement.clientWidth;
+        const height = document.documentElement.clientHeight;
+        const x = Math.min(Math.max(rect.left + rect.width / 2, 0), width - 1);
+        const y = Math.min(Math.max(rect.top + rect.height / 2, 0), height - 1);
+        const root = element.getRootNode();
+        hit = typeof root.elementFromPoint === 'function'
+          ? root.elementFromPoint(x, y)
+          : document.elementFromPoint(x, y);
+        if (hit === null || hit === element || element.contains(hit)) return null;
+      }
+      if (hit?.nodeType !== Node.ELEMENT_NODE) hit = hit?.parentElement;
+      if (!hit) return null;
+      const cover = hit.closest('dialog,[role=dialog],[role=alertdialog],[aria-modal=true]') || hit;
+      const clip = value => {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        return text ? text.slice(0, 60) : null;
+      };
+      const scope = cover.getRootNode();
+      const labelled = (cover.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map(id => scope.getElementById?.(id)?.textContent || '').join(' ');
+      const heading = cover.querySelector('h1,h2,h3,h4,h5,h6,[role=heading]');
+      const tag = cover.localName;
+      const role = cover.getAttribute('role') || (tag === 'dialog' ? 'dialog' : null);
+      const name = clip(cover.getAttribute('aria-label')) || clip(labelled)
+        || clip(cover.getAttribute('title')) || clip(heading?.textContent) || clip(cover.innerText);
+      const classes = [...cover.classList].slice(0, 2).map(name => '.' + name).join('');
+      return {role: clip(role), name, descriptor: clip(tag + (cover.id ? '#' + cover.id : '') + classes)};
+    }"#
 }
 
 pub fn parse_pointer_hit(value: &str) -> Option<PointerHit> {

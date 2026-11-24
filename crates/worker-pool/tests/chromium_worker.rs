@@ -2688,7 +2688,9 @@ async fn page_inspect_lists_form_values_without_secrets() {
                     "<label>Password <input id=pass type=password></label>",
                     "<label>Code <input id=otp autocomplete=one-time-code></label>",
                     "<label>Saved <input id=saved autocomplete=current-password></label>",
-                    "<label>API token <input id=key></label>"
+                    "<label>API token <input id=key></label>",
+                    "<label>Code <input id=first-code name=login_otp></label>",
+                    "<label>Code <input id=loginOtpCode></label>"
                 )
                 .into(),
                 wait_until: WaitUntil::Interactive,
@@ -2705,7 +2707,8 @@ async fn page_inspect_lists_form_values_without_secrets() {
                     "(() => {const set=(id,value)=>{document.getElementById(id).value=value};",
                     "set('email','ada@example.com');set('pass','orchid-lantern');",
                     "set('otp','424242');set('saved','maple-harbor');",
-                    "set('key','violet-meadow');return true})()"
+                    "set('key','violet-meadow');set('first-code','245678');",
+                    "set('loginOtpCode','345678');return true})()"
                 )
                 .into(),
                 timeout_ms: 5_000,
@@ -2721,12 +2724,12 @@ async fn page_inspect_lists_form_values_without_secrets() {
             &InspectCommand {
                 selector: None,
                 target: None,
-                include_html: false,
+                include_html: true,
             },
         )
         .await
         .unwrap();
-    let Evidence::Inspection { text, .. } = &evidence[0] else {
+    let Evidence::Inspection { text, html, .. } = &evidence[0] else {
         panic!("expected Evidence::Inspection, got {evidence:?}");
     };
     assert!(text.contains("Your account"), "{text}");
@@ -2734,9 +2737,21 @@ async fn page_inspect_lists_form_values_without_secrets() {
         text.contains("Form field values:\nEmail: \"ada@example.com\""),
         "{text}"
     );
-    for secret in ["orchid-lantern", "424242", "maple-harbor", "violet-meadow"] {
-        assert!(!text.contains(secret), "{secret} leaked: {text}");
-    }
+    let secrets = [
+        "orchid-lantern",
+        "424242",
+        "maple-harbor",
+        "violet-meadow",
+        "245678",
+        "345678",
+    ];
+    let contains_secret = secrets.into_iter().any(|secret| text.contains(secret));
+    let html = html.as_deref().expect("requested document HTML");
+    let stamped = html.contains("data-bobby-control");
+    assert!(
+        !contains_secret && !stamped,
+        "inspection returned a secret: {contains_secret}, inspection stamped the DOM: {stamped}"
+    );
 
     worker.close().await.unwrap();
 }
@@ -3540,6 +3555,117 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         .unwrap();
     assert!(format!("{evidence:?}").contains("shadow-clicked"));
     worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_covered_click_names_an_ancestor_frame_blocker() {
+    let fixture = test_site::spawn().await;
+    let host = test_site::spawn_frame_host(&fixture.base_url()).await;
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: host.base_url().replace("127.0.0.1", "localhost"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let frame_path = vec![
+        Box::new(TargetSpec {
+            role: Some("iframe".into()),
+            accessible_name: Some("Outer".into()),
+            ..TargetSpec::default()
+        }),
+        Box::new(TargetSpec {
+            role: Some("iframe".into()),
+            accessible_name: Some("Cross".into()),
+            ..TargetSpec::default()
+        }),
+    ];
+    let child_target = TargetSpec {
+        label: Some("Name".into()),
+        frame_path,
+        ..TargetSpec::default()
+    };
+    worker_pool::input_or_default(worker.input())
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                expected_url: None,
+                selector: String::new(),
+                target: Some(child_target.clone()),
+                value: "Ada".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .expect("the frame's own control must be reachable before the overlay opens");
+
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: concat!(
+                    "(() => {const overlay=document.createElement('div');",
+                    "overlay.id='frame-cover';overlay.setAttribute('role','dialog');",
+                    "overlay.setAttribute('aria-label','Confirm account');",
+                    "overlay.style.cssText='position:fixed;inset:0;z-index:10';",
+                    "document.body.append(overlay);return true})()"
+                )
+                .into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker_pool::input_or_default(worker.input())
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(child_target),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    worker.close().await.unwrap();
+    assert_eq!(error.code, ErrorCode::TargetObscured, "{error:?}");
+    assert!(
+        error
+            .message
+            .ends_with(r#": dialog "Confirm account" (div#frame-cover)"#),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

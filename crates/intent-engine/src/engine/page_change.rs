@@ -138,10 +138,9 @@ pub(super) async fn await_change(
     }
 }
 
-/// After a password-manager fill that kept its field: how the page moved on
-/// once the network settled, if the manager also submitted. A new URL or
-/// other form fields come back as evidence; a dialog that was not open when
-/// the field resolved comes back as a candidate. `None` when the page stayed.
+/// After a password-manager fill that kept its field, look for navigation
+/// or a newly opened dialog. Form-control changes alone can be a side
+/// effect of filling, so report them only alongside a new dialog.
 pub(super) async fn submitted_after_fill(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -151,17 +150,20 @@ pub(super) async fn submitted_after_fill(
 ) -> Option<(Vec<Evidence>, Vec<types::CandidateEvidence>)> {
     let started = tokio::time::Instant::now();
     network_quiet(page_id, browser, SETTLE_MS).await;
-    if let Some(PageChange::Changed { evidence, .. }) =
-        url_changed(page_id, browser, before, started, 1).await
-    {
-        return Some((evidence, Vec::new()));
-    }
-    let settlement = read_settlement(page_id, browser, before).await;
-    if let Some(evidence) = changed_fields(page_id, browser, &settlement).await {
-        return Some((evidence, Vec::new()));
-    }
+    let navigation = url_changed(page_id, browser, before, started, 1).await;
     let opened = dialogs_opened(page_id, browser, field, open_dialogs).await;
-    (!opened.is_empty()).then_some((Vec::new(), opened))
+    if let Some(PageChange::Changed { evidence, .. }) = navigation {
+        return Some((evidence, opened));
+    }
+    if opened.is_empty() {
+        return None;
+    }
+
+    let settlement = read_settlement(page_id, browser, before).await;
+    let evidence = changed_fields(page_id, browser, &settlement)
+        .await
+        .unwrap_or_default();
+    Some((evidence, opened))
 }
 
 /// Names the invalid fields of a rejected submit, with the page's message.
