@@ -72,8 +72,9 @@ use zeroize::Zeroizing;
 use crate::{
     process_registry, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
-        resolve_target as resolve_browser_target, resolve_target_with_visibility,
+        css_only_selector, gather_candidates, inspect_page_scoped_target, page_frames,
+        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -4629,7 +4630,7 @@ impl WaitDom for ChromiumWaitDom<'_> {
         state: types::ElementState,
     ) -> Result<ElementProbe, CommandError> {
         let page = self.page;
-        let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
+        let resolved = if let Some(selector) = css_only_selector(target) {
             resolve_target_with_visibility(self.page_id, page, selector, None, false, None).await
         } else {
             let handle = self.browser.lock().await.as_ref().map(Browser::handle);
@@ -4763,20 +4764,6 @@ impl WaitDom for ChromiumWaitDom<'_> {
         })?;
         Ok(tracker.snapshot(filters).await)
     }
-}
-
-fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
-    target.css.as_deref().filter(|_| {
-        target.test_id.is_none()
-            && target.role.is_none()
-            && target.accessible_name.is_none()
-            && target.label.is_none()
-            && target.text.is_none()
-            && target.attributes.is_empty()
-            && target.frame_path.is_empty()
-            && target.shadow_path.is_empty()
-            && target.ordinal.is_none()
-    })
 }
 
 /// CDP reports a node removed from the page, or left in a replaced document, as gone.
@@ -6359,8 +6346,8 @@ mod tests {
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
         is_missing_css_node, should_retry_click_target_detach,
         should_retry_plain_click_target_drift, should_retry_transient_click_loss,
-        snapshot_iframe_owners, text_matches, unscoped_css_wait_selector, validate_clip,
-        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        snapshot_iframe_owners, text_matches, validate_clip, wait_should_retry_replaced_context,
+        ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
     };
     use crate::targeting::ACCEPTS_TEXT_SCRIPT;
     use types::{
@@ -6790,7 +6777,7 @@ mod tests {
         };
 
         assert_eq!(
-            unscoped_css_wait_selector(&target),
+            crate::targeting::css_only_selector(&target),
             Some("a[href='/customers/cus_atlas']")
         );
     }

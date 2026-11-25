@@ -3319,6 +3319,95 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn css_only_targets_resolve_elements_that_are_not_action_candidates() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<main><h1>Posting</h1><div role=dialog class='sheet open'><p>Dialog body</p></div><div class='conv-list'><p>Ada Lovelace</p></div></main>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let css = |css: &str| TargetSpec {
+        css: Some(css.into()),
+        ..TargetSpec::default()
+    };
+
+    let inspected = worker_pool::observation_or_default(worker.observation())
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: Some(css("main")),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::Inspection { text, .. } = &inspected[0] else {
+        panic!("expected Evidence::Inspection, got {inspected:?}");
+    };
+    assert!(text.contains("Posting"), "{text}");
+
+    let snapshot = worker_pool::observation_or_default(worker.observation())
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(64),
+                target: Some(css(".conv-list")),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        format!("{snapshot:?}").contains("Ada Lovelace")
+            && !format!("{snapshot:?}").contains("Dialog body"),
+        "{snapshot:?}"
+    );
+
+    let shot = worker_pool::capture_or_default(worker.capture())
+        .capture_screenshot(
+            &page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Element {
+                    target: Box::new(css("div.sheet.open")),
+                },
+                max_edge: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&shot[0], Evidence::Screenshot { width, height, .. } if *width > 0 && *height > 0),
+        "{shot:?}"
+    );
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn a_capture_with_a_max_edge_stores_the_shrunk_image() {
     let root = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();

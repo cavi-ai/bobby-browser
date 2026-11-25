@@ -1721,6 +1721,38 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     }
 }
 
+/// The CSS selector of a target that carries `css` and nothing else.
+pub(crate) fn css_only_selector(target: &TargetSpec) -> Option<&str> {
+    target.css.as_deref().filter(|_| {
+        target.test_id.is_none()
+            && target.role.is_none()
+            && target.accessible_name.is_none()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.attributes.is_empty()
+            && target.frame_path.is_empty()
+            && target.shadow_path.is_empty()
+            && target.ordinal.is_none()
+    })
+}
+
+fn selector_target(page_id: &PageId, element: Element, selector: &str) -> ResolvedTarget {
+    ResolvedTarget {
+        native: Some(element),
+        locator: JsLocator {
+            scope: LocatorScope::Context(None),
+            shadow_hosts: Vec::new(),
+            id: String::new(),
+        },
+        execution_page: None,
+        frame_id: None,
+        iframe_hop: None,
+        frame_path: Vec::new(),
+        frame_owners: Vec::new(),
+        evidence: selector_evidence(page_id, selector),
+    }
+}
+
 pub async fn resolve_target_with_visibility(
     page_id: &PageId,
     page: &Page,
@@ -1736,20 +1768,7 @@ pub async fn resolve_target_with_visibility(
                 format!("no element matches selector `{selector}`"),
             )
         })?;
-        return Ok(ResolvedTarget {
-            native: Some(element),
-            locator: JsLocator {
-                scope: LocatorScope::Context(None),
-                shadow_hosts: Vec::new(),
-                id: String::new(),
-            },
-            execution_page: None,
-            frame_id: None,
-            iframe_hop: None,
-            frame_path: Vec::new(),
-            frame_owners: Vec::new(),
-            evidence: selector_evidence(page_id, selector),
-        });
+        return Ok(selector_target(page_id, element, selector));
     };
     validate_target_spec(target)?;
 
@@ -1767,7 +1786,21 @@ pub async fn resolve_target_with_visibility(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) = match choose(target, &raw, require_visible) {
+        Ok(chosen) => chosen,
+        // A css-only target on an element no candidate covers (a container,
+        // a landmark, a class or combinator selector) resolves as a selector.
+        Err(error) if error.code == ErrorCode::TargetNotFound => {
+            let Some(css) = css_only_selector(target) else {
+                return Err(error);
+            };
+            return match query_element(page, None, css).await {
+                Ok(Some(element)) => Ok(selector_target(page_id, element, css)),
+                _ => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let iframe_hop = (candidate.role.as_deref() == Some("iframe"))
         .then(|| semantic_iframe_hop(&candidate, &raw));
     let owner = owners.get(&candidate.id).cloned();

@@ -9,6 +9,7 @@
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
 - A `schemaViolation` inside a nullable argument points at the broken field, so a `text` target or `nearText` hint without a matcher `kind` gets `allowedKinds` `exact`, `contains` and `regex`.
+- Chromium resolves a `css`-only target that matches no action candidate as a CSS selector, so `inspect`, `a11y_snapshot` and element `screenshot` reach landmarks, containers, class and combinator selectors.
 
 ## 0.28.0 - 2026-11-23
 
