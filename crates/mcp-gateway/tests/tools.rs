@@ -3484,6 +3484,51 @@ async fn legacy_fill_value_shape_gets_a_migration_repair_hint() {
 }
 
 #[tokio::test]
+async fn a_text_target_without_a_matcher_kind_names_the_matcher_kinds() {
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    for (id, name, arguments, pointer) in [
+        (
+            67,
+            "click",
+            json!({"target":{"text":"Ada Lovelace"}}),
+            "/target/text",
+        ),
+        (
+            68,
+            "inspect",
+            json!({"target":{"role":"paragraph","text":"Ada Lovelace"}}),
+            "/target/text",
+        ),
+        (
+            69,
+            "intent_locate",
+            json!({"purpose":"conversation entry","hints":{"nearText":{"text":"Ada Lovelace"}}}),
+            "/hints/nearText",
+        ),
+    ] {
+        let mut arguments = arguments;
+        arguments["sessionId"] = json!(SessionId::new().0.to_string());
+        arguments["pageId"] = json!(PageId::new().0.to_string());
+        let rejected = server
+            .handle_message(request(
+                id,
+                "tools/call",
+                json!({"name":name,"arguments":arguments}),
+            ))
+            .await
+            .unwrap();
+        let data = &rejected["error"]["data"];
+        assert_eq!(data["reason"], json!("schemaViolation"), "{rejected}");
+        assert_eq!(data["pointer"], json!(pointer), "{rejected}");
+        assert_eq!(
+            data["repair"]["allowedKinds"],
+            json!(["exact", "contains", "regex"]),
+            "{rejected}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes() {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
