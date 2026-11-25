@@ -35,7 +35,9 @@ pub trait ControlActionAdapter: Send + Sync {
     fn missing_control(&self) -> CommandError {
         CommandError {
             code: ErrorCode::TargetNotFound,
-            message: "form control target was not found".into(),
+            message:
+                "target is not a form control from form_snapshot; use click for other elements"
+                    .into(),
             layer: ErrorLayer::Driver,
             retryable: false,
         }

@@ -2874,10 +2874,9 @@ async fn evaluate_in_context<T: DeserializeOwned>(
     let mut params = EvaluateParams::new(expression);
     params.context_id = context_id;
     params.return_by_value = Some(true);
-    page.evaluate(params)
-        .await
-        .map_err(cdp_error)?
-        .into_value()
+    let result = page.evaluate(params).await.map_err(cdp_error)?;
+    // A script that returns `null` or `undefined` decodes as JSON null.
+    serde_json::from_value(result.value().cloned().unwrap_or(serde_json::Value::Null))
         .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
 }
 

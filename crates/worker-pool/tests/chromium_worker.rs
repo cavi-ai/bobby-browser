@@ -2048,6 +2048,67 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_on_an_element_that_is_not_a_form_control_names_the_reason() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<div role=tablist><div role=tab id=overview tabindex=0>Overview</div></div><div role=listbox><div role=option tabindex=0>Florida</div></div>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    for (role, name) in [("tab", "Overview"), ("option", "Florida")] {
+        let error = worker_pool::input_or_default(worker.input())
+            .control_action(
+                &page_id,
+                &ControlActionCommand {
+                    target: types::FormControlTarget {
+                        attributes: Default::default(),
+                        role: role.into(),
+                        accessible_name: name.into(),
+                        ordinal: None,
+                        frame_path: Vec::new(),
+                        shadow_path: Vec::new(),
+                    },
+                    action: ControlAction::Activate,
+                },
+            )
+            .await
+            .expect_err("a tab or option is not a form control");
+        assert_eq!(error.code, ErrorCode::TargetNotFound, "{role}: {error:?}");
+        assert!(
+            error.message.contains("not a form control") && error.message.contains("click"),
+            "{role}: {error:?}"
+        );
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
