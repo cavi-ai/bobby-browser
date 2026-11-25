@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
+use crate::pointer_hit::{
+    covering_element_function, parse_pointer_hit, pointer_hit_function, CoveringElement, PointerHit,
+};
 use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
@@ -56,6 +58,41 @@ struct FrameOwner {
     parent: Page,
     backend_node_id: BackendNodeId,
     child: Page,
+}
+
+/// Resolve the exact hit in the CDP session that reported it.
+async fn describe_covering_node(
+    page: &Page,
+    backend_node_id: BackendNodeId,
+) -> Option<CoveringElement> {
+    let group = format!(
+        "bobby-pointer-cover-{}",
+        TARGET_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let object = page
+        .execute(
+            ResolveNodeParams::builder()
+                .backend_node_id(backend_node_id)
+                .object_group(group.clone())
+                .build(),
+        )
+        .await
+        .ok()?
+        .result
+        .object;
+    let request = CallFunctionOnParams::builder()
+        .object_id(object.object_id?)
+        .function_declaration(format!(
+            "function(){{return ({})(null,this)}}",
+            covering_element_function()
+        ))
+        .return_by_value(true)
+        .build()
+        .ok()?;
+    let result = page.execute(request).await;
+    let _ = page.execute(ReleaseObjectGroupParams::new(group)).await;
+    let value = result.ok()?.result.result.value?;
+    serde_json::from_value(value).ok()
 }
 
 /// Maps a child viewport point through the owner's content quad. Both scale
@@ -236,8 +273,11 @@ impl ResolvedTarget {
     }
 
     /// Classifies a pointer at the target's center: reachable, covered,
-    /// outside the viewport, or detached.
-    pub async fn receives_pointer(&self, page: &Page) -> Result<PointerHit, CommandError> {
+    /// outside the viewport, or detached. A covered hit can include its blocker.
+    pub(crate) async fn receives_pointer(
+        &self,
+        page: &Page,
+    ) -> Result<(PointerHit, Option<CoveringElement>), CommandError> {
         let verdict: String = self
             .eval(page, &format!("return ({})(el);", pointer_hit_function()))
             .await?;
@@ -247,17 +287,28 @@ impl ResolvedTarget {
                 "pointer hit check returned an invalid result",
             )
         })?;
+        if verdict == PointerHit::Obscured {
+            let cover = self
+                .eval::<Option<CoveringElement>>(
+                    page,
+                    &format!("return ({})(el);", covering_element_function()),
+                )
+                .await
+                .ok()
+                .flatten();
+            return Ok((verdict, cover));
+        }
         if verdict != PointerHit::Reachable || self.frame_owners.is_empty() {
-            return Ok(verdict);
+            return Ok((verdict, None));
         }
         let Some(mut point) = self.local_clickable_point(page).await? else {
-            return Ok(PointerHit::OutOfBounds);
+            return Ok((PointerHit::OutOfBounds, None));
         };
         // Test each parent at the mapped dispatch point. CDP may stop at the
         // cross-process frame owner, or descend and report the target frame.
         for owner in self.frame_owners.iter().rev() {
             let Some(mapped) = self.point_in_parent(owner, point).await? else {
-                return Ok(PointerHit::OutOfBounds);
+                return Ok((PointerHit::OutOfBounds, None));
             };
             point = mapped;
             // The hit test reads document coordinates: add the parent's scroll offset.
@@ -280,10 +331,11 @@ impl ResolvedTarget {
             if hit.backend_node_id != owner.backend_node_id
                 && self.frame_id.as_ref() != Some(&hit.frame_id)
             {
-                return Ok(PointerHit::Obscured);
+                let cover = describe_covering_node(&owner.parent, hit.backend_node_id).await;
+                return Ok((PointerHit::Obscured, cover));
             }
         }
-        Ok(PointerHit::Reachable)
+        Ok((PointerHit::Reachable, None))
     }
 
     /// Scrolls the target to the viewport center and reports whether its

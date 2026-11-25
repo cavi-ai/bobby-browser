@@ -138,6 +138,34 @@ pub(super) async fn await_change(
     }
 }
 
+/// After a password-manager fill that kept its field, look for navigation
+/// or a newly opened dialog. Form-control changes alone can be a side
+/// effect of filling, so report them only alongside a new dialog.
+pub(super) async fn submitted_after_fill(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    field: &TargetSpec,
+    before: &Baseline,
+    open_dialogs: &[types::CandidateEvidence],
+) -> Option<(Vec<Evidence>, Vec<types::CandidateEvidence>)> {
+    let started = tokio::time::Instant::now();
+    network_quiet(page_id, browser, SETTLE_MS).await;
+    let navigation = url_changed(page_id, browser, before, started, 1).await;
+    let opened = dialogs_opened(page_id, browser, field, open_dialogs).await;
+    if let Some(PageChange::Changed { evidence, .. }) = navigation {
+        return Some((evidence, opened));
+    }
+    if opened.is_empty() {
+        return None;
+    }
+
+    let settlement = read_settlement(page_id, browser, before).await;
+    let evidence = changed_fields(page_id, browser, &settlement)
+        .await
+        .unwrap_or_default();
+    Some((evidence, opened))
+}
+
 /// Names the invalid fields of a rejected submit, with the page's message.
 pub(super) fn describe_rejection(issues: &[types::FormValidationIssue]) -> String {
     issues

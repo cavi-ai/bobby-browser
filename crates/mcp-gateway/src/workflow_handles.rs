@@ -14,6 +14,8 @@ pub(crate) const MAX_WORKFLOW_RESERVATIONS: usize = 64;
 pub(crate) enum WorkflowScope {
     SessionPage,
     SessionPageWorkflow,
+    /// The handle stands for its `workflowId` alone; the tool takes no page.
+    Workflow,
 }
 
 /// Tools whose advertised scope can be replaced by a retained workflow handle.
@@ -183,9 +185,11 @@ impl WorkflowHandles {
             return Ok((arguments.clone(), None, None));
         };
         let Some(handle) = object.get("workflowHandle") else {
-            if ["sessionId", "pageId", "workflowId"]
-                .iter()
-                .any(|key| object.contains_key(*key))
+            // A workflow-scoped call names its workflow or session itself.
+            if scope == WorkflowScope::Workflow
+                || ["sessionId", "pageId", "workflowId"]
+                    .iter()
+                    .any(|key| object.contains_key(*key))
             {
                 return Ok((arguments.clone(), None, None));
             }
@@ -238,12 +242,14 @@ impl WorkflowHandles {
 
         let mut normalized = object.clone();
         normalized.remove("workflowHandle");
-        normalized.insert(
-            "sessionId".to_owned(),
-            serde_json::json!(binding.session_id),
-        );
-        normalized.insert("pageId".to_owned(), serde_json::json!(binding.page_id));
-        if scope == WorkflowScope::SessionPageWorkflow {
+        if scope != WorkflowScope::Workflow {
+            normalized.insert(
+                "sessionId".to_owned(),
+                serde_json::json!(binding.session_id),
+            );
+            normalized.insert("pageId".to_owned(), serde_json::json!(binding.page_id));
+        }
+        if scope != WorkflowScope::SessionPage {
             normalized.insert(
                 "workflowId".to_owned(),
                 serde_json::json!(binding.workflow_id),
@@ -252,7 +258,7 @@ impl WorkflowHandles {
         Ok((Value::Object(normalized), Some(handle.to_owned()), None))
     }
 
-    /// The single-live-handle scope default: a `WORKFLOW_SCOPE_TOOLS` call
+    /// The single-live-handle scope default: a page-scoped `WORKFLOW_SCOPE_TOOLS` call
     /// that named no `workflowHandle` and none of
     /// `sessionId`/`pageId`/`workflowId` resolves against this connection's
     /// one live workflow binding, exactly as if that handle had been passed
@@ -666,12 +672,21 @@ mod tests {
                 .normalize_arguments(tool, &json!({"workflowHandle": handle}))
                 .unwrap_or_else(|error| panic!("{tool}: {error:?}"));
             assert_eq!(defaulted_handle, None, "{tool}");
-            assert_eq!(normalized["sessionId"], json!(expected.session_id));
-            assert_eq!(normalized["pageId"], json!(expected.page_id));
+            let page_scoped = !matches!(scope, WorkflowScope::Workflow);
+            assert_eq!(
+                normalized.get("sessionId"),
+                page_scoped.then(|| json!(expected.session_id)).as_ref(),
+                "{tool}"
+            );
+            assert_eq!(
+                normalized.get("pageId"),
+                page_scoped.then(|| json!(expected.page_id)).as_ref(),
+                "{tool}"
+            );
             assert_eq!(normalized.get("workflowHandle"), None);
             assert_eq!(
                 normalized.get("workflowId"),
-                matches!(scope, WorkflowScope::SessionPageWorkflow)
+                (!matches!(scope, WorkflowScope::SessionPage))
                     .then(|| json!(expected.workflow_id))
                     .as_ref(),
                 "{tool}"

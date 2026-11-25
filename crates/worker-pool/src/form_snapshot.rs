@@ -95,6 +95,11 @@ pub struct RawFormControl {
     /// across snapshots.
     #[serde(default)]
     pub stamp: Option<u32>,
+    /// DOM identifiers read only when filtering page inspection values.
+    #[serde(default)]
+    pub dom_id: Option<String>,
+    #[serde(default)]
+    pub dom_name: Option<String>,
 }
 
 pub fn normalize_form_snapshot(
@@ -835,14 +840,26 @@ fn snapshot_error(code: ErrorCode, message: impl Into<String>) -> CommandError {
     }
 }
 
-/// Returns a self-contained, read-only DOM projection. The result is JSON text so
+/// Projects the form DOM as JSON text and stamps controls with stable IDs.
 /// Chromium CDP and Firefox BiDi apply identical serialization semantics.
 pub fn form_snapshot_expression(page_id: &PageId) -> String {
     form_snapshot_expression_with_limit(page_id, MAX_FORM_SNAPSHOT_CONTROLS)
 }
 
 pub fn form_snapshot_expression_with_limit(_page_id: &PageId, max_controls: usize) -> String {
+    form_projection_expression(max_controls, true)
+}
+
+pub(crate) fn inspection_form_expression(max_controls: usize) -> String {
+    form_projection_expression(max_controls, false)
+}
+
+fn form_projection_expression(max_controls: usize, stamp_controls: bool) -> String {
     RAW_FORM_SNAPSHOT_SCRIPT
+        .replace(
+            "__STAMP_CONTROLS__",
+            if stamp_controls { "true" } else { "false" },
+        )
         .replace("__CONTROL_FUNCTIONS__", RAW_CONTROL_FUNCTIONS)
         .replace("__SHOWN_VALUE_FUNCTION__", SHOWN_VALUE_FUNCTION)
         .replace(
@@ -910,13 +927,14 @@ const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
 const LIMIT=Math.max(1,Math.min(512,__MAX_CONTROLS__));
+const STAMP_CONTROLS=__STAMP_CONTROLS__;
 __CONTROL_FUNCTIONS__
 const frameName=f=>text(resolveRefs(f,'aria-labelledby').join(' '))||text(f.getAttribute('aria-label'))||text(f.title)||'';
 const frameHops=root=>{const frames=[...root.querySelectorAll('iframe')].filter(f=>f.getClientRects().length>0);const names=frames.map(frameName);const totals=new Map();for(const name of names)totals.set(name,(totals.get(name)||0)+1);const seen=new Map();return new Map(frames.map((f,i)=>{const name=names[i];const index=name?(seen.get(name)||0):i;if(name)seen.set(name,index+1);const total=name?totals.get(name):frames.length;return[f,{role:'iframe',accessibleName:name,ordinal:total>1?index:null}]}))};
 const hostName=el=>text(el.getAttribute('aria-label'))||text(el.id)||(el.localName.includes('-')?el.localName:'shadow root');
 const shownHost=el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0};
 const hostHops=root=>{const named=[...root.querySelectorAll('*')].filter(el=>!el.getAttribute('role')&&hostName(el)!=='shadow root'&&shownHost(el));const totals=new Map();for(const el of named)totals.set(hostName(el),(totals.get(hostName(el))||0)+1);const seen=new Map();const ordinals=new Map();for(const el of named){const name=hostName(el),at=seen.get(name)||0;seen.set(name,at+1);if(totals.get(name)>1)ordinals.set(el,at)}return el=>({role:el.getAttribute('role')||'group',accessibleName:hostName(el),ordinal:ordinals.get(el)??null})};
-const roots=[];const scanRoot=(root,framePath=[],shadowPath=[])=>{roots.push({root,framePath,shadowPath});const hops=frameHops(root);const hostHop=hostHops(root);for(const el of root.querySelectorAll('*')){if(el.shadowRoot)scanRoot(el.shadowRoot,framePath,[...shadowPath,hostHop(el)]);if(el.tagName==='IFRAME'){try{if(el.contentDocument)scanRoot(el.contentDocument,[...framePath,hops.get(el)||{role:'iframe',accessibleName:frameName(el),ordinal:null}],shadowPath)}catch{}}}};scanRoot(document);
+const roots=[];const scanRoot=(root,framePath=[],shadowPath=[])=>{roots.push({root,framePath,shadowPath});const hops=frameHops(root);const hostHop=hostHops(root);for(const el of root.querySelectorAll('*')){if(el.shadowRoot)scanRoot(el.shadowRoot,framePath,[...shadowPath,hostHop(el)]);if(STAMP_CONTROLS&&el.tagName==='IFRAME'){try{if(el.contentDocument)scanRoot(el.contentDocument,[...framePath,hops.get(el)||{role:'iframe',accessibleName:frameName(el),ordinal:null}],shadowPath)}catch{}}}};scanRoot(document);
 const formElements=[];for(const {root} of roots)for(const form of root.querySelectorAll('form'))if(!formElements.includes(form))formElements.push(form);let truncated=formElements.length>64;formElements.splice(64);
 const formKeys=new Map(formElements.map((form,index)=>[form,`raw-form-${index+1}`]));
 const groupElements=[];for(const form of formElements)for(const group of form.querySelectorAll('fieldset'))if(groupElements.length<128)groupElements.push(group);else truncated=true;
@@ -924,8 +942,34 @@ const groupKeys=new Map(groupElements.map((group,index)=>[group,`raw-group-${ind
 const controlElements=[];for(const {root,framePath,shadowPath} of roots){for(const element of root.querySelectorAll('__CONTROL_SELECTOR__')){if(controlElements.length>=LIMIT){truncated=true;break}if(element.getClientRects().length===0&&!(element.tagName==='INPUT'&&element.type==='file'))continue;if(!controlElements.some(item=>item.element===element))controlElements.push({element,framePath,shadowPath})}}
 const forms=formElements.map((form,index)=>{const scope=roots.find(item=>item.root===form.getRootNode())||{framePath:[],shadowPath:[]};return{key:formKeys.get(form),accessibleName:text(form.getAttribute('aria-label'))||text(resolveRefs(form,'aria-labelledby').join(' '))||text(form.getAttribute('name')),description:text(resolveRefs(form,'aria-describedby').join(' '))||text(form.getAttribute('aria-description')),framePath:scope.framePath,shadowPath:scope.shadowPath}});
 const groups=groupElements.map(group=>({key:groupKeys.get(group),formKey:formKeys.get(group.closest('form')),label:text(group.querySelector(':scope > legend')?.textContent),description:text(resolveRefs(group,'aria-describedby').join(' '))||text(group.getAttribute('aria-description'))})).filter(group=>group.formKey);
-const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');let next=isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1;for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){const v=el.getAttribute(stampKey);if(isStamp(v))next=Math.max(next,Number(v)+1)}const used=new Set();
-const controls=controlElements.map(({element:e,framePath,shadowPath},index)=>{if(e.options?.length>512)truncated=true;const own=e.getAttribute(stampKey);let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}used.add(stamp);const raw=rawControl(e,framePath,shadowPath,index,formKeys,groupKeys);raw.stamp=stamp;return raw});
+const readControl=({element,framePath,shadowPath},index)=>{
+  if(element.options?.length>512)truncated=true;
+  return rawControl(element,framePath,shadowPath,index,formKeys,groupKeys);
+};
+if(!STAMP_CONTROLS){
+  const controls=controlElements.map((control,index)=>({
+    ...readControl(control,index),
+    domId:text(control.element.getAttribute('id')),
+    domName:text(control.element.getAttribute('name')),
+  }));
+  return{forms,groups,controls,truncated};
+}
+const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;
+const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');
+let next=isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1;
+for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
+  const v=el.getAttribute(stampKey);
+  if(isStamp(v))next=Math.max(next,Number(v)+1);
+}
+const used=new Set();
+const controls=controlElements.map((control,index)=>{
+  const e=control.element;
+  const own=e.getAttribute(stampKey);
+  let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;
+  if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}
+  used.add(stamp);
+  return{...readControl(control,index),stamp};
+});
 if(docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
 return{forms,groups,controls,truncated};})())"#;
 
@@ -996,6 +1040,8 @@ mod tests {
             frame_path: Vec::new(),
             shadow_path: Vec::new(),
             stamp: None,
+            dom_id: None,
+            dom_name: None,
         }
     }
 

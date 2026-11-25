@@ -315,9 +315,9 @@ tools! {
     pdf { order: 39, title: "Print to PDF", description: "Print a page to a PDF artifact with optional layout and scale. Requires browser:mutate. Produces a PDF artifact with its size and checksum. On failure with invalidRequest, scale is out of range -- pass a value between 0.1 and 2.0.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: pdf_schema, args: PdfArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
-    recovery_status { order: 40, title: "Recovery status", description: "Read a workflow's checkpoint and recovery receipts without attempting recovery, or pass sessionId instead of workflowId to list that session's recoverable workflows newest-first. Pass exactly one. Requires recovery:read.",
+    recovery_status { order: 40, title: "Recovery status", description: "Read a workflow's checkpoint and recovery receipts without attempting recovery, by workflowId or workflowHandle, or pass sessionId to list that session's recoverable workflows newest-first. Pass exactly one. Requires recovery:read.",
         capabilities: &[types::Capability::RecoveryRead], operation: Some(types::InterfaceOperation::ReadCheckpoint), schema: recovery_status_schema, args: RecoveryStatusArgs,
-        phases: VERIFY, group: Workflow, hints: (true, false, false, false) }
+        phases: VERIFY, scope: Workflow, group: Workflow, hints: (true, false, false, false) }
     runtime_info { order: 41, title: "Runtime info", description: "Runtime state. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: RuntimeInfoArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }

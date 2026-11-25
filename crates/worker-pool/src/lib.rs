@@ -11,6 +11,7 @@ pub use engine_features::{EngineFeature, EngineFeatureSupport, WorkerFeatureObse
 pub use page_behavior::PageBehavior;
 mod fingerprint_host;
 mod form_snapshot;
+mod form_values;
 mod har;
 pub mod navigation_settle;
 mod network_quiet;
@@ -63,10 +64,12 @@ pub use network_quiet::{
     warn_tracking_lost, NetworkQuietFilters, NetworkQuietState, TrackingLoss, MAX_TRACKED_REQUESTS,
 };
 pub use obstruction::{
-    accessibility_miss, ACCESSIBILITY_MISS, CLICK_OUTSIDE_VIEWPORT, COVERED_CLICK,
+    accessibility_miss, covered_click, ACCESSIBILITY_MISS, CLICK_OUTSIDE_VIEWPORT, COVERED_CLICK,
     FIREFOX_POINTER_OBSCURED, FIREFOX_POINTER_OUT_OF_BOUNDS, MODAL_OBSTRUCTION,
 };
-pub use pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
+pub use pointer_hit::{
+    covering_element_function, parse_pointer_hit, pointer_hit_function, CoveringElement, PointerHit,
+};
 pub use popup::{popup_evidence, PopupFate};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,

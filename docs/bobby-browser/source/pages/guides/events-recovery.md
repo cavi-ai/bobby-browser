@@ -42,7 +42,7 @@ Over MCP, boundary tools can checkpoint for you with `autoCheckpoint`.
 | MCP | `recovery_status` | `checkpoint_save`, `workflow_recover` |
 | TypeScript | `recoveryStatus(workflowId)` | `checkpoint(...)`, `recover(workflowId)` |
 
-`recovery_status` returns `{workflowId, checkpoint, receipts}` for a workflow you own. Pass `sessionId` instead of `workflowId` over MCP to list the session's recoverable workflows, newest first.
+`recovery_status` returns `{workflowId, checkpoint, receipts}` for a workflow you own. Over MCP, `workflowHandle` in place of `workflowId` reads the workflow the handle is bound to, and `sessionId` lists the session's recoverable workflows, newest first.
 
 ```ts
 const status = await client.recoveryStatus(workflowId);

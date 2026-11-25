@@ -115,7 +115,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 |---|---|
 | `a11y_snapshot` | `maxNodes` 1 to 2048 (default 256), `target` to scope. See [Accessibility snapshot](../guides/accessibility-snapshot.md) |
 | `form_snapshot` | `maxControls` 1 to 512. Passwords are redacted |
-| `inspect` | `selector` or `target`, `includeHtml` |
+| `inspect` | `selector` or `target`, `includeHtml`. On Chromium, page text ends with a `Form field values:` section listing filled fields as `Name: "value"`; passwords, one-time codes, card data and fields named as secrets are left out |
 | `screenshot` | `mode`: viewport, full page or element. `maxEdge` shrinks the stored image to that many pixels on its longest side |
 | `pdf` | `landscape`, `printBackground`, `scale` 0.1 to 2.0, `pageRanges` |
 | `network_log` | `clear`. Recording starts at the first call; `clear: false` keeps the buffer |
@@ -188,7 +188,7 @@ A workflow file's result also has `runId` and `outputs`, its steps carry their `
 | Tool | Parameters |
 |---|---|
 | `checkpoint_save` | `checkpoint` (required), `evidenceRefs` |
-| `recovery_status` | Exactly one of `workflowId` or `sessionId`; `limit` |
+| `recovery_status` | Exactly one of `workflowId`, `workflowHandle` or `sessionId`; `limit` |
 | `workflow_recover` | `workflowId` |
 | `events_read` | `limit` (required), `cursor` |
 | `job_submit` | `name` (required), `payload`, `priority`, `maxRetries`, `timeoutMs`. Built-in names: `echo`, `sleep`, `http_probe`, `http_wait`, `http_fetch` |
