@@ -9,6 +9,9 @@
 
 ### Fixed
 
+- Chromium `selectOne` on a framed button listbox commits the named option, not the highlighted one, and no longer reports a choice the control does not show beside hidden option text.
+- Chromium `selectOne` can pick a result from a search field’s open popup and verifies that the choice was committed.
+- `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays or can no longer be read: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - A `passwordManagerFill` intent whose manager prompt cannot be pressed completes when the field already holds the manager's value.
 - On Chromium, `setText` and non-humanized `type_text` press Escape on a frame from another origin that takes focus from the field, then focus the field again and type.
