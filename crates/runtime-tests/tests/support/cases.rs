@@ -3363,6 +3363,108 @@ pub async fn locate_miss_marks_a_hidden_control(rig: &Rig) {
     live.close().await;
 }
 
+/// Recovery hints must resolve the same button when Chromium aligns its names
+/// with the accessibility tree for a retry.
+pub async fn locate_retry_hints_follow_accessibility_order(rig: &Rig) {
+    let body = r#"<main>
+        <button id="marked">Save<span aria-hidden="true">*</span></button>
+        <button id="plain">Save</button>
+        <button id="excluded" aria-hidden="true">Publish</button>
+        <button id="first">Publish</button>
+        <button id="second">Publish</button>
+        </main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let missing = live
+        .call(
+            "intent_locate",
+            json!({"purpose":"Find a button","hints":{"role":"link","accessibleName":"missing"}}),
+        )
+        .await;
+    let rows = missing_intent_candidates(&missing);
+    let mut published = Vec::new();
+    for row in rows {
+        let Some(name) = row["name"].as_str() else {
+            continue;
+        };
+        let mut hints = json!({"role":row["role"],"accessibleName":name});
+        if !row["ordinal"].is_null() {
+            hints["ordinal"] = row["ordinal"].clone();
+        }
+        let retry = live
+            .call(
+                "intent_locate",
+                json!({"purpose":"Find a button","hints":hints}),
+            )
+            .await;
+        assert_eq!(retry["status"], "completed", "{row}: {retry}");
+        let id = retry["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|item| item["fingerprint"]["stableAttributes"]["id"].as_str())
+            .unwrap_or_else(|| panic!("missing target ID for {row}: {retry}"));
+        match name {
+            "Save*" => assert_eq!(id, "marked", "{row}: {retry}"),
+            "Save" => assert_eq!(id, "plain", "{row}: {retry}"),
+            "Publish" => published.push(id.to_owned()),
+            _ => panic!("unexpected candidate: {row}"),
+        }
+    }
+    assert_eq!(rows.len(), 4, "{missing}");
+    assert_eq!(published, ["first", "second"], "{missing}");
+    live.close().await;
+}
+
+/// A native select and editable combobox can have the same role and name,
+/// but a text fill can only target the editable one.
+pub async fn fill_retry_hints_exclude_incompatible_controls(rig: &Rig) {
+    let body = r#"<main>
+        <input id="home-city" role="combobox" aria-label="City">
+        <label for="office-city">Office</label>
+        <select id="office-city" aria-label="City"><option>Boston</option></select>
+        </main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let missing = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Office city","hints":{"role":"combobox","accessibleName":"Office city"},
+                   "value":{"kind":"setText","value":"Chicago"}}),
+        )
+        .await;
+    let rows = missing_intent_candidates(&missing);
+    assert_eq!(rows.len(), 1, "{missing}");
+    assert_eq!(rows[0]["name"], "City", "{missing}");
+    assert_eq!(rows[0]["reasons"], json!(["noMatch"]), "{missing}");
+    let retried = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Fill City",
+                   "hints":{"role":rows[0]["role"],"accessibleName":rows[0]["name"],"ordinal":rows[0]["ordinal"]},
+                   "value":{"kind":"setText","value":"Chicago"}}),
+        )
+        .await;
+    assert_eq!(retried["status"], "completed", "{retried}");
+    let snapshot = live.snapshot(json!({})).await;
+    assert_eq!(
+        find_node(&snapshot, "combobox", Some("City")).and_then(|node| node["value"].as_str()),
+        Some("Chicago"),
+        "{snapshot}"
+    );
+    live.close().await;
+}
+
+fn missing_intent_candidates(outcome: &Value) -> &[Value] {
+    assert_eq!(outcome["error"]["code"], "targetNotFound", "{outcome}");
+    outcome["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|item| item["record"]["candidates"].as_array().map(Vec::as_slice))
+        .unwrap_or_else(|| panic!("missing retry evidence: {outcome}"))
+}
+
 /// Scoped iframe descent excludes sibling frames and shares the node budget.
 pub async fn scoped_iframe_descent_respects_the_node_budget(rig: &Rig) {
     let body = r#"<iframe title="Widget" src="/child"></iframe><section id="scope"><iframe title="Widget" src="/child"></iframe></section>"#;

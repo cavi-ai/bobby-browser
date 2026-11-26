@@ -19,7 +19,7 @@ use crate::navigation_settle::{
     ProbeStep, SettleSession, NAVIGATION_SETTLE_CAP,
 };
 use crate::pointer_hit::PointerHit;
-use crate::secret_material::page_title_evidence;
+use crate::secret_material::{page_title_evidence, redact_secret_material};
 use crate::targeting::iframe_hop_ordinal;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
@@ -4902,14 +4902,6 @@ fn is_document_body_inspect(command: &InspectCommand) -> bool {
 /// treated as absent so agents that send `""` still hit the body-text path.
 /// Page text that discloses a credential never reaches the agent: the whole
 /// string is replaced, as the Firefox content script does for node names.
-fn redact_secret_material(value: String) -> String {
-    if crate::secret_material::contains_secret_material(&value) {
-        "[redacted]".to_owned()
-    } else {
-        value
-    }
-}
-
 struct ChromiumSettle<'a> {
     page: &'a Page,
     tracker: Option<&'a crate::network_quiet::NetworkQuietTracker>,

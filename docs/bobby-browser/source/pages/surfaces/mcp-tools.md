@@ -226,7 +226,7 @@ An invalid call returns `-32602` with `data.reason`:
 
 | `reason` | Meaning |
 |---|---|
-| `schemaViolation` | `pointer` and `constraint` name the offending argument and the schema keyword |
+| `schemaViolation` | `pointer` and `constraint` name the offending argument and the schema keyword. `repair.example` is a complete argument object the tool accepts; `<name>` strings are placeholders |
 | `malformedArguments` | Passed the schema but could not be parsed |
 | `deadlineOutOfRange` | `command_execute` deadline is past or more than five minutes ahead |
 | `invalidIdempotencyKey` | Key is not 1 to 128 printable ASCII characters |

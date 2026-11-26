@@ -4,6 +4,11 @@
 
 ### Added
 
+- A `schemaViolation` repair carries `example`, a complete argument object the tool's advertised schema accepts.
+- Snapshots nested in compact MCP results keep the first 10 options of each list inside a combobox and count the rest in `optionsOmitted`.
+- MCP accessibility snapshots that hold `[redacted]` text carry `redactionReason`, which says what is redacted and why.
+- A stuck locate or fill ranks its candidates by purpose words in their text as well as their names, and each candidate carries the `ordinal` that targets it.
+- Chromium `form_snapshot` describes an unnamed button by the text of the nearest container that holds no other button.
 - `intent_detect_challenge` classifies a Turnstile widget as its own `turnstile` challenge type.
 - `[http].allow_file_urls` lets `navigate` and `workflow_start` open `file://` URLs for local previews; it is off by default.
 - `intent_submit_and_verify` fails `verificationLinkRequired` on a page that asks to confirm an email address through a link, and `confirmedOutsideExpectedState` when the page reads as a confirmation but `expectedState` missed.

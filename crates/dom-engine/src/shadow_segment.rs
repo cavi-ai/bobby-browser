@@ -151,6 +151,7 @@ fn host_by_snapshot_name(
     let evidence = CandidateEvidence {
         role: candidate.role.clone(),
         name: candidate.name.clone(),
+        ordinal: None,
         score: 0,
         reasons: vec!["shadowHostSnapshotName".into()],
     };

@@ -63,6 +63,8 @@ cases::every_case!(
     select_one_leaves_existing_shadow_controls_alone,
     type_text_css_prefers_the_editable_node,
     a_phone_field_is_a_text_box,
+    locate_retry_hints_follow_accessibility_order,
+    fill_retry_hints_exclude_incompatible_controls,
     a_custom_select_reads_and_verifies_its_shown_value,
     a_checked_box_satisfies_its_required_group,
     a_file_slot_reports_the_file_its_row_shows,

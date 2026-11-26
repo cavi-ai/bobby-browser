@@ -1301,6 +1301,213 @@ fn tool_argument_example(name: &str) -> Option<Value> {
     })
 }
 
+/// A complete argument object the tool's advertised schema accepts: the
+/// hand-written template when there is one, else one built from the
+/// validation schema's full unions, scoped by `workflowHandle` when offered.
+pub(crate) fn tool_example_arguments(name: &str) -> Option<Value> {
+    let advertised = advertised_tool_schema(name);
+    let from_validation = || {
+        let schema = tool_schema(name);
+        let mut example = example_value(&schema, &schema, "arguments", 0)?;
+        validate_document(&schema, &example).ok()?;
+        if advertised["properties"].get("workflowHandle").is_some() {
+            let object = example.as_object_mut()?;
+            for scope in ["sessionId", "pageId", "workflowId"] {
+                object.remove(scope);
+            }
+            object.insert(
+                "workflowHandle".to_owned(),
+                json!("wf_0123456789abcdef0123456789abcdef"),
+            );
+        }
+        Some(example)
+    };
+    [
+        tool_argument_example(name),
+        from_validation(),
+        example_value(&advertised, &advertised, "arguments", 0),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|example| validate_document(&advertised, example).is_ok())
+}
+
+/// The first value `schema` admits, preferring declared values and the first
+/// union variant. Object examples carry only required properties, plus any a
+/// leading `if` requires, so a workflow-scoped tool takes `workflowHandle`.
+fn example_value(root: &Value, schema: &Value, name: &str, depth: usize) -> Option<Value> {
+    if depth > 16 {
+        return None;
+    }
+    let schema = deref_schema(root, schema)?;
+    for keyword in ["const", "default"] {
+        if let Some(value) = schema.get(keyword) {
+            return Some(value.clone());
+        }
+    }
+    for keyword in ["enum", "examples"] {
+        if let Some(value) = schema.get(keyword).and_then(|values| values.get(0)) {
+            return Some(value.clone());
+        }
+    }
+    let typed = schema.get("type").and_then(|kind| match kind {
+        Value::Array(kinds) => kinds.iter().find(|kind| *kind != "null"),
+        kind => Some(kind),
+    });
+    let union = ["oneOf", "anyOf"]
+        .into_iter()
+        .find_map(|keyword| schema.get(keyword).and_then(Value::as_array));
+    if typed.is_none() && schema.get("properties").is_none() {
+        let Some(union) = union else {
+            return Some(json!({}));
+        };
+        return union
+            .iter()
+            .find_map(|variant| example_value(root, variant, name, depth + 1));
+    }
+    match typed.and_then(Value::as_str).unwrap_or("object") {
+        "object" => {
+            let mut required = Vec::new();
+            for source in [
+                Some(schema),
+                schema.get("if"),
+                union.and_then(|variants| variants.first()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for field in source["required"].as_array().into_iter().flatten() {
+                    if let Some(field) = field.as_str().filter(|field| !required.contains(field)) {
+                        required.push(field);
+                    }
+                }
+            }
+            let mut object = Map::new();
+            for field in required {
+                let property = schema["properties"]
+                    .get(field)
+                    .or_else(|| union?.first()?["properties"].get(field))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let value = if field == "workflowHandle" {
+                    json!("wf_0123456789abcdef0123456789abcdef")
+                } else {
+                    example_value(root, &property, field, depth + 1)?
+                };
+                object.insert(field.to_owned(), value);
+            }
+            let properties = schema["properties"].as_object();
+            // A nested object with no required field still shows one field.
+            if object.is_empty() && depth > 0 {
+                if let Some((field, value)) =
+                    properties
+                        .into_iter()
+                        .flatten()
+                        .find_map(|(field, property)| {
+                            Some((field, example_value(root, property, field, depth + 1)?))
+                        })
+                {
+                    object.insert(field.clone(), value);
+                }
+            }
+            // A `not` that demands one of several optional fields gets the first
+            // that satisfies it, object-valued fields first.
+            if let Some(forbidden) = schema.get("not") {
+                let check = json!({"not": forbidden});
+                let mut fields = Vec::new();
+                not_fields(forbidden, &mut fields);
+                fields.sort_by_key(|field| {
+                    properties
+                        .and_then(|properties| properties.get(*field))
+                        .and_then(|property| deref_schema(root, property))
+                        .is_none_or(|property| property.get("type") != Some(&json!("object")))
+                });
+                let mut candidate = Value::Object(object.clone());
+                for field in fields {
+                    if validate(root, &check, &candidate).is_ok() {
+                        break;
+                    }
+                    let Some(value) = properties
+                        .and_then(|properties| properties.get(field))
+                        .and_then(|property| example_value(root, property, field, depth + 1))
+                    else {
+                        continue;
+                    };
+                    let mut trial = object.clone();
+                    trial.insert(field.to_owned(), value);
+                    if validate(root, &check, &Value::Object(trial.clone())).is_ok() {
+                        object = trial;
+                    }
+                    candidate = Value::Object(object.clone());
+                }
+            }
+            Some(Value::Object(object))
+        }
+        "string" => Some(json!(match schema.get("format").and_then(Value::as_str) {
+            Some("uuid") => "10000000-0000-4000-8000-000000000001".to_owned(),
+            Some("date-time") => "2030-01-01T00:00:00Z".to_owned(),
+            _ if schema.get("pattern").is_some() =>
+                "0".repeat(schema.get("minLength").and_then(Value::as_u64).unwrap_or(1) as usize,),
+            _ => {
+                let mut text = format!("<{name}>");
+                let min = schema.get("minLength").and_then(Value::as_u64).unwrap_or(0);
+                while (text.len() as u64) < min {
+                    text.push('_');
+                }
+                text
+            }
+        })),
+        "integer" | "number" => {
+            let bound = |keyword| schema.get(keyword).and_then(Value::as_f64);
+            let mut value = bound("minimum")
+                .map(f64::ceil)
+                .or_else(|| bound("exclusiveMinimum").map(|bound| bound.floor() + 1.0))
+                .unwrap_or(0.0)
+                .max(0.0);
+            if let Some(maximum) = bound("maximum") {
+                value = value.min(maximum.floor());
+            }
+            Some(json!(value as i64))
+        }
+        "boolean" => Some(json!(false)),
+        "array" => {
+            let count = schema.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+            let item = schema.get("items").cloned().unwrap_or_else(|| json!({}));
+            (0..count)
+                .map(|_| example_value(root, &item, name, depth + 1))
+                .collect::<Option<Vec<_>>>()
+                .map(Value::Array)
+        }
+        "null" => Some(Value::Null),
+        _ => None,
+    }
+}
+
+/// Property names a `not` subschema mentions, in schema order.
+fn not_fields<'a>(schema: &'a Value, fields: &mut Vec<&'a str>) {
+    let named = schema["properties"]
+        .as_object()
+        .into_iter()
+        .flat_map(|properties| properties.keys().map(String::as_str))
+        .chain(
+            schema["required"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+    for field in named {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        for variant in schema[keyword].as_array().into_iter().flatten() {
+            not_fields(variant, fields);
+        }
+    }
+}
+
 /// The shape of a tool's `structuredContent`, resolved through the same
 /// `reachable_definitions` closure as the input schemas: a blanket `$defs` here would
 /// undo the payload reduction the input side pays for. Every tool returns structured
@@ -2575,6 +2782,7 @@ fn execution_record() -> Value {
             "candidates":array(object(json!({
                 "role":nullable(string(0,256)),
                 "name":nullable(string(0,MAX_STRING_BYTES)),
+                "ordinal":{"type":"integer","minimum":0,"maximum":1048576},
                 "score":{"type":"integer","minimum":-1000000,"maximum":1000000},
                 "reasons":array(string(0,MAX_STRING_BYTES),64)
             }), &["role","name","score","reasons"]), 64),
@@ -3024,7 +3232,7 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "target":{"$ref":"#/$defs/TargetSpec"},
                 "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
-                "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
+                "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"ordinal":{"type":"integer","minimum":0,"maximum":1048576},"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
                 "bestMatchAuthorized":{"type":"boolean"}
             }),
             &["target", "fingerprint", "candidates", "bestMatchAuthorized"],
@@ -3077,7 +3285,8 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "pageId":id(),
                 "nodes":array(json!({"$ref":"#/$defs/AccessibilityNode"}), 2048),
-                "truncated":{"type":"boolean"}
+                "truncated":{"type":"boolean"},
+                "redactionReason":string(1, 512)
             }),
             &["pageId", "nodes", "truncated"],
         ),
@@ -5339,7 +5548,8 @@ fn accessibility_node() -> Value {
             "autocomplete":string(0, 256),
             "url":string(1, 4096),
             "valueMin":string(0, 256),
-            "valueMax":string(0, 256)
+            "valueMax":string(0, 256),
+            "optionsOmitted":{"type":"integer","minimum":1,"maximum":1048576}
         }),
         &[],
     );

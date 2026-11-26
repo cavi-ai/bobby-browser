@@ -334,6 +334,116 @@ async fn locate_reports_a_hidden_control_as_hidden_not_a_mismatch() {
 }
 
 #[tokio::test]
+async fn locate_near_miss_window_ranks_purpose_words_in_labels_and_targets_the_row() {
+    let entry = |index: usize, person: &str| Candidate {
+        id: format!("entry-{index}"),
+        css: Some(format!("#entry-{index}")),
+        label: Some(format!("{person} sent a message")),
+        attributes: BTreeMap::from([("id".to_owned(), format!("entry-{index}"))]),
+        ..button("Open conversation")
+    };
+    let mut candidates = (0..11)
+        .map(|index| entry(index, &format!("Person {index}")))
+        .collect::<Vec<_>>();
+    let mut hidden = entry(12, "Hidden");
+    hidden.state.visible = false;
+    candidates.insert(0, hidden);
+    candidates.push(entry(11, "Ada Lovelace"));
+    let browser = FakeBrowser {
+        candidates: Arc::new(candidates),
+        wait_ok: true,
+    };
+    let purpose = "conversation entry for Ada Lovelace";
+    let stuck = IntentCommand::Locate(LocateIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+    let outcome =
+        IntentEngine::execute(&stuck, &PageId::new(), &browser, &VisionContext::default()).await;
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    let record = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution on stuck failure");
+    let first = &record.candidates[0];
+    assert_eq!(first.reasons, ["purposeOverlap"], "{:?}", record.candidates);
+    assert!(first.score > record.candidates[1].score);
+    assert_eq!(first.ordinal, Some(11));
+
+    let retry = IntentCommand::Locate(LocateIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: first.role.clone(),
+            accessible_name: first.name.clone(),
+            ordinal: first.ordinal,
+            ..IntentHints::default()
+        },
+    });
+    let outcome =
+        IntentEngine::execute(&retry, &PageId::new(), &browser, &VisionContext::default()).await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution { fingerprint, .. }
+                if fingerprint.stable_attributes.values().any(|value| value == "entry-11")
+        )),
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test]
+async fn locate_near_miss_evidence_is_independent_of_control_values() {
+    let stuck = IntentCommand::Locate(LocateIntent {
+        purpose: "Find the shipping link".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+    let mut evidence_by_value = Vec::new();
+    for value in ["shipping", "billing"] {
+        let input = Candidate {
+            tag: Some("input".into()),
+            role: Some("textbox".into()),
+            text: value.into(),
+            ..button("Reference")
+        };
+        let browser = FakeBrowser {
+            candidates: Arc::new(vec![button("Continue"), input]),
+            wait_ok: true,
+        };
+        let IntentOutcome::Failed { evidence, .. } =
+            IntentEngine::execute(&stuck, &PageId::new(), &browser, &VisionContext::default())
+                .await
+        else {
+            panic!("expected a stuck locate");
+        };
+        let candidates = evidence
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::IntentExecution { record } => Some(record.candidates),
+                _ => None,
+            })
+            .expect("near-miss evidence");
+        assert_eq!(candidates.len(), 2);
+        evidence_by_value.push(candidates);
+    }
+    assert_eq!(evidence_by_value[0], evidence_by_value[1]);
+}
+
+#[tokio::test]
 async fn locate_zero_candidates_is_the_stuck_code_when_gates_closed() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![]),

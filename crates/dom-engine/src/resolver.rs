@@ -467,6 +467,7 @@ fn score<'a>(
         CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
+            ordinal: None,
             score,
             reasons,
         },

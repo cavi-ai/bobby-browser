@@ -3,6 +3,11 @@
 //! Intent-specific actions stay in the executor. This module owns the policy
 //! differences that affect resolution and keeps their failure evidence stable.
 
+use std::borrow::Cow;
+use std::collections::{btree_map::Entry, BTreeMap};
+
+use dom_engine::rank_candidates;
+
 use super::*;
 
 /// Non-escalating resolution retains the full census for near-miss reporting.
@@ -29,21 +34,28 @@ pub(super) fn decide_candidates(
     census: &[Candidate],
     action: Option<&ControlAction>,
 ) -> Result<ResolutionDecision, dom_engine::ResolutionError> {
-    let compatible_pool = action
-        .map(|action| {
-            census
-                .iter()
-                .filter(|candidate| compatible(action, candidate))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let pool = if compatible_pool.is_empty() {
-        census
-    } else {
-        &compatible_pool
+    let pool = resolution_pool(census, action);
+    resolve_candidates(target, &pool, &ResolutionPolicy::default())
+}
+
+pub(super) fn resolution_pool<'a>(
+    census: &'a [Candidate],
+    action: Option<&ControlAction>,
+) -> Cow<'a, [Candidate]> {
+    let Some(action) = action else {
+        return Cow::Borrowed(census);
     };
-    resolve_candidates(target, pool, &ResolutionPolicy::default())
+    let compatible_pool = census
+        .iter()
+        .filter(|candidate| compatible(action, candidate))
+        .cloned()
+        .collect::<Vec<_>>();
+    if compatible_pool.is_empty() {
+        // Preserve action-mismatch errors when there are no compatible controls.
+        Cow::Borrowed(census)
+    } else {
+        Cow::Owned(compatible_pool)
+    }
 }
 
 pub(super) fn decide_file_candidates(
@@ -97,10 +109,103 @@ pub(super) fn open_dialogs(census: &[Candidate]) -> Vec<types::CandidateEvidence
         .map(|candidate| types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
+            ordinal: None,
             score: 0,
             reasons: vec!["openDialog".into()],
         })
         .collect()
+}
+
+struct RetryMatches {
+    unnumbered: Option<Box<Candidate>>,
+    numbered: Option<Vec<Candidate>>,
+}
+
+async fn near_miss_evidence(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    request: &LocateRequest<'_>,
+    census: &[Candidate],
+    action: Option<&ControlAction>,
+) -> Vec<types::CandidateEvidence> {
+    let mut matches_by_name = BTreeMap::new();
+    let mut evidence = Vec::new();
+    for (candidate, mut row) in ranked_near_miss_window(census, action, request.purpose) {
+        if !candidate.state.visible {
+            evidence.push(row);
+            continue;
+        }
+
+        // The browser may gather different candidates for the suggested
+        // role and name. Chromium also changes accessibility alignment
+        // when an ordinal is supplied, so probe each form separately.
+        let mut retry = TargetSpec {
+            role: row.role.clone(),
+            accessible_name: row.name.clone(),
+            frame_path: request.target.frame_path.clone(),
+            shadow_path: request.target.shadow_path.clone(),
+            ..TargetSpec::default()
+        };
+        let matches = match matches_by_name.entry((row.role.clone(), row.name.clone())) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let unnumbered = browser
+                    .collect_candidates(page_id, &retry)
+                    .await
+                    .ok()
+                    .and_then(|census| {
+                        match resolve_candidates(&retry, &census, &ResolutionPolicy::default()) {
+                            Ok(ResolutionDecision::Resolved { candidate, .. })
+                                if action.is_none_or(|action| compatible(action, &candidate)) =>
+                            {
+                                Some(candidate)
+                            }
+                            _ => None,
+                        }
+                    });
+                entry.insert(RetryMatches {
+                    unnumbered,
+                    numbered: None,
+                })
+            }
+        };
+        if matches.unnumbered.as_ref().is_some_and(|matched| {
+            matched.id == candidate.id && matched.frame_path == candidate.frame_path
+        }) {
+            evidence.push(row);
+            continue;
+        }
+
+        if matches.numbered.is_none() {
+            // The value only requests ordinal-aware collection. Ranking that
+            // census gives the actual index to report for each candidate.
+            retry.ordinal = Some(0);
+            let numbered = match browser.collect_candidates(page_id, &retry).await {
+                Ok(census) => rank_candidates(&retry, &census, &ResolutionPolicy::default())
+                    .unwrap_or_default()
+                    .into_iter()
+                    // Fill resolves against compatible controls first and the
+                    // browser then acts using the full ranking. After an
+                    // incompatible match those ordinals no longer agree.
+                    .take_while(|(matched, _)| {
+                        action.is_none_or(|action| compatible(action, matched))
+                    })
+                    .map(|(matched, _)| matched.clone())
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            matches.numbered = Some(numbered);
+        }
+        if let Some(ordinal) = matches.numbered.as_ref().and_then(|ranked| {
+            ranked.iter().position(|matched| {
+                matched.id == candidate.id && matched.frame_path == candidate.frame_path
+            })
+        }) {
+            row.ordinal = Some(ordinal);
+            evidence.push(row);
+        }
+    }
+    evidence
 }
 
 pub(super) async fn locate(
@@ -137,21 +242,12 @@ pub(super) async fn locate(
                 },
             )
         })?;
-    // Only resolution sees the compatible pool. Vision must retain the full
-    // census, and an empty compatible pool must retain action-mismatch errors.
-    let compatible_pool = match request.mode {
-        LocateMode::Fill(action) => census
-            .iter()
-            .filter(|candidate| compatible(action, candidate))
-            .cloned()
-            .collect::<Vec<_>>(),
-        _ => Vec::new(),
+    let action = match request.mode {
+        LocateMode::Fill(action) => Some(action),
+        _ => None,
     };
-    let pool = if compatible_pool.is_empty() {
-        &census
-    } else {
-        &compatible_pool
-    };
+    let pool = resolution_pool(&census, action);
+    let pool = pool.as_ref();
     let decision = decide_candidates(request.target, pool, None).map_err(|error| {
         failure(
             CommandError {
@@ -210,7 +306,7 @@ pub(super) async fn locate(
             }
             let candidates =
                 if request.intent_kind == "locate" || matches!(request.mode, LocateMode::Fill(_)) {
-                    ranked_near_miss_window(&census, request.purpose)
+                    near_miss_evidence(page_id, browser, &request, &census, action).await
                 } else {
                     Vec::new()
                 };

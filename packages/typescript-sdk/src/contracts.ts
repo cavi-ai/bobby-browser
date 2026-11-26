@@ -92,7 +92,7 @@ export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownlo
 export interface TargetSpec { css?: string | null; testId?: string | null; role?: string | null; accessibleName?: string | null; label?: string | null; text?: TextMatch | null; attributes?: Record<string, string>; framePath?: TargetSpec[]; shadowPath?: TargetSpec[]; ordinal?: number | null; allowBestMatch?: boolean; }
 export type TextMatch = { kind: "exact" | "contains" | "regex"; value: string };
 export interface TargetFingerprint { pageId: Id; frame: string | null; role: string | null; name: string | null; stableAttributes: Record<string, string>; }
-export interface CandidateEvidence { role: string | null; name: string | null; score: number; reasons: string[]; }
+export interface CandidateEvidence { role: string | null; name: string | null; ordinal?: number; score: number; reasons: string[]; }
 export interface PageEvidence { pageId: Id; url: string; title: string; }
 export type WaitCondition =
   | { kind: "element"; target: TargetSpec; state: "attached" | "detached" | "visible" | "hidden" | "enabled" | "disabled" }

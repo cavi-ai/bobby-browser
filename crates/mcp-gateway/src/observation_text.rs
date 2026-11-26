@@ -22,6 +22,20 @@ const NAME_FROM_CONTENT_ROLES: &[&str] = &[
     "treeitem",
 ];
 
+/// Why a snapshot reads `[redacted]`, stated once per snapshot that holds one.
+const REDACTION_REASON: &str =
+    "[redacted] marks masked field values or text the runtime recognized as a credential.";
+
+fn carries_redaction(node: &Value) -> bool {
+    ["name", "value", "description"]
+        .iter()
+        .any(|field| node.get(field).and_then(Value::as_str) == Some("[redacted]"))
+        || node
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| children.iter().any(carries_redaction))
+}
+
 /// Rewrites every accessibility snapshot evidence item in a tool result, at
 /// any depth (a `postState` nests one), so each text appears once:
 /// - a node's `name` is dropped when its `target` carries the same role and name;
@@ -38,10 +52,15 @@ pub(crate) fn dedupe_snapshot_text(value: &mut Value) {
                             if item.get("kind").and_then(Value::as_str)
                                 == Some("accessibilitySnapshot")
                             {
+                                let mut redacted = false;
                                 if let Some(Value::Array(nodes)) = item.get_mut("nodes") {
                                     for node in nodes {
                                         dedupe_node(node);
+                                        redacted |= carries_redaction(node);
                                     }
+                                }
+                                if redacted {
+                                    item["redactionReason"] = Value::from(REDACTION_REASON);
                                 }
                             } else {
                                 dedupe_snapshot_text(item);
@@ -175,6 +194,22 @@ mod tests {
                 ]}
             ]}])
         );
+    }
+
+    #[test]
+    fn a_snapshot_with_redacted_text_says_why() {
+        let mut value = snapshot(json!([{"role":"main","children":[
+            {"role":"StaticText","name":"[redacted]"},
+            {"role":"textbox","target":{"role":"textbox","accessibleName":"Key"},"value":"[redacted]"}
+        ]}]));
+        dedupe_snapshot_text(&mut value);
+        let reason = value["evidence"][0]["redactionReason"]
+            .as_str()
+            .expect("redaction reason");
+        assert!(reason.contains("credential"), "{reason}");
+        let mut plain = snapshot(json!([{"role":"StaticText","name":"Ready"}]));
+        dedupe_snapshot_text(&mut plain);
+        assert!(plain["evidence"][0].get("redactionReason").is_none());
     }
 
     #[test]
