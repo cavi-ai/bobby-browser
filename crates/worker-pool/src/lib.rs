@@ -96,6 +96,9 @@ pub fn textbox_target(target: &types::TargetSpec) -> Option<types::TargetSpec> {
 /// out. Each costs a browser round trip, and the census repeats while its
 /// target is absent.
 pub const MAX_DESCENDED_FRAMES: usize = 8;
+/// Most characters of whole-page text an inspect returns; longer text is cut
+/// in the page and the inspection is flagged `truncated`.
+pub const MAX_INSPECT_TEXT_CHARS: usize = 64 * 1024;
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())

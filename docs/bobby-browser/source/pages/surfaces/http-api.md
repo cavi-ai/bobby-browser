@@ -83,7 +83,10 @@ Failures return `{"error": {...}}` with `code`, `message`, `correlationId` and r
 | `invalidRequest`, `unsupportedInterfaceVersion` | 422 (413 when the body is too large) |
 | `resourceExhausted` | 429 |
 | `internal` | 500 |
+| `browserCommandFailed` | 502 |
 | `engineUnreachable` | 503 |
+
+`browserCommandFailed` means the browser failed a page read such as a form snapshot; `retryable: true` means the same request can succeed when resent.
 
 `engineUnreachable` means the browser engine did not answer. Run `bobby doctor`, fix the engine it names, and resend the same request.
 

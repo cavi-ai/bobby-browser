@@ -66,7 +66,7 @@ fn worker_command_error(error: types::CommandError) -> RuntimeError {
             worker_pool::BROWSER_GONE_MESSAGE
         ))
     } else {
-        RuntimeError::Internal(error.message)
+        RuntimeError::Command(error)
     }
 }
 

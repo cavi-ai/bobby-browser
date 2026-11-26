@@ -13,7 +13,7 @@ use crate::{
     FormSnapshot, JobId, JobResolutionReceipt, JobResolutionRequest, JobStatusResponse,
     JobSubmitResponse, OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus,
     RuntimeInfo, SessionId, SessionState, SubmitJobRequest, WorkflowCheckpoint, WorkflowId,
-    CURRENT_INTERFACE_VERSION,
+    CURRENT_INTERFACE_VERSION, INCLUDE_LOST_SESSIONS_HEADER,
 };
 
 /// Client hard bounds for [`BrowserRuntimeClient::artifact`], mirroring the
@@ -580,6 +580,8 @@ impl BrowserRuntimeClient {
             .correlation_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        let include_lost_sessions =
+            method == Method::GET && path.split('?').next() == Some("/v1/runtime");
         let mut request = self
             .http
             .request(method, format!("{}{path}", self.base_url))
@@ -588,6 +590,9 @@ impl BrowserRuntimeClient {
             .header("x-interface-version", CURRENT_INTERFACE_VERSION)
             .header("x-correlation-id", correlation)
             .header("x-deadline", deadline.rfc3339());
+        if include_lost_sessions {
+            request = request.header(INCLUDE_LOST_SESSIONS_HEADER, "true");
+        }
         if let Some(key) = options.idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -968,6 +973,7 @@ mod tests {
         );
         assert!(headers.get("x-correlation-id").is_some());
         assert!(headers.get("x-deadline").is_some());
+        assert_eq!(headers["x-bobby-include-lost-sessions"], "true");
         (
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -999,8 +1005,9 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_info_for_engine_sends_scope() {
-        async fn scoped(uri: axum::http::Uri) -> impl IntoResponse {
+        async fn scoped(uri: axum::http::Uri, headers: HeaderMap) -> impl IntoResponse {
             assert_eq!(uri.query(), Some("engine=firefox"));
+            assert_eq!(headers["x-bobby-include-lost-sessions"], "true");
             axum::Json(
                 json!({"engineScope":"firefox","version":"test","capabilities":[],
                 "active_sessions":0,"queued_jobs":0,"uptime_ms":1}),

@@ -112,6 +112,7 @@ impl IntentBrowser for FakeBrowser {
                             forms: Vec::new(),
                             unowned_controls: Vec::new(),
                             truncated: false,
+                            page_busy: false,
                         });
                     return Ok(Vec::new());
                 }
@@ -566,6 +567,7 @@ fn email_snapshot(valid: bool) -> types::FormSnapshot {
         }],
         unowned_controls: Vec::new(),
         truncated: false,
+        page_busy: false,
     }
 }
 
@@ -619,6 +621,7 @@ async fn settle_network_quiet(snapshot: Option<types::FormSnapshot>) -> IntentOu
             title: "Apply".into(),
             text: "Email is required".into(),
             html: None,
+            truncated: false,
         }],
         form_snapshot: snapshot,
         ..CallLog::default()
@@ -944,6 +947,7 @@ async fn submit_and_verify_names_an_email_link_step_instead_of_failing_verificat
                    Click the link to activate your account."
                 .into(),
             html: None,
+            truncated: false,
         }],
         ..CallLog::default()
     }));

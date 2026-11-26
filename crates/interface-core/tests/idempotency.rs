@@ -674,6 +674,7 @@ async fn durable_key_replays_after_reopen_without_storing_page_evidence() {
                     title: "Example".into(),
                     text: "page secret".into(),
                     html: None,
+                    truncated: false,
                 }],
             },
             types::WireTimestamp::now(),

@@ -5,6 +5,7 @@
 //! capability checks, idempotency, and session ownership — the type every
 //! public adapter (HTTP, MCP, CDP, ACP) holds.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use config::AppConfig;
@@ -66,6 +67,60 @@ fn name_screenshot_workflow(outcome: &mut CommandOutcome, workflow: &WorkflowId)
             origin.workflow_id.get_or_insert_with(|| workflow.clone());
         }
     }
+}
+
+// Resolve the existing prefix and follow dangling symlinks: the storage
+// files may be created only after this check.
+fn storage_path_identity(path: &Path) -> std::io::Result<PathBuf> {
+    let mut path = std::path::absolute(path)?;
+    for _ in 0..40 {
+        let mut redirect = None;
+        for ancestor in path.ancestors() {
+            let suffix = path.strip_prefix(ancestor).expect("ancestor prefix");
+            if let Ok(canonical) = ancestor.canonicalize() {
+                return Ok(canonical.join(suffix));
+            }
+            if let Ok(target) = ancestor.read_link() {
+                redirect = Some(ancestor.with_file_name(target).join(suffix));
+                break;
+            }
+        }
+        match redirect {
+            Some(target) => path = target,
+            None => return Ok(path),
+        }
+    }
+    Err(std::io::Error::other("too many symlinks in storage path"))
+}
+
+fn session_ledger_path(storage: &config::StorageConfig) -> Result<PathBuf, RuntimeError> {
+    let path = storage.journal_path.with_added_extension("sessions.json");
+    let identity = |path: &Path| {
+        storage_path_identity(path).map_err(|error| RuntimeError::InvalidRequest(error.to_string()))
+    };
+    let ledger = identity(&path)?;
+    let stores = [
+        &storage.journal_path,
+        &storage.authority_path,
+        &storage.scheduler_journal_path,
+        &storage.checkpoints_dir,
+        &storage.journal_path.with_extension("idempotency.json"),
+        &storage
+            .journal_path
+            .with_extension("lifecycle-idempotency.json"),
+        &storage
+            .scheduler_journal_path
+            .with_extension("idempotency.json"),
+    ];
+    for store in stores.into_iter().chain(storage.journal_key_path.iter()) {
+        if identity(store)? == ledger {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "session ledger path {} conflicts with a configured store",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
 }
 
 /// The unauthenticated application service is not a public interface adapter.
@@ -354,6 +409,7 @@ impl RuntimeService {
         vision_assist: Option<Arc<dyn VisionAssist>>,
         structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
     ) -> Result<Self, RuntimeError> {
+        let ledger_path = session_ledger_path(&config.storage)?;
         let operational_metrics = OperationalMetrics::with_health_budget(
             config.vision.propose_budget_ms,
             config.vision.health_failure_threshold,
@@ -495,7 +551,7 @@ impl RuntimeService {
         if let Some(observer) = observer {
             pages = pages.with_execution_phase_observer(observer);
         }
-        let sessions = SessionManager::new(workers.clone());
+        let sessions = SessionManager::new(workers.clone()).with_ledger(ledger_path);
         Ok(Self::with_recovery(sessions, pages, recovery)
             .with_idempotency_stores(command_idempotency, lifecycle_idempotency)
             .with_workers(workers)
@@ -540,6 +596,7 @@ impl RuntimeService {
         }
         RuntimeInfo {
             engine_scope: None,
+            lost_sessions: self.sessions.lost_sessions(None),
             storage_integrity: [
                 ("commandIdempotency", self.idempotency.integrity_issue()),
                 (

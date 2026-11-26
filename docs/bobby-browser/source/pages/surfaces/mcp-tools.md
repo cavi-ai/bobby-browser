@@ -81,8 +81,8 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `page_open` | `page:write` (+ `browser:mutate` with `url`) | Open a page, optionally navigating |
 | `pdf` | `browser:mutate` | Print a page to a PDF artifact |
 | `recovery_status` | `recovery:read` | Read a workflow's checkpoint and receipts |
-| `runtime_info` | `session:read` | Runtime version, active sessions, credential expiry |
-| `screenshot` | `browser:mutate` | Screenshot artifact |
+| `runtime_info` | `session:read` | Runtime version, active sessions, sessions lost when the previous runtime stopped (`lostSessions`), credential expiry |
+| `screenshot` | `browser:mutate` (+ `file:download` with `saveAs`) | Screenshot artifact |
 | `session_capabilities` | `session:read` | Observe an owned session's engine-option support, grants, policy, and connection state |
 | `session_close` | `session:write` | Close a session and release its browser |
 | `session_create` | `session:write` | Create a session |
@@ -103,7 +103,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | Tool | Parameters |
 |---|---|
 | `session_create`, `workflow_start` | `profile` (required), `proxy`, `executionPolicy`, `zigzagzig`; `workflow_start` also takes `url` and `callerKey` (1 to 128 characters) |
-| `page_open` | `sessionId` (required), `url`. With `url` the result includes `navigationOutcome` |
+| `page_open` | `sessionId` (required), `url`. With `url` the result includes `navigationOutcome`. A load that runs out of time keeps the page open; any other failed load closes it and sets `pageClosed` |
 | `page_list`, `page_close`, `page_activate` | `sessionId`, `pageId` or `workflowHandle` |
 | `toolset_select` | `toolset`: `explore`, `act`, `intent`, `verify` or `full` |
 
@@ -115,13 +115,15 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 |---|---|
 | `a11y_snapshot` | `maxNodes` 1 to 2048 (default 256), `target` to scope. See [Accessibility snapshot](../guides/accessibility-snapshot.md) |
 | `form_snapshot` | `maxControls` 1 to 512. Passwords are redacted |
-| `inspect` | `selector` or `target`, `includeHtml`. On Chromium, page text ends with a `Form field values:` section listing filled fields as `Name: "value"`; passwords, one-time codes, card data and fields named as secrets are left out |
+| `inspect` | `selector` or `target`, `includeHtml`. On Chromium, whole-page text is cut at 65,536 characters and the inspection is marked `truncated: true`; scope the read with `selector` or `target` for the rest. Page text ends with a `Form field values:` section listing filled fields as `Name: "value"`; passwords, one-time codes, card data and fields named as secrets are left out |
 | `screenshot` | `mode`: viewport, full page or element. `maxEdge` shrinks the stored image to that many pixels on its longest side. `saveAs` also saves the image, with `download_url`'s `saveAs` rules |
 | `pdf` | `landscape`, `printBackground`, `scale` 0.1 to 2.0, `pageRanges` |
 | `network_log` | `clear`. Recording starts at the first call; `clear: false` keeps the buffer |
 | `context_ask`, `context_neighbors` | `description` (required, up to 256 bytes) |
-| `wait_for` | `condition` and `timeoutMs` (both required) |
+| `wait_for` | `condition` and `timeoutMs` (both required). A `waitConditionTimedOut` message ends with the text, value, URL or ready state the last poll read, as does an `upload_files` or intent `expectedState` wait that times out |
 | `extract_structured` | `schema` (required), `purpose`. Needs `executionPolicy.visionAssist` |
+
+On Chromium, `inspect` and `form_snapshot` wait up to 2 seconds while a rendered element is marked `aria-busy="true"`. If it is still busy, `inspect` includes `pageBusy` configuration evidence and `form_snapshot` includes `pageBusy: true`. Read again for the settled state.
 
 `wait_for` conditions are objects with a `kind`:
 
@@ -133,7 +135,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `document` | `ready` |
 | `networkQuiet` | `idleMs`, `maxInFlight`, optional `ignoreUrlSubstrings`, `ignoreResourceTypes`, `ignoreLongLived` |
 
-`matcher` is `{"kind": "exact" | "contains" | "regex", "value": "..."}`.
+`matcher` is `{"kind": "exact" | "contains" | "regex", "value": "..."}`. `regex` uses Rust `regex` syntax, which has no look-around or backreferences.
 
 ### Acting on a page
 
@@ -159,11 +161,11 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 
 On Chromium, `navigate` with `waitUntil: "commit"` returns the committed URL with an empty title. Use `domContentLoaded` when the title matters. `interactive` adds a document settling check after `DOMContentLoaded`, and `networkIdle` waits for network idle before settling. See [Firefox navigation](../guides/firefox-companion.md#navigation) for its readiness behavior.
 
-A `callerKey` passed to `workflow_start` ties later results on that session to your job. Each `screenshot`, `checkpoint_save` and `intent_submit_and_verify` result then carries `evidenceKey`: `callerKey`, the page `url`, and the `sha256` of the result's screenshot (`null` when it has none). A `screenshot` with `saveAs` returns `savedTo`; a path the rules refuse, such as an existing file, fails the call with `policyDenied`.
+A `callerKey` passed to `workflow_start` ties later results on that session to your job. Each `screenshot`, `checkpoint_save` and `intent_submit_and_verify` result then carries `evidenceKey` with the `callerKey`, the page `url` when observed, and the `sha256` of the result's screenshot (`null` when it has none). A `screenshot` with `saveAs` requires `file:download` and returns `savedTo`. A refused path, such as an existing file, fails the call with `policyDenied`.
 
-`download_url` saves under the configured downloads directory. `saveAs` is relative to it or an absolute path inside it. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
+`download_url` saves under the configured downloads directory. `saveAs` names a file directly in it, as a file name or an absolute path; subdirectories are refused. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
 
-`selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu, and `selectOne` on a text box types the value and clicks the suggestion that reads it. A value no option reads fails with the options offered.
+`selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu or listbox, and `selectOne` on a text box types the value and clicks the suggestion that reads it. If the widget requires a separate search action, run that action first and use `selectOne` on the open results. `selectOne` verifies the choice after clicking. A value no option reads fails with the options offered.
 
 Boundary tools (`click_and_wait_for_*`, `intent_follow` with `boundary`, `intent_submit_and_verify`) accept `autoCheckpoint` to checkpoint around a page-changing step. `click` and the `click_and_wait_for_*` tools accept pinned `commandId` and `attemptId`.
 

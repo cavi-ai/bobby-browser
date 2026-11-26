@@ -76,6 +76,51 @@ async fn cdp_bind_failure_names_the_address_and_the_port_override() {
 }
 
 #[tokio::test]
+async fn a_failed_cdp_bind_preserves_the_previous_session_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config::AppConfig::default();
+    config.server.port = 0;
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.storage.authority_path = root.path().join("authority.json");
+    config.storage.scheduler_journal_path = root.path().join("jobs.jsonl");
+    config.browser.profiles_dir = root.path().join("profiles");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    config.browser.downloads_dir = root.path().join("downloads");
+    config.cdp.enabled = true;
+    config.cdp.port = occupied.local_addr().unwrap().port();
+
+    let ledger = config
+        .storage
+        .journal_path
+        .with_added_extension("sessions.json");
+    let snapshot = serde_json::to_vec(&serde_json::json!([{
+        "sessionId": types::SessionId::default(),
+        "owner": uuid::Uuid::new_v4()
+    }]))
+    .unwrap();
+    tokio::fs::write(&ledger, &snapshot).await.unwrap();
+    let startup = broker::StartupCredential::new(
+        "runtime-startup-test-bearer-00001".into(),
+        types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+        vec![types::Capability::SessionRead],
+        types::WireTimestamp::now() + jiff::SignedDuration::from_mins(10),
+    )
+    .unwrap();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        broker::serve(config, startup),
+    )
+    .await
+    .expect("startup rejects the occupied CDP port promptly")
+    .expect_err("startup should fail");
+    assert!(format!("{error:#}").contains("--cdp-port"), "{error:#}");
+    assert_eq!(tokio::fs::read(ledger).await.unwrap(), snapshot);
+}
+
+#[tokio::test]
 async fn cdp_listener_binds_runtime_for_an_issued_principal() {
     let (cdp, authority, _startup_bearer) = testing::spawn_test_cdp_listener(CdpConfig {
         enabled: true,

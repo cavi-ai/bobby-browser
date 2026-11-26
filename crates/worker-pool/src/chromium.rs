@@ -72,8 +72,9 @@ use zeroize::Zeroizing;
 use crate::{
     process_registry, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
-        resolve_target as resolve_browser_target, resolve_target_with_visibility,
+        css_only_selector, gather_candidates, inspect_page_scoped_target, page_frames,
+        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -433,6 +434,9 @@ pub struct ChromiumWorkerFactory {
     /// with the session. `Some(dir)` persists it across sessions instead, the
     /// Chromium counterpart to a Firefox companion's enrolled profile.
     durable_profile_dir: Option<PathBuf>,
+    /// A durable profile's Chrome uses the system keychain and password store
+    /// instead of the mock keychain; disposable profiles always use the mock.
+    system_keychain: bool,
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
@@ -455,6 +459,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -472,6 +477,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -511,6 +517,13 @@ impl ChromiumWorkerFactory {
         self
     }
 
+    /// Whether a durable profile's Chrome launches with the system keychain
+    /// and password store. Disposable profiles keep the mock keychain.
+    pub fn with_system_keychain(mut self, system_keychain: bool) -> Self {
+        self.system_keychain = system_keychain;
+        self
+    }
+
     fn chromium_config(&self, profile_dir: &Path) -> Result<ChromiumConfig, CommandError> {
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir)
@@ -532,6 +545,9 @@ impl ChromiumWorkerFactory {
         // password manager; disposable profiles have none to run.
         if self.durable_profile_dir.is_some() {
             builder = builder.installed_extensions();
+            if self.system_keychain {
+                builder = builder.system_keychain();
+            }
         }
         // The fingerprint screen is spoofed at the JS layer, but CSS media
         // queries are evaluated natively against the real window: a default
@@ -2842,6 +2858,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let url = page
             .url()
             .await
@@ -2852,6 +2869,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
+        let mut truncated = false;
         let (text, html, resolution) = if command
             .target
             .as_ref()
@@ -2877,7 +2895,8 @@ impl crate::ObservationEngine for ChromiumWorker {
             // `find_element("body")` builds a chromiumoxide Element via
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
-            let text = read_page_body_text(&page).await?;
+            let (text, cut) = read_bounded_page_body_text(&page).await?;
+            truncated = cut;
             let text = self.with_form_values(&page, page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
@@ -2911,9 +2930,13 @@ impl crate::ObservationEngine for ChromiumWorker {
             title: page_title_evidence(title),
             text: redact_secret_material(text),
             html: html.map(redact_secret_material),
+            truncated,
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
+        }
+        if !settled {
+            evidence.push(page_busy_evidence());
         }
         Ok(evidence)
     }
@@ -3103,6 +3126,7 @@ impl crate::ObservationEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let max_controls = max_controls.unwrap_or(512) as usize;
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let value: serde_json::Value = page
             .evaluate(crate::form_snapshot_expression_with_limit(
                 page_id,
@@ -3118,7 +3142,8 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        let mut snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        snapshot.page_busy = !settled;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
@@ -3152,6 +3177,11 @@ impl crate::ObservationEngine for ChromiumWorker {
         crate::targeting::password_manager_prompt_point(&page, &browser)
             .await
             .map(|point| (point.x, point.y))
+    }
+
+    async fn close_frame_overlay(&self, page_id: &PageId) -> Result<bool, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        crate::targeting::close_frame_overlay(&page).await
     }
 
     async fn element_at_point(
@@ -3754,6 +3784,13 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
         clear_first: bool,
     ) -> Result<(), CommandError> {
         refuse_dialog_covered_field(&prepared.page, &prepared.resolved).await?;
+        if prepared
+            .resolved
+            .close_foreign_popup(&prepared.page)
+            .await?
+        {
+            refuse_dialog_covered_field(&prepared.page, &prepared.resolved).await?;
+        }
         if crate::SessionSettings::humanization_enabled(self) {
             self.humanized_type_text(&prepared.page, &prepared.resolved, value, clear_first)
                 .await?;
@@ -3906,6 +3943,19 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
             ));
         }
         Ok(())
+    }
+
+    async fn take_peer_new_password(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<bool, CommandError> {
+        prepared
+            .resolved
+            .fill_secret(
+                &prepared.page,
+                crate::control_action_fill::PEER_NEW_PASSWORD_SCRIPT,
+            )
+            .await
     }
 }
 
@@ -4629,7 +4679,7 @@ impl WaitDom for ChromiumWaitDom<'_> {
         state: types::ElementState,
     ) -> Result<ElementProbe, CommandError> {
         let page = self.page;
-        let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
+        let resolved = if let Some(selector) = css_only_selector(target) {
             resolve_target_with_visibility(self.page_id, page, selector, None, false, None).await
         } else {
             let handle = self.browser.lock().await.as_ref().map(Browser::handle);
@@ -4763,20 +4813,6 @@ impl WaitDom for ChromiumWaitDom<'_> {
         })?;
         Ok(tracker.snapshot(filters).await)
     }
-}
-
-fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
-    target.css.as_deref().filter(|_| {
-        target.test_id.is_none()
-            && target.role.is_none()
-            && target.accessible_name.is_none()
-            && target.label.is_none()
-            && target.text.is_none()
-            && target.attributes.is_empty()
-            && target.frame_path.is_empty()
-            && target.shadow_path.is_empty()
-            && target.ordinal.is_none()
-    })
 }
 
 /// CDP reports a node removed from the page, or left in a replaced document, as gone.
@@ -4957,6 +4993,56 @@ async fn current_page(page: &Page) -> Option<(String, String)> {
     let url = page.url().await.ok()??;
     let title = page.get_title().await.ok()?.unwrap_or_default();
     Some((url, title))
+}
+
+/// Longest a page read waits for content the page marks as loading.
+const READ_BUSY_CAP: Duration = Duration::from_secs(2);
+
+/// Waits until no rendered element carries `aria-busy="true"`, up to
+/// [`READ_BUSY_CAP`]. `false` when the page was still busy at the cap.
+async fn settle_busy_content(page: &Page) -> bool {
+    let expression = format!(
+        "new Promise(resolve=>{{const end=Date.now()+{};\
+const busy=()=>[...document.querySelectorAll('[aria-busy=\"true\"]')]\
+.some(el=>el.checkVisibility?el.checkVisibility():true);\
+const tick=()=>{{if(!busy())return resolve(true);\
+if(Date.now()>=end)return resolve(false);setTimeout(tick,50)}};tick()}})",
+        READ_BUSY_CAP.as_millis()
+    );
+    match tokio::time::timeout(
+        READ_BUSY_CAP + Duration::from_secs(1),
+        page.evaluate(expression),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.into_value::<bool>().unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Evidence that a read returned content the page still marked as loading.
+fn page_busy_evidence() -> Evidence {
+    Evidence::Configuration {
+        name: "pageBusy".into(),
+        value: "true: the page still marked content as loading (aria-busy) when it was read; read again".into(),
+    }
+}
+
+/// Whole-page text, cut in the page at [`crate::MAX_INSPECT_TEXT_CHARS`] so a
+/// large page never ships its full text; the flag says the page had more.
+async fn read_bounded_page_body_text(page: &Page) -> Result<(String, bool), CommandError> {
+    let expression = format!(
+        "(() => {{const text=document.body?(document.body.innerText||''):'';\
+const max={};if(text.length<=max)return [text,false];\
+let cut=text.slice(0,max);if(/[\\uD800-\\uDBFF]$/.test(cut))cut=cut.slice(0,-1);\
+return [cut,true]}})()",
+        crate::MAX_INSPECT_TEXT_CHARS
+    );
+    page.evaluate(expression)
+        .await
+        .map_err(command_failed)?
+        .into_value::<(String, bool)>()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
@@ -6261,6 +6347,39 @@ mod tests {
     }
 
     #[test]
+    fn only_an_opted_out_durable_profile_launches_without_keychain_mocking() {
+        use super::ChromiumWorkerFactory;
+        let config = config::BrowserConfig {
+            executable: Some("/usr/bin/true".into()),
+            ..config::BrowserConfig::default()
+        };
+        let dir = std::path::Path::new("/profiles/p");
+        // The arguments the shared-profile launcher passes to Chrome.
+        let args = |factory: &ChromiumWorkerFactory| {
+            super::shared_chrome_launch_args(&factory.chromium_config(dir).unwrap())
+        };
+        let mocked = |args: &[String]| {
+            args.contains(&"--use-mock-keychain".to_string())
+                && args.contains(&"--password-store=basic".to_string())
+        };
+        let registry = tempfile::tempdir().unwrap();
+        let disposable =
+            ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into());
+        let durable = disposable.clone().with_durable_profile_dir(dir.into());
+        assert!(mocked(&args(&durable)), "{:?}", args(&durable));
+        let system = durable.with_system_keychain(true);
+        let system_args = args(&system);
+        assert!(
+            !system_args
+                .iter()
+                .any(|arg| arg == "--use-mock-keychain" || arg.starts_with("--password-store")),
+            "{system_args:?}"
+        );
+        let disposable = disposable.with_system_keychain(true);
+        assert!(mocked(&args(&disposable)), "{:?}", args(&disposable));
+    }
+
+    #[test]
     fn only_a_headless_launch_skips_the_startup_window() {
         use super::ChromiumWorkerFactory;
         let args = |headless: bool| {
@@ -6359,8 +6478,8 @@ mod tests {
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
         is_missing_css_node, should_retry_click_target_detach,
         should_retry_plain_click_target_drift, should_retry_transient_click_loss,
-        snapshot_iframe_owners, text_matches, unscoped_css_wait_selector, validate_clip,
-        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        snapshot_iframe_owners, text_matches, validate_clip, wait_should_retry_replaced_context,
+        ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
     };
     use crate::targeting::ACCEPTS_TEXT_SCRIPT;
     use types::{
@@ -6790,7 +6909,7 @@ mod tests {
         };
 
         assert_eq!(
-            unscoped_css_wait_selector(&target),
+            crate::targeting::css_only_selector(&target),
             Some("a[href='/customers/cus_atlas']")
         );
     }

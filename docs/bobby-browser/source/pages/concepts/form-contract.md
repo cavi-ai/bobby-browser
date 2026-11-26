@@ -45,18 +45,18 @@ For uploads, pass the current file control's `id` as `upload_files.controlId`. H
 
 ## Act on controls
 
-Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.
+Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once, apart from the `setText` retype below, and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.
 
 | Kind | Shape | Effect |
 |---|---|---|
-| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text |
+| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text. A replace with single-line text can retry once after a mismatched read-back if the resolved control still supports the action and is editable. Chromium checks that a dialog leaves the target reachable before using Escape to close a popup held open by another focused control outside dialogs (`aria-expanded="true"`). If focusing the field transfers focus to a cross-origin frame such as an inline menu, Chromium sends Escape and refocuses the field before typing. `type_text` also handles cross-origin frame menus unless the session humanizes input. |
 | `setChecked` | `{kind, checked}` | Set a checkbox or radio |
 | `selectOne` | `{kind, value}` | Select an option by value or visible label; a text box takes the suggestion that reads the value |
 | `selectMany` | `{kind, values}` | Select several options, or check a menu button's items |
 | `setFiles` | `{kind, paths}` | Set file input paths. Needs `file:upload` |
 | `clear` | `{kind}` | Empty the control |
 | `activate` | `{kind}` | Activate a link or button |
-| `passwordManagerFill` | `{kind}` | Watch a text, email or password field for the browser password manager's fill; the field is never clicked, focused or typed into. The `fill` and `completeForm` intents first click the manager's own prompt: on Chromium, 1Password's prompt frame directly; any other manager's prompt, found with vision. Needs `executionPolicy.passwordManager`; the filled value is never returned |
+| `passwordManagerFill` | `{kind}` | Watch a text, email or password field for the browser password manager's fill; the field is never clicked, focused or typed into. The `fill` and `completeForm` intents first click the manager's own prompt: on Chromium, 1Password's prompt frame directly; any other manager's prompt, found with vision. A prompt that cannot be pressed fails the intent only when the field is still empty. On Chromium, in a form with exactly two password fields, neither marked `current-password`, a manager value in the other field is copied into the targeted one inside the page. Needs `executionPolicy.passwordManager`; the filled value is never returned |
 | `credential` | `{kind, name}` | Fill a password field with the secret of the [`[[credentials]]`](../guides/configuration.md#credentials) entry `name`, only when the field's page origin is that entry's `origin`. The field is set and gets `input` and `change` events; it is never clicked, focused or typed into. Needs `executionPolicy.passwordManager`; the secret is never returned, logged or journaled |
 
 The `fill` and `completeForm` intents use the same vocabulary, without `activate`. See [Intent commands](../guides/intents.md).

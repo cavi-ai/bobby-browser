@@ -1398,6 +1398,7 @@ fn command_error_code(code: types::InterfaceErrorCode) -> types::ErrorCode {
         | InterfaceErrorCode::ArtifactDenied
         | InterfaceErrorCode::UnsupportedOperation => ErrorCode::PolicyDenied,
         InterfaceErrorCode::EngineUnreachable => ErrorCode::BrowserLaunchFailed,
+        InterfaceErrorCode::BrowserCommandFailed => ErrorCode::BrowserCommandFailed,
         InterfaceErrorCode::Internal => ErrorCode::Internal,
     }
 }

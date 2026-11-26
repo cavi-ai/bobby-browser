@@ -313,6 +313,10 @@
                 "string",
                 "null"
               ]
+            },
+            "truncated": {
+              "description": "`text` was cut at the page-text bound; present only when true.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1823,6 +1827,9 @@
           "maxItems": 512
         },
         "truncated": {
+          "type": "boolean"
+        },
+        "pageBusy": {
           "type": "boolean"
         },
         "pageDerived": {
