@@ -6,6 +6,8 @@
 
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays or can no longer be read: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - A `passwordManagerFill` intent whose manager prompt cannot be pressed completes when the field already holds the manager's value.
+- On Chromium, `setText` and non-humanized `type_text` press Escape on a frame from another origin that takes focus from the field, then focus the field again and type.
+- On Chromium, `intent_dismiss_obstruction` with no hints closes a frame from another origin that holds focus or covers the page's controls with Escape, without vision.
 - On Chromium, `passwordManagerFill` on a form with exactly two password fields, neither marked `current-password`, fills the targeted field with the value the manager put in the other.
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.

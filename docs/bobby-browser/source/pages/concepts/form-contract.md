@@ -49,7 +49,7 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 
 | Kind | Shape | Effect |
 |---|---|---|
-| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text |
+| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text. On Chromium, a frame from another origin that takes focus as the field is focused, such as an inline menu, gets Escape and the field is focused again before typing; `type_text` does the same unless the session humanizes input |
 | `setChecked` | `{kind, checked}` | Set a checkbox or radio |
 | `selectOne` | `{kind, value}` | Select an option by value or visible label; a text box takes the suggestion that reads the value |
 | `selectMany` | `{kind, values}` | Select several options, or check a menu button's items |

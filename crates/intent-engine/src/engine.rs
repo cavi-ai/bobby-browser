@@ -122,6 +122,13 @@ pub trait IntentBrowser: Send + Sync {
         None
     }
 
+    /// Closes a frame from another origin that holds focus or covers the
+    /// page's controls, such as an inline menu. `Ok(false)` when there is
+    /// none, an error when it stays open. Defaults to none.
+    async fn close_frame_overlay(&self, _page_id: &PageId) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+
     /// The viewport's width and height in CSS pixels, the units clicks take.
     /// Defaults to none, which leaves screenshot points unscaled.
     async fn viewport_size(&self, _page_id: &PageId) -> Option<(f64, f64)> {
@@ -3252,6 +3259,38 @@ async fn execute_dismiss_obstruction(
         }
         _ => true,
     };
+    // Without hints, a frame from another origin over the page's controls is
+    // the obstruction: it closes on Escape, with no vision.
+    if !hinted {
+        let purpose = match intent {
+            IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
+            _ => None,
+        };
+        let record = |verification: &str| {
+            intent_evidence(execution_record(
+                "dismissObstruction",
+                purpose.clone(),
+                "frameOverlay",
+                Vec::new(),
+                None,
+                verification,
+            ))
+        };
+        match browser.close_frame_overlay(page_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return IntentOutcome::Completed {
+                    evidence: vec![record("frameOverlayClosed")],
+                };
+            }
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error,
+                    evidence: vec![record("obstructionPersisted")],
+                };
+            }
+        }
+    }
     dismiss_target(intent, page_id, browser, vision, target, timeout_ms, hinted).await
 }
 

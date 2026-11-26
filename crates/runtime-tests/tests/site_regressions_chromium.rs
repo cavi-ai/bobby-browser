@@ -29,6 +29,8 @@ cases::every_case!(
     password_manager_fill_never_touches_the_field,
     password_manager_fill_requires_the_session_opt_in,
     password_manager_fill_completes_on_a_field_the_manager_filled,
+    set_text_closes_a_frame_menu_that_takes_the_fields_focus,
+    dismiss_obstruction_closes_a_frame_menu_without_vision,
     a_split_code_with_one_named_box_takes_the_code,
     select_one_picks_the_exact_option_of_an_aria_combobox,
     a_submit_without_expected_state_is_verified_by_the_page,

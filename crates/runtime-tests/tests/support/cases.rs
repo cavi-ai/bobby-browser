@@ -5473,6 +5473,150 @@ pub async fn password_manager_fill_sets_both_new_password_fields(rig: &Rig) {
     live.close().await;
 }
 
+/// The document of an inline menu served from another origin: it keeps focus
+/// on its own item and asks its host page to close it on Escape.
+fn inline_menu_frame() -> String {
+    page(
+        "Menu",
+        r#"<button id="item">Saved login</button>
+        <script>
+            const item = document.getElementById("item");
+            addEventListener("focus", () => item.focus());
+            if (document.hasFocus()) item.focus();
+            addEventListener("keydown", (event) => {
+                if (event.key === "Escape") parent.postMessage("close-menu", "*");
+            });
+        </script>"#,
+    )
+}
+
+/// A login form that, like a password manager's inline menu, opens a frame
+/// from `menu_url` under the email field when the field takes focus. The frame
+/// takes focus and covers the fields below; it closes on Escape for good.
+fn inline_menu_page(menu_url: &str) -> String {
+    page(
+        "Sign in",
+        &format!(
+            r#"<style>label {{ display: block; margin: 4px 0; }}</style>
+            <form id="login">
+                <label>Email <input id="user" type="email" autocomplete="username"></label>
+                <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+                <button id="go" type="button">Continue</button>
+            </form>
+            <p role="status" aria-label="Result" id="result">idle</p>
+            <script>
+                let menu = null;
+                let dismissed = false;
+                user.addEventListener("focus", () => {{
+                    if (menu || dismissed) return;
+                    const box = user.getBoundingClientRect();
+                    menu = document.createElement("iframe");
+                    menu.src = {menu_url:?};
+                    menu.style = `position:absolute;left:0;top:${{box.bottom + scrollY}}px;width:420px;height:160px;border:0;background:#fff;z-index:2147483647`;
+                    document.body.append(menu);
+                    menu.focus();
+                }});
+                addEventListener("message", (event) => {{
+                    if (event.data !== "close-menu" || !menu) return;
+                    menu.remove();
+                    menu = null;
+                    dismissed = true;
+                }});
+                document.getElementById("go").addEventListener("click", (event) => {{
+                    if (event.isTrusted) document.getElementById("result").textContent = "continued";
+                }});
+            </script>"#
+        ),
+    )
+}
+
+async fn inline_menu_session(rig: &Rig) -> (FixtureSite, FixtureSite, Value) {
+    let menu = FixtureSite::spawn(vec![("/menu", Route::Html(inline_menu_frame()))]).await;
+    let site = FixtureSite::spawn(vec![(
+        "/login",
+        Route::Html(inline_menu_page(&menu.url("/menu"))),
+    )])
+    .await;
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":site.url("/login")}),
+        )
+        .await;
+    assert_eq!(started["status"], "completed", "workflow_start: {started}");
+    (menu, site, started)
+}
+
+pub async fn set_text_closes_a_frame_menu_that_takes_the_fields_focus(rig: &Rig) {
+    let (_menu, _site, started) = inline_menu_session(rig).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let typed = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"textbox","accessibleName":"Email"},
+                   "action":{"kind":"setText","value":"agent@example.test"}}),
+        )
+        .await;
+    assert_eq!(
+        typed["status"], "completed",
+        "setText under a menu: {typed}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut emails = Vec::new();
+    controls_named(&snapshot, "Email", &mut emails);
+    assert_eq!(
+        emails.first().map(|control| control["state"].clone()),
+        Some(json!({"kind":"text","value":"agent@example.test"})),
+        "the email was not typed: {snapshot}"
+    );
+    live.close().await;
+}
+
+pub async fn dismiss_obstruction_closes_a_frame_menu_without_vision(rig: &Rig) {
+    let (_menu, _site, started) = inline_menu_session(rig).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let continue_button = json!({"role":"button","accessibleName":"Continue"});
+    let opened = live
+        .call(
+            "click",
+            json!({"target":{"role":"textbox","accessibleName":"Email"}}),
+        )
+        .await;
+    assert_eq!(opened["status"], "completed", "click Email: {opened}");
+    let covered = live
+        .call("click", json!({"target":continue_button.clone()}))
+        .await;
+    assert_eq!(
+        covered["error"]["code"], "targetObscured",
+        "the menu does not cover the button: {covered}"
+    );
+    let dismissed = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"Close the menu over the sign-in form"}),
+        )
+        .await;
+    assert_eq!(
+        dismissed["status"], "completed",
+        "dismiss the frame menu: {dismissed}"
+    );
+    let clicked = live.call("click", json!({"target":continue_button})).await;
+    assert_eq!(clicked["status"], "completed", "click Continue: {clicked}");
+    let landed = wait_for_result(&live, "continued").await;
+    assert_eq!(landed["status"], "completed", "the click missed: {landed}");
+    live.close().await;
+}
+
 pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
     let started =
