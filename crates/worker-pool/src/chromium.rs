@@ -3907,6 +3907,19 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
         }
         Ok(())
     }
+
+    async fn take_peer_new_password(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<bool, CommandError> {
+        prepared
+            .resolved
+            .fill_secret(
+                &prepared.page,
+                crate::control_action_fill::PEER_NEW_PASSWORD_SCRIPT,
+            )
+            .await
+    }
 }
 
 #[async_trait]

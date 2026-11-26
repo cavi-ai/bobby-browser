@@ -147,6 +147,15 @@ async fn password_manager_fill_clicks_the_managers_prompt() {
     cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn password_manager_fill_sets_both_new_password_fields() {
+    let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
+    let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
+    let rig = Rig::chromium_with_vision_node(&endpoint).await;
+    cases::password_manager_fill_sets_both_new_password_fields(&rig).await;
+}
+
 /// Screenshots of a display with two device pixels per CSS pixel are twice
 /// the viewport's size; a vision click read off one lands on its control.
 #[tokio::test(flavor = "multi_thread")]

@@ -150,10 +150,36 @@ pub trait ControlActionAdapter: Send + Sync {
         name: &str,
     ) -> Result<(), CommandError>;
 
+    /// Copies a value the password manager put in the other password field
+    /// of the control's form into this empty one; `false` when there is none.
+    async fn take_peer_new_password(
+        &self,
+        _prepared: &Self::Prepared,
+    ) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+
     fn decorate(&self, evidence: Vec<Evidence>) -> Vec<Evidence> {
         evidence
     }
 }
+
+/// Function body, with `el` bound to an empty password field, that copies the
+/// value of the other password field of a form holding exactly two, neither
+/// marked `current-password`, through the native setter with `input` and
+/// `change` events. The value stays in the page. Returns whether it was set.
+pub(crate) const PEER_NEW_PASSWORD_SCRIPT: &str = "\
+    if (!(el instanceof HTMLInputElement) || el.type !== 'password' || el.value) return false; \
+    const scope = el.form || el.getRootNode(); \
+    const fields = Array.from(scope.querySelectorAll('input[type=password]')); \
+    if (fields.length !== 2 || fields.some((field) => \
+        /\\bcurrent-password\\b/.test(field.getAttribute('autocomplete') || ''))) return false; \
+    const peer = fields.find((field) => field !== el && field.value); \
+    if (!peer) return false; \
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, peer.value); \
+    el.dispatchEvent(new Event('input', { bubbles: true })); \
+    el.dispatchEvent(new Event('change', { bubbles: true })); \
+    return true;";
 
 /// Validate, read, dispatch one primitive, and emit control-action evidence.
 pub async fn run<A: ControlActionAdapter + ?Sized>(
@@ -243,11 +269,19 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
         ControlAction::PasswordManagerFill => {
             // Only watches: the field is never clicked, focused, or typed
             // into, which would raise the browser's own credential dialogs.
+            // A sign-up suggestion that filled only the other new-password
+            // field is copied into this one.
             let deadline = tokio::time::Instant::now() + PASSWORD_MANAGER_FILL_WAIT;
             while tokio::time::Instant::now() < deadline {
                 match adapter.describe(&prepared, &command.target).await {
                     Ok(Some(control)) if !password_manager_filled(&control.state) => {
-                        tokio::time::sleep(PASSWORD_MANAGER_FILL_POLL).await;
+                        if !adapter
+                            .take_peer_new_password(&prepared)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            tokio::time::sleep(PASSWORD_MANAGER_FILL_POLL).await;
+                        }
                     }
                     _ => break,
                 }

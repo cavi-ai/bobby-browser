@@ -5395,6 +5395,84 @@ pub async fn password_manager_fill_completes_on_a_field_the_manager_filled(rig: 
     live.close().await;
 }
 
+/// A sign-up form whose two new-password fields the manager's suggestion
+/// fills only in part: a trusted click on its prompt fills the confirmation.
+fn password_manager_sign_up_page() -> String {
+    page(
+        "Create account",
+        r#"<form id="signup">
+            <label>Password <input id="pass" type="password" autocomplete="new-password"></label>
+            <label>Confirm password <input id="repeat" type="password" autocomplete="new-password"></label>
+            <button>Create account</button>
+        </form>
+        <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#ff00aa;color:#fff;display:flex;align-items:center;justify-content:center">Suggested password</div>
+        <p role="status" aria-label="Match" id="match">unset</p>
+        <script>
+            const match = document.getElementById("match");
+            const repeat = document.getElementById("repeat");
+            for (const input of [pass, repeat]) {
+                input.addEventListener("input", () => {
+                    match.textContent = pass.value && pass.value === repeat.value ? "match" : "mismatch";
+                });
+            }
+            document.getElementById("prompt").addEventListener("click", (event) => {
+                if (!event.isTrusted) return;
+                repeat.value = "fixture-new-secret";
+            });
+        </script>"#,
+    )
+}
+
+/// Needs a rig whose loopback vision node answers [`PASSWORD_MANAGER_PROMPT_POINT`].
+pub async fn password_manager_fill_sets_both_new_password_fields(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/signup",
+        Route::Html(password_manager_sign_up_page()),
+    )])
+    .await;
+    let started = start_password_manager_session(
+        rig,
+        &site.url("/signup"),
+        json!({"passwordManager":true,"visionAssist":true}),
+    )
+    .await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Use the suggested password",
+                   "hints":{"role":"textbox","accessibleName":"Password"},
+                   "value":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "passwordManagerFill on a sign-up form: {filled}"
+    );
+    assert!(
+        !filled.to_string().contains("fixture-new-secret"),
+        "the suggested password reached the caller: {filled}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    for name in ["Password", "Confirm password"] {
+        let mut fields = Vec::new();
+        controls_named(&snapshot, name, &mut fields);
+        assert_eq!(
+            fields.first().map(|control| control["state"].clone()),
+            Some(json!({"kind":"redacted","present":true})),
+            "{name} was not filled: {snapshot}"
+        );
+    }
+    let page = live.call("a11y_snapshot", json!({})).await.to_string();
+    assert!(page.contains("\"match\""), "the fields differ: {page}");
+    live.close().await;
+}
+
 pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
     let started =
