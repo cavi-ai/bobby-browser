@@ -1550,9 +1550,10 @@ fn advertised_output_shape(name: &str) -> Value {
             let mut schema = object(
                 json!({
                     "workflowId":id(),
+                    "sessionId":id(),
                     "checkpoint":json!({"type":"object"}),
                     "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
-                    "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+                    "workflows":array(id(), MAX_RECOVERABLE_WORKFLOWS)
                 }),
                 &[],
             );
