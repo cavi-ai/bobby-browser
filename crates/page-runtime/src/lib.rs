@@ -20,7 +20,9 @@ use workflow_journal::CommandJournal;
 mod context;
 pub mod perception;
 
-pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate};
+pub use adaptive::{
+    save_file_as, AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate,
+};
 pub use context::{ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;

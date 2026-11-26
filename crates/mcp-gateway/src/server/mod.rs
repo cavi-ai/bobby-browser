@@ -259,6 +259,8 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     workflow_handles: Arc<WorkflowHandles>,
+    /// `workflow_start` `callerKey` by the session it created.
+    caller_keys: std::sync::Mutex<BTreeMap<String, String>>,
     /// Sessions this connection opened and has not closed; `serve` closes
     /// them when the connection ends.
     sessions: Arc<connection_sessions::ConnectionSessions>,
@@ -331,6 +333,7 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             workflow_handles: Arc::new(WorkflowHandles::new()),
+            caller_keys: std::sync::Mutex::default(),
             sessions: Arc::default(),
             boundary_executions: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
@@ -1107,13 +1110,115 @@ impl Server {
         // have already completed. Preserve the explicit diagnostic paths.
         let compact = call.name != "command_execute"
             && call.arguments.get("evidenceDetail").and_then(Value::as_str) != Some("full");
+        let tool_name = call.name.clone();
+        let caller_key = call
+            .arguments
+            .get("callerKey")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let session_arg = call
+            .arguments
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let mut response = self
             .dispatch_named_tool(id, call, context, handle, defaulted_handle)
             .await;
+        self.apply_caller_key(&tool_name, caller_key, session_arg, &mut response);
         if compact {
             crate::response_projection::compact_tool_response(&mut response);
         }
         response
+    }
+
+    /// Records a `workflow_start` `callerKey` for the session it created, and
+    /// stamps keyed results of that session with `evidenceKey`.
+    fn apply_caller_key(
+        &self,
+        tool: &str,
+        caller_key: Option<String>,
+        session_arg: Option<String>,
+        response: &mut Value,
+    ) {
+        let Ok(mut keys) = self.caller_keys.lock() else {
+            return;
+        };
+        let outcome = response
+            .get("result")
+            .and_then(|result| result.get("structuredContent"));
+        let session = session_arg.or_else(|| {
+            let outcome = outcome?;
+            outcome
+                .get("sessionId")
+                .or_else(|| first_screenshot(outcome)?.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        match tool {
+            "workflow_start" => {
+                let completed = outcome
+                    .and_then(|outcome| outcome.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("completed");
+                if let (Some(key), Some(session), true) = (caller_key, session, completed) {
+                    if keys.len() >= MAX_CALLER_KEYS {
+                        keys.pop_first();
+                    }
+                    keys.insert(session, key);
+                }
+            }
+            "session_close" => {
+                if let Some(session) = session {
+                    keys.remove(&session);
+                }
+            }
+            "screenshot" | "checkpoint_save" | "intent_submit_and_verify" => {
+                if let Some(key) = session.and_then(|session| keys.get(&session)) {
+                    attach_evidence_key(response, key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Saves the screenshot a completed `screenshot` result names to `save_as`,
+    /// under `download_url` `saveAs` rules; a refused path fails the call.
+    async fn save_screenshot_as(&self, outcome: &mut Value, save_as: &str) {
+        if outcome.get("status").and_then(Value::as_str) != Some("completed") {
+            return;
+        }
+        let Some(artifact_id) = first_screenshot(outcome)
+            .and_then(|shot| shot.get("artifactId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let context = self.request_context();
+        let artifact = self
+            .resources
+            .read(&self.handle, &context, &artifact_id)
+            .await;
+        let saved = match (self.resources.downloads_root(), artifact) {
+            (Some(root), Ok(Some(artifact))) => {
+                page_runtime::save_file_as(root, save_as, &types::CommandId::new(), &artifact.bytes)
+                    .await
+            }
+            _ => Err(types::CommandError {
+                code: types::ErrorCode::PolicyDenied,
+                message: "saveAs needs a configured downloads directory and a readable screenshot"
+                    .into(),
+                layer: types::ErrorLayer::Interface,
+                retryable: false,
+            }),
+        };
+        match saved {
+            Ok(()) => outcome["savedTo"] = json!(save_as),
+            Err(error) => {
+                outcome["status"] = json!("failed");
+                outcome["error"] = json!(error);
+            }
+        }
     }
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
@@ -2355,6 +2460,60 @@ fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &value[..end]
+}
+
+/// Sessions whose `callerKey` the server keeps; the oldest is dropped first.
+const MAX_CALLER_KEYS: usize = 1024;
+
+fn first_screenshot(outcome: &Value) -> Option<&Value> {
+    outcome
+        .get("evidence")?
+        .as_array()?
+        .iter()
+        .find(|item| item["kind"] == "screenshot")
+}
+
+/// `evidenceKey`: the caller key with the URL and digest of the result's
+/// screenshot, or the checkpoint's or post-state's URL when it has none.
+fn attach_evidence_key(response: &mut Value, caller_key: &str) {
+    let Some(outcome) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("structuredContent"))
+        .filter(|outcome| outcome.is_object())
+    else {
+        return;
+    };
+    let shot = first_screenshot(outcome);
+    let url = shot
+        .and_then(|shot| shot.get("url"))
+        .or_else(|| outcome.get("currentUrl"))
+        .or_else(|| outcome.get("postState")?.get("url"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let sha256 = shot
+        .and_then(|shot| shot.get("sha256"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    outcome["evidenceKey"] = json!({"callerKey": caller_key, "url": url, "sha256": sha256});
+    sync_structured_text(response);
+}
+
+/// Keeps the text block identical to `structuredContent` after a change.
+fn sync_structured_text(response: &mut Value) {
+    let Some(result) = response.get_mut("result") else {
+        return;
+    };
+    let Some(text) = result.get("structuredContent").map(Value::to_string) else {
+        return;
+    };
+    if let Some(block) = result
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+        .and_then(|content| content.first_mut())
+        .filter(|block| block["type"] == "text")
+    {
+        block["text"] = Value::String(text);
+    }
 }
 
 fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {

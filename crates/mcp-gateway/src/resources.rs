@@ -103,6 +103,11 @@ impl ArtifactResources {
         resources
     }
 
+    /// The configured downloads directory, when this server has one.
+    pub(crate) fn downloads_root(&self) -> Option<&std::path::Path> {
+        self.downloads_root.as_deref()
+    }
+
     pub(crate) fn max_download_bytes(&self) -> usize {
         self.max_download_bytes
     }

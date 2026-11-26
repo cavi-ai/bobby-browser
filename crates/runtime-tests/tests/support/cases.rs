@@ -104,6 +104,7 @@ macro_rules! every_case {
             a_split_code_takes_one_character_per_box,
             a_wrong_code_fails_without_echoing_it,
             a_completed_form_and_submit_attach_a_compact_screenshot,
+            screenshots_and_submits_carry_the_caller_key,
             $($extra,)*
         }
     };
@@ -173,6 +174,77 @@ pub async fn a_completed_form_and_submit_attach_a_compact_screenshot(rig: &Rig) 
                            "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}),
             )
             .await,
+    );
+    live.close().await;
+}
+
+/// A `callerKey` given to `workflow_start` ties each screenshot and submit
+/// result to the caller's job, with the page URL and the image digest.
+pub async fn screenshots_and_submits_carry_the_caller_key(rig: &Rig) {
+    let form = page(
+        "Form",
+        r#"<form method="post" action="/sent"><button type="submit">Send</button></form>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/form", Route::Html(form)),
+        (
+            "/sent",
+            Route::Html(page("Sent", "<main><h1>Sent</h1></main>")),
+        ),
+    ])
+    .await;
+    let shot_of = |result: &Value| -> Value {
+        result["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["kind"] == "screenshot")
+            .cloned()
+            .unwrap_or_else(|| panic!("no screenshot: {result}"))
+    };
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":site.url("/form"),"callerKey":"job-7"}),
+        )
+        .await;
+    let live = Live::started(rig, started);
+
+    let shot = live
+        .call("screenshot", json!({"saveAs":"job-7-form.png"}))
+        .await;
+    assert_eq!(shot["status"], "completed", "{shot}");
+    let evidence = shot_of(&shot);
+    assert_eq!(
+        shot["evidenceKey"],
+        json!({"callerKey":"job-7","url":site.url("/form"),"sha256":evidence["sha256"]}),
+        "{shot}"
+    );
+    assert_eq!(shot["savedTo"], "job-7-form.png", "{shot}");
+    let saved = std::fs::read(rig.storage_root().join("downloads/job-7-form.png")).unwrap();
+    assert_eq!(Some(saved.len() as u64), evidence["bytes"].as_u64());
+    let again = live
+        .call("screenshot", json!({"saveAs":"job-7-form.png"}))
+        .await;
+    assert_eq!(
+        again["status"], "failed",
+        "an existing file is kept: {again}"
+    );
+
+    let submitted = live
+        .call(
+            "intent_submit_and_verify",
+            json!({"purpose":"send the form","screenshot":true,
+                   "hints":{"role":"button","accessibleName":"Send"},
+                   "expectedState":{"condition":{"kind":"url",
+                       "matcher":{"kind":"contains","value":"/sent"}},"timeoutMs":5000}}),
+        )
+        .await;
+    assert_eq!(submitted["status"], "completed", "{submitted}");
+    assert_eq!(
+        submitted["evidenceKey"],
+        json!({"callerKey":"job-7","url":site.url("/sent"),"sha256":shot_of(&submitted)["sha256"]}),
+        "{submitted}"
     );
     live.close().await;
 }

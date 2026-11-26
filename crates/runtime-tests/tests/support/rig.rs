@@ -5,11 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::journey_budget::{self, Meter, Usage};
+use artifact_store::ArtifactStore;
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use interface_conformance::live::all_capabilities;
-use interface_core::AuthorityStore;
+use interface_core::{
+    ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, EventStore, SessionOwnershipRegistry,
+};
 use jiff::SignedDuration as Duration;
-use mcp_gateway::Server;
+use mcp_gateway::{ArtifactResources, Server};
 use runtime_tests::{InstalledFirefoxConfig, InstalledFirefoxRuntime};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
@@ -283,8 +286,38 @@ impl Rig {
             .expect("issue token")
             .expose_once();
         let handle = authority.verify(&token).await.expect("verify token");
-        let server = Server::new(Arc::new(AuthenticatedRuntime::new(service, handle)))
-            .with_workflow_dirs(workflow_dirs);
+        // Artifact resources as the production server builds them.
+        const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+        const MAX_ARTIFACTS: usize = 1024;
+        let (ownership, recorder) =
+            SessionOwnershipRegistry::bounded(BrowserConfig::default().max_active);
+        let artifact_store =
+            ArtifactStore::new(root.path().join("artifacts"), MAX_ARTIFACT_BYTES, 16_384);
+        let artifact_reader = ArtifactReader::new(
+            artifact_store.clone(),
+            ownership,
+            MAX_ARTIFACT_BYTES,
+            ArtifactOwnershipLimits {
+                max_records: MAX_ARTIFACTS,
+                max_bytes: (MAX_ARTIFACT_BYTES * MAX_ARTIFACTS) as u64,
+            },
+        )
+        .expect("artifact reader");
+        let resources = ArtifactResources::production(
+            artifact_reader,
+            artifact_store,
+            root.path().join("downloads"),
+            MAX_ARTIFACT_BYTES,
+            MAX_ARTIFACTS,
+        );
+        let server = Server::production(
+            Arc::new(AuthenticatedRuntime::with_session_ownership(
+                service, handle, recorder,
+            )),
+            EventStore::new(16_384),
+            resources,
+        )
+        .with_workflow_dirs(workflow_dirs);
         let rig = Self {
             server,
             next_id: AtomicU64::new(1),
@@ -403,7 +436,7 @@ impl<'a> Live<'a> {
         Self::started(rig, started)
     }
 
-    fn started(rig: &'a Rig, started: Value) -> Live<'a> {
+    pub fn started(rig: &'a Rig, started: Value) -> Live<'a> {
         assert_eq!(started["status"], "completed", "workflow_start: {started}");
         let live = Live {
             rig,

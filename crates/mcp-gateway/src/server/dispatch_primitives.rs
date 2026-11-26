@@ -256,8 +256,13 @@ impl Server {
                         max_edge: input.max_edge,
                     }),
                 );
-                self.submit_envelope(context, envelope, handle, call.name.as_str())
-                    .await
+                let mut response = self
+                    .submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await;
+                if let (Ok(outcome), Some(save_as)) = (&mut response, input.save_as.as_deref()) {
+                    self.save_screenshot_as(outcome, save_as).await;
+                }
+                response
             }
             "wait_for" => {
                 let input: WaitForArgs = match bounded_parse(call.arguments) {

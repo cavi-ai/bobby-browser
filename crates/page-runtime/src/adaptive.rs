@@ -734,6 +734,19 @@ impl CommittedDownload {
     }
 }
 
+/// Writes `bytes` to `save_as` under the rules of `download_url` `saveAs`: a
+/// new file directly below `downloads_root`, given relative to it or as an
+/// absolute path inside it.
+pub async fn save_file_as(
+    downloads_root: &Path,
+    save_as: &str,
+    staging_id: &types::CommandId,
+    bytes: &[u8],
+) -> Result<(), CommandError> {
+    let destination = DownloadDestination::validate(downloads_root, save_as, staging_id).await?;
+    destination.stage(bytes).await?.commit()?.cleanup()
+}
+
 impl SecureDownloadRoot {
     #[cfg(unix)]
     fn open(root: &Path) -> Result<Self, CommandError> {

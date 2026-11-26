@@ -58,6 +58,9 @@ pub(crate) struct WorkflowStartArgs {
     pub(crate) zigzagzig: bool,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    /// Read by the gateway after the call; echoed in later results.
+    #[serde(default, rename = "callerKey")]
+    pub(crate) _caller_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +468,7 @@ page_scoped_args!(InspectArgs {
 page_scoped_args!(ScreenshotArgs {
     mode: Option<types::ScreenshotMode>,
     max_edge: Option<u32>,
+    save_as: Option<String>,
 });
 
 page_scoped_args!(WaitForArgs {
