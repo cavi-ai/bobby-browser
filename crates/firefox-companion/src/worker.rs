@@ -4515,11 +4515,13 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             )
         })?;
-        Ok(Some(types::TargetSpec {
-            css: Some(css.into()),
-            frame_path: target.frame_path.clone(),
-            ..types::TargetSpec::default()
-        }))
+        Ok(
+            dom_engine::decode_enclosing_dialog(Some(css.into()))?.map(|css| types::TargetSpec {
+                css: Some(css),
+                frame_path: target.frame_path.clone(),
+                ..types::TargetSpec::default()
+            }),
+        )
     }
 
     async fn read_attribute(
@@ -5539,6 +5541,16 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         let replaced = settle_typing_focus(&self.transport, &context, &selector_json).await?;
 
         let humanize = self.humanization_enabled.load(Ordering::Relaxed);
+        // A simulated mistake can trigger a page action before the correction
+        // arrives, such as advancing focus to the next code box.
+        let literal_typing = (!humanize).then(|| {
+            TypingSimulator::new(
+                behavioral_engine::TextConfig::default()
+                    .with_correction_probability(0.0)
+                    .with_copy_paste_probability(0.0),
+            )
+        });
+        let simulator = literal_typing.as_ref().unwrap_or(&self.typing_simulator);
         let typing_actions = self.with_session_random(|random| {
             let mut actions = Vec::new();
             if humanize {
@@ -5553,7 +5565,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     });
                 }
             }
-            actions.extend(self.typing_simulator.generate_with_clear(
+            actions.extend(simulator.generate_with_clear(
                 random,
                 &command.value,
                 command.clear_first,

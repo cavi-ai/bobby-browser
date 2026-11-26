@@ -3022,6 +3022,28 @@ pub async fn named_dismissal_checks_its_own_dialog(rig: &Rig) {
     live.close().await;
 }
 
+/// An external close control must not fall back to checking only itself
+/// when it explicitly controls more than one visible dialog.
+pub async fn named_dismissal_rejects_multiple_associated_dialogs(rig: &Rig) {
+    let body = r#"<div id="settings" role="dialog" aria-label="Settings">Settings are open</div>
+        <div id="help" role="dialog" aria-label="Help">Help is open</div>
+        <button aria-controls="settings help" onclick="this.remove()">Close</button>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let result = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"dismiss the settings prompt","timeoutMs":500}),
+        )
+        .await;
+    assert_eq!(result["error"]["code"], "targetAmbiguous", "{result}");
+    let snapshot = live.snapshot(json!({})).await;
+    for text in ["Settings are open", "Help is open", "Close"] {
+        assert!(page_text_contains(&snapshot, text), "{snapshot}");
+    }
+    live.close().await;
+}
+
 /// Closing a modal reveals a banner with its own Close button: dismiss
 /// completes because the clicked control is gone, whatever else shares its name.
 pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
@@ -6711,6 +6733,69 @@ pub async fn leaving_a_split_code_step_early_fails_verification(rig: &Rig) {
     accepted.close().await;
 }
 
+/// Losing unnamed code boxes proves neither that every digit was typed
+/// nor that the page accepted the code.
+pub async fn disappearing_unnamed_code_boxes_require_a_verified_outcome(rig: &Rig) {
+    let body = r#"<h1>Enter the verification code</h1><form id="code-step">
+        <input aria-label="Security code" inputmode="numeric" maxlength="1">
+        <input inputmode="numeric" maxlength="1">
+        <input inputmode="numeric" maxlength="1">
+        <input inputmode="numeric" maxlength="1">
+        </form><p id="result" role="status" aria-label="Result"></p>
+        <script>
+          const step = document.getElementById("code-step");
+          const digits = [...step.querySelectorAll("input")];
+          step.addEventListener("input", ({target}) => {
+            if (!target.value) return;
+            const expired = location.pathname === "/expired";
+            const next = digits[digits.indexOf(target) + 1];
+            if (!expired && next) {
+              next.focus();
+              return;
+            }
+            const typed = digits.map(digit => digit.value).join("");
+            step.remove();
+            document.getElementById("result").textContent =
+              typed === "4829" ? "Code accepted" : "Session expired";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(
+        ["/expired", "/accepted"]
+            .into_iter()
+            .map(|path| (path, Route::Html(page("Code", body))))
+            .collect(),
+    )
+    .await;
+    let expired = Live::open(rig, &site.url("/expired")).await;
+    let result = expired
+        .call("intent_enter_code", json!({"code":"4829"}))
+        .await;
+    assert_eq!(result["error"]["code"], "verificationFailed", "{result}");
+    let snapshot = expired.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&snapshot, "Session expired"),
+        "{snapshot}"
+    );
+    expired.close().await;
+
+    let accepted = Live::open(rig, &site.url("/accepted")).await;
+    let result = accepted
+        .call(
+            "intent_enter_code",
+            json!({"code":"4829","expectedState":{"condition":{"kind":"text",
+                   "target":{"role":"status","accessibleName":"Result"},
+                   "matcher":{"kind":"contains","value":"Code accepted"}},"timeoutMs":1000}}),
+        )
+        .await;
+    let snapshot = accepted.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&snapshot, "Code accepted"),
+        "{result} {snapshot}"
+    );
+    assert_eq!(result["status"], "completed", "{result}");
+    accepted.close().await;
+}
+
 /// Eight boxes where only the first has a name: the code is typed from the
 /// first box while the page moves focus on input, and every box is read back.
 pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {
@@ -7541,6 +7626,46 @@ pub async fn select_one_uses_its_own_open_search_results(rig: &Rig) {
         page_text_contains(&page, "Topic clicked: History"),
         "{page}"
     );
+    live.close().await;
+}
+
+/// A live announcement that copies a roleless suggestion's text must not
+/// win a document-wide match just because it appears first.
+pub async fn select_one_refuses_ambiguous_roleless_live_rows(rig: &Rig) {
+    let body = r#"<div id="announcement" aria-live="polite"></div>
+        <label for="city">City</label><input id="city" role="combobox" autocomplete="off">
+        <div id="results" aria-live="polite"></div><p id="picked"></p>
+        <script>
+          const city = document.getElementById("city");
+          const picked = document.getElementById("picked");
+          city.addEventListener("input", () => {
+            for (const [id, message] of [["announcement", "Announcement clicked"],
+                                         ["results", "Suggestion clicked"]]) {
+              const row = document.createElement("div");
+              row.textContent = city.value;
+              row.addEventListener("click", () => { picked.textContent = message; });
+              document.getElementById(id).replaceChildren(row);
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/cities", Route::Html(page("Cities", body)))]).await;
+    let live = Live::open(rig, &site.url("/cities")).await;
+    let result = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"City"},"action":{"kind":"selectOne","value":"Paris"}}),
+        )
+        .await;
+    let snapshot = live.snapshot(json!({})).await;
+    assert!(
+        !page_text_contains(&snapshot, "Announcement clicked"),
+        "{snapshot}"
+    );
+    assert!(
+        !page_text_contains(&snapshot, "Suggestion clicked"),
+        "{snapshot}"
+    );
+    assert_eq!(result["error"]["code"], "targetAmbiguous", "{result}");
     live.close().await;
 }
 

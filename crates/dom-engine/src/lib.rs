@@ -30,8 +30,8 @@ pub fn control_label_function() -> &'static str {
 }
 
 pub use page_dom::{
-    composed_query_all_function, composed_query_function, enclosing_dialog_script,
-    ELEMENT_VISIBILITY_SCRIPT,
+    composed_query_all_function, composed_query_function, decode_enclosing_dialog,
+    enclosing_dialog_script, ELEMENT_VISIBILITY_SCRIPT,
 };
 pub use shadow_segment::{
     exact_target_selector, resolve_shadow_segment, shadow_probe_error, shadow_segment_descriptor,

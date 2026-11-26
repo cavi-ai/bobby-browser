@@ -30,6 +30,14 @@ async fn named_dismissal_and_split_code_regressions() {
     cases::leaving_a_split_code_step_early_fails_verification(&rig).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn dismissing_multiple_dialogs_and_unnamed_code_boxes() {
+    let rig = Rig::firefox().await;
+    cases::named_dismissal_rejects_multiple_associated_dialogs(&rig).await;
+    cases::disappearing_unnamed_code_boxes_require_a_verified_outcome(&rig).await;
+}
+
 /// The cases are a table of boxed futures walked by one loop. Awaiting each
 /// case inline made this test's debug-build poll frame grow with every case
 /// and overflowed the 2 MB test-thread stack before the first case finished.
