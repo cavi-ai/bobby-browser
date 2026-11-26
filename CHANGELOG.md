@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `intent_detect_challenge` classifies a Turnstile widget as its own `turnstile` challenge type.
+
 ### Fixed
 
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.

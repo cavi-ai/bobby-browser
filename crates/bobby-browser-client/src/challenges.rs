@@ -11,6 +11,8 @@ pub enum ChallengeType {
     TextCaptcha,
     ImageGridCaptcha,
     MfaCodeEntry,
+    /// A Turnstile "verify you are human" widget.
+    Turnstile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

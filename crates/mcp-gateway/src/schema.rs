@@ -3136,7 +3136,8 @@ fn evidence_variants() -> Vec<Value> {
                             "recaptchaV3",
                             "textCaptcha",
                             "imageGridCaptcha",
-                            "mfaCodeEntry"
+                            "mfaCodeEntry",
+                            "turnstile"
                         ]},
                         "confidence":{"type":"number"},
                         "region":object(
