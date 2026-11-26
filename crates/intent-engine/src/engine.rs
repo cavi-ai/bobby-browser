@@ -3345,15 +3345,15 @@ async fn dismiss_target(
     .await
     {
         Ok(located) => located,
-        Err(outcome) => {
-            // A purpose that names no control on the page leaves the controls
-            // named as dismissals.
-            let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if error.code == ErrorCode::TargetNotFound);
+        Err(mut outcome) => {
+            // A purpose that names no control on the page, or that vision could
+            // not place, leaves the controls named as dismissals.
+            let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if matches!(error.code, ErrorCode::TargetNotFound | ErrorCode::VisionAssistFailed));
             if !hinted && missed {
                 if let Some(dismissed) =
                     dismiss_by_control_name(intent, page_id, browser, vision, timeout_ms).await
                 {
-                    return match dismissed {
+                    outcome = match dismissed {
                         IntentOutcome::Failed {
                             error,
                             mut evidence,
@@ -3366,7 +3366,7 @@ async fn dismiss_target(
                                 None,
                                 "obstructionPersisted",
                             )));
-                            IntentOutcome::Failed { error, evidence }
+                            return IntentOutcome::Failed { error, evidence };
                         }
                         other => other,
                     };
@@ -3496,8 +3496,8 @@ async fn dismiss_target(
 }
 
 /// The failure an unhinted dismissal ends in while dialogs are open, with its
-/// verification label: a vision fallback stands only once one of those
-/// dialogs closed, and a plain miss becomes `obstructionSuspected`.
+/// verification label: a fallback stands only once one of those dialogs
+/// closes, and a plain miss becomes `obstructionSuspected`.
 type DialogFailure = (CommandError, Vec<Evidence>, &'static str);
 
 async fn judge_against_open_dialogs(
@@ -3512,10 +3512,10 @@ async fn judge_against_open_dialogs(
         IntentOutcome::Completed { evidence } => {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
             loop {
-                let Some(now) = open_dialogs_now(page_id, browser, target).await else {
-                    return Ok(IntentOutcome::Completed { evidence });
-                };
-                if !dialogs_not_in(dialogs_before, &now).is_empty() {
+                if open_dialogs_now(page_id, browser, target)
+                    .await
+                    .is_some_and(|now| !dialogs_not_in(dialogs_before, &now).is_empty())
+                {
                     return Ok(IntentOutcome::Completed { evidence });
                 }
                 if std::time::Instant::now() >= deadline {
@@ -3527,7 +3527,7 @@ async fn judge_against_open_dialogs(
             let error = CommandError {
                 code: ErrorCode::ObstructionSuspected,
                 message:
-                    "obstructionPersisted; the vision fallback acted and the dialog is still open"
+                    "obstructionPersisted; the dismissal action ran but no recorded dialog was verified closed"
                         .into(),
                 layer: ErrorLayer::Page,
                 retryable: false,

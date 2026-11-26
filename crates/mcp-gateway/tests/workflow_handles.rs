@@ -2013,6 +2013,37 @@ async fn page_open_failure_with_failing_browser_close_never_publishes_a_handle_a
 }
 
 #[tokio::test]
+async fn recovery_status_session_listing_matches_its_output_schema() {
+    let (_catalog_live, tools) = advertised_tools().await;
+    let schema = &tools
+        .iter()
+        .find(|tool| tool["name"] == "recovery_status")
+        .expect("recovery_status advertised")["outputSchema"];
+    let validator = jsonschema::validator_for(schema).expect("recovery_status schema compiles");
+
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 280, json!({"profile":"recovery-listing"})).await;
+    let started = &started["result"]["structuredContent"];
+    let listing = call_tool(
+        &live.server,
+        281,
+        "recovery_status",
+        json!({"sessionId":started["sessionId"]}),
+    )
+    .await;
+    let mut listing = listing["result"]["structuredContent"].clone();
+    assert_eq!(listing["sessionId"], started["sessionId"], "{listing}");
+    assert!(listing["workflows"].is_array(), "{listing}");
+    // A session with a checkpointed workflow lists that workflow's id.
+    listing["workflows"] = json!([started["workflowId"]]);
+    let errors: Vec<String> = validator
+        .iter_errors(&listing)
+        .map(|error| error.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?} {listing}");
+}
+
+#[tokio::test]
 async fn workflow_start_real_success_and_all_terminal_failure_branches_match_output_schema() {
     let (_catalog_live, tools) = advertised_tools().await;
     let schema = &tools
