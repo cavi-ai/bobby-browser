@@ -11,6 +11,15 @@
 - A replacing `setText` with single-line text can retry once after a mismatched read-back if the resolved control still supports the action and is editable.
 - Chromium `setText` can close a popup held open by another focused control outside dialogs before typing into a reachable field.
 - `intent_complete_form` scales its deadline with the text it types. If a fill or reveal step reaches the deadline, it returns `deadlineExceeded` with the current field name and evidence from earlier fills and completed reveal clicks.
+- A `schemaViolation` inside a nullable argument points at the broken field, so a `text` target or `nearText` hint without a matcher `kind` gets `allowedKinds` `exact`, `contains` and `regex`.
+- Chromium resolves a `css`-only target that matches no action candidate as a CSS selector, so `inspect`, `a11y_snapshot` and element `screenshot` reach landmarks, containers, class and combinator selectors.
+- Chromium element scripts that return `null` decode as null and script exceptions surface as JavaScript errors, so `control_action` on a tab, option or other element outside `form_snapshot` says it is not a form control instead of `call_js_fn_by_value returned no value`.
+- `form_snapshot` and `control_action` read a native select's selected options past the 512-option cap, so `selectOne` on a long select verifies the chosen option.
+- The `recovery_status` output schema accepts the session listing `{sessionId, workflows}` with workflow ids, so MCP clients that validate output no longer reject it.
+- Chromium `selectOne` on a combobox whose suggestions carry no option role leaves live-region and visually hidden announcements out of the options it reads and lists.
+- `intent_dismiss_obstruction` without hints clicks a visible close or decline control when vision cannot place the dismissal, as it does when the purpose names no control.
+- `intent_enter_code` on a code field that leaves the page as the code goes in judges the code by the page that follows instead of failing `targetDetached` or `verificationFailed`.
+- The MCP tools reference names the Rust `regex` syntax of `regex` matchers and states that `download_url` `saveAs` names a file directly in the downloads directory.
 
 ## 0.28.0 - 2026-11-23
 

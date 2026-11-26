@@ -2297,6 +2297,195 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_select_one_verifies_an_option_past_the_snapshot_option_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    let options: String = (0..2000)
+        .map(|index| format!("<option>University {index}</option>"))
+        .collect();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("data:text/html,<label>School <select>{options}</select></label>"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let evidence = worker_pool::input_or_default(worker.input())
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target: types::FormControlTarget {
+                    attributes: Default::default(),
+                    role: "combobox".into(),
+                    accessible_name: "School".into(),
+                    ordinal: None,
+                    frame_path: Vec::new(),
+                    shadow_path: Vec::new(),
+                },
+                action: ControlAction::SelectOne {
+                    value: "University 1500".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        format!("{evidence:?}").contains("University 1500"),
+        "{evidence:?}"
+    );
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn combobox_options_leave_out_screen_reader_announcements() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    // Focus announces a menu in a visually hidden live region; typing shows
+    // suggestion rows without option roles.
+    let page = "<label>City <input role=combobox aria-autocomplete=list id=city></label><script>const city=document.getElementById('city');city.addEventListener('focus',()=>{if(document.getElementById('said'))return;const said=document.createElement('div');said.id='said';said.setAttribute('aria-live','polite');said.style.cssText='position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)';said.textContent='Saved logins menu is available. Press down arrow to select.';document.body.appendChild(said)});city.addEventListener('input',()=>{let list=document.getElementById('list');if(!list){list=document.createElement('div');list.id='list';document.body.appendChild(list)}list.innerHTML='<div>Miami, FL, USA</div><div>Miami Beach, FL, USA</div>'});</script>";
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("data:text/html,{page}"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker_pool::input_or_default(worker.input())
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target: types::FormControlTarget {
+                    attributes: Default::default(),
+                    role: "combobox".into(),
+                    accessible_name: "City".into(),
+                    ordinal: None,
+                    frame_path: Vec::new(),
+                    shadow_path: Vec::new(),
+                },
+                action: ControlAction::SelectOne {
+                    value: "Miami, Florida".into(),
+                },
+            },
+        )
+        .await
+        .expect_err("no suggestion reads the value");
+    assert!(
+        error.message.contains("Miami, FL, USA") && !error.message.contains("Saved logins"),
+        "{error:?}"
+    );
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_on_an_element_that_is_not_a_form_control_names_the_reason() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<div role=tablist><div role=tab id=overview tabindex=0>Overview</div></div><div role=listbox><div role=option tabindex=0>Florida</div></div>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    for (role, name) in [("tab", "Overview"), ("option", "Florida")] {
+        let error = worker_pool::input_or_default(worker.input())
+            .control_action(
+                &page_id,
+                &ControlActionCommand {
+                    target: types::FormControlTarget {
+                        attributes: Default::default(),
+                        role: role.into(),
+                        accessible_name: name.into(),
+                        ordinal: None,
+                        frame_path: Vec::new(),
+                        shadow_path: Vec::new(),
+                    },
+                    action: ControlAction::Activate,
+                },
+            )
+            .await
+            .expect_err("a tab or option is not a form control");
+        assert_eq!(error.code, ErrorCode::TargetNotFound, "{role}: {error:?}");
+        assert!(
+            error.message.contains("not a form control") && error.message.contains("click"),
+            "{role}: {error:?}"
+        );
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
@@ -3563,6 +3752,146 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
             .join(format!("{artifact_id}.png"))
             .is_file());
     }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn css_only_targets_resolve_elements_that_are_not_action_candidates() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,<main><h1>Posting</h1>",
+                    "<div role=dialog class='sheet open'><p>Dialog body</p></div>",
+                    "<div class=conv-list><p>Ada Lovelace</p></div>",
+                    "<button class=pick-action onclick='this.hidden=true'>First choice</button>",
+                    "<button class=pick-action onclick='this.hidden=true'>Second choice</button>",
+                    "</main>",
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let css = |css: &str| TargetSpec {
+        css: Some(css.into()),
+        ..TargetSpec::default()
+    };
+
+    let inspected = worker_pool::observation_or_default(worker.observation())
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: Some(css("main")),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::Inspection { text, .. } = &inspected[0] else {
+        panic!("expected Evidence::Inspection, got {inspected:?}");
+    };
+    assert!(text.contains("Posting"), "{text}");
+
+    let snapshot = worker_pool::observation_or_default(worker.observation())
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(64),
+                target: Some(css(".conv-list")),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        format!("{snapshot:?}").contains("Ada Lovelace")
+            && !format!("{snapshot:?}").contains("Dialog body"),
+        "{snapshot:?}"
+    );
+
+    let shot = worker_pool::capture_or_default(worker.capture())
+        .capture_screenshot(
+            &page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Element {
+                    target: Box::new(css("div.sheet.open")),
+                },
+                max_edge: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&shot[0], Evidence::Screenshot { width, height, .. } if *width > 0 && *height > 0),
+        "{shot:?}"
+    );
+    let input = worker_pool::input_or_default(worker.input());
+    let mut click = ClickCommand {
+        selector: String::new(),
+        target: Some(css("main > .pick-action")),
+        boundary: false,
+        expected_url: None,
+        modifiers: Vec::new(),
+    };
+    let error = input
+        .click(&page_id, &click)
+        .await
+        .expect_err("ambiguous CSS click");
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous, "{error:?}");
+
+    click.target.as_mut().unwrap().allow_best_match = true;
+    let matched = input.click(&page_id, &click).await.unwrap();
+    assert!(
+        matched.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution {
+                best_match_authorized: true,
+                ..
+            }
+        )),
+        "{matched:?}"
+    );
+
+    click.target.as_mut().unwrap().allow_best_match = false;
+    let matched = input.click(&page_id, &click).await.unwrap();
+    assert!(
+        matched.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution {
+                best_match_authorized: false,
+                ..
+            }
+        )),
+        "{matched:?}"
+    );
+    let missed = input.click(&page_id, &click).await.unwrap_err();
+    assert_eq!(missed.code, ErrorCode::TargetNotFound, "{missed:?}");
+
     worker.close().await.unwrap();
 }
 
