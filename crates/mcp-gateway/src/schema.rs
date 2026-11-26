@@ -3253,7 +3253,8 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "pageId":id(),
                 "nodes":array(json!({"$ref":"#/$defs/AccessibilityNode"}), 2048),
-                "truncated":{"type":"boolean"}
+                "truncated":{"type":"boolean"},
+                "redactionReason":string(1, 512)
             }),
             &["pageId", "nodes", "truncated"],
         ),

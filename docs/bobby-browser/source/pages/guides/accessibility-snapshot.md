@@ -36,6 +36,8 @@ Each node is `{role, name, children?}`. Form controls add optional state:
 | `valueMin`, `valueMax` | Range bounds |
 | `target` | `{role, accessibleName, ordinal?}` for actionable nodes |
 
+Text that looks like a credential, and the contents of password, payment and one-time-code fields, read `"[redacted]"`. Over MCP, a snapshot that holds such text carries `redactionReason`, which says so.
+
 Repeated role and name pairs get zero-based `ordinal` values in tree order. Ordinals count every matching control on the page, even ones cut by `maxNodes`. A node whose name is redacted has no `target`.
 
 A snapshot nested in a compact MCP result, such as `postState`, keeps the first 10 options of each list inside a combobox and counts the rest in `optionsOmitted`; `selectOne` still matches any option. `a11y_snapshot` and `evidenceDetail: "full"` return every option. MCP results carry each text once. A node with a `target` has no `name`; read `target.accessibleName`. A list item, row, cell or heading whose descendants carry its text has no `name`. `StaticText` children that repeat their parent's name are omitted, as are bullet `ListMarker` nodes.
