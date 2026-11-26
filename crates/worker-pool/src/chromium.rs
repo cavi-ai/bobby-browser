@@ -2316,7 +2316,7 @@ async fn press(
     resolved.click(page).await
 }
 
-fn pointer_check(
+pub(crate) fn pointer_check(
     (hit, cover): (PointerHit, Option<crate::CoveringElement>),
 ) -> Result<(), CommandError> {
     match hit {
@@ -3142,7 +3142,11 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let mut snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        let mut raw = crate::form_snapshot::decode_raw_form_snapshot(encoded)?;
+        let browser = self.browser_handle().await?;
+        add_unreachable_frame_forms(&page, &browser, max_controls, &mut raw).await;
+        let mut snapshot =
+            crate::form_snapshot::normalize_form_snapshot(page_id.clone(), raw, max_controls)?;
         snapshot.page_busy = !settled;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
@@ -3155,6 +3159,25 @@ impl crate::ObservationEngine for ChromiumWorker {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
         gather_candidates(&page, target, Some(&browser)).await
+    }
+
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        let resolved =
+            resolve_browser_target(page_id, &page, "", Some(target), Some(&browser)).await?;
+        Ok(resolved
+            .enclosing_dialog(&page)
+            .await?
+            .map(|css| TargetSpec {
+                css: Some(css),
+                frame_path: target.frame_path.clone(),
+                ..TargetSpec::default()
+            }))
     }
 
     async fn read_attribute(
@@ -3662,12 +3685,11 @@ impl crate::InputEngine for ChromiumWorker {
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         if let Some(encoded) = resolved.form_control(&page).await? {
-            let control = crate::decode_form_control(&encoded, unnamed_control_target())?;
-            refuse_shown_files(&control.state, &path_strings)?;
+            refuse_shown_files_on_control(&encoded, &path_strings)?;
         }
         let digests = crate::upload::content_digests(paths)?;
         upload_cache.commit(resolved_uploads);
-        resolved.set_files(&page, path_strings.clone()).await?;
+        resolved.set_files(&page, path_strings).await?;
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
@@ -5265,16 +5287,21 @@ fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError 
     }
 }
 
-/// A target for a control read outside a control action.
-fn unnamed_control_target() -> types::FormControlTarget {
-    types::FormControlTarget {
+/// Checks a control read outside a control action, before setting its files.
+pub(crate) fn refuse_shown_files_on_control(
+    encoded: &str,
+    paths: &[String],
+) -> Result<(), CommandError> {
+    let target = types::FormControlTarget {
         attributes: Default::default(),
         role: String::new(),
         accessible_name: String::new(),
         ordinal: None,
         frame_path: Vec::new(),
         shadow_path: Vec::new(),
-    }
+    };
+    let control = crate::decode_form_control(encoded, target)?;
+    refuse_shown_files(&control.state, paths)
 }
 
 /// An upload into a file control that already holds or shows other files
@@ -5448,13 +5475,134 @@ fn find_iframe_node<'a>(
     go(nodes, name, &mut 0, occurrence)
 }
 
-/// Descends one level into iframes, same-process or from another site, so the
-/// snapshot does not stop at `Iframe` nodes. Each frame's compacted tree, read
-/// through the session that serves it, is spliced under its parent-tree
-/// `Iframe` node and every in-frame target is stamped with the role/name/ordinal
-/// hop that re-resolves the iframe element at action time. `max_nodes` bounds
-/// the composed tree, kept in document order: a frame is read only while its
-/// owner is kept. Returns whether anything was left out.
+/// Adds the forms of frames the page's script cannot read, from another site
+/// or sandboxed, to `raw`.
+async fn add_unreachable_frame_forms(
+    page: &Page,
+    browser: &BrowserHandle,
+    max_controls: usize,
+    raw: &mut crate::form_snapshot::RawFormSnapshot,
+) {
+    let mut frames = 0;
+    let mut pending = vec![(page.clone(), None, Vec::new())];
+    while let Some((session, frame, path)) = pending.pop() {
+        if path.len() >= crate::targeting::MAX_TARGET_PATH_DEPTH {
+            continue;
+        }
+        let context_id = match frame {
+            Some(frame) => match session.frame_execution_context(frame).await {
+                Ok(context_id) => context_id,
+                Err(_) => continue,
+            },
+            None => None,
+        };
+        let Ok(iframes) = crate::targeting::iframe_candidates(&session, context_id).await else {
+            continue;
+        };
+        let scope = crate::targeting::LocatorScope::Context(context_id);
+        let visible: Vec<&dom_engine::Candidate> =
+            iframes.iter().filter(|other| other.state.visible).collect();
+        for candidate in visible.iter().copied() {
+            let Ok(Some(child)) =
+                crate::targeting::owned_frame(&session, Some(browser), &scope, &[], candidate)
+                    .await
+            else {
+                continue;
+            };
+            let Ok(child_context) = child
+                .session
+                .frame_execution_context(child.frame.clone())
+                .await
+            else {
+                continue;
+            };
+            let mut child_path = path.clone();
+            child_path.push(types::SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: candidate.name.clone().unwrap_or_default(),
+                ordinal: iframe_hop_ordinal(&visible, candidate),
+            });
+            // A frame its parent's script can read is in the parent's snapshot.
+            let readable = evaluate_by_value::<bool>(
+                &child.session,
+                child_context,
+                "(()=>{try{return Boolean(window.parent.document)}catch{return false}})()".into(),
+            )
+            .await
+            .unwrap_or(true);
+            if !readable {
+                let remaining = max_controls
+                    .saturating_sub(raw.controls.len())
+                    .min(types::MAX_FORM_SNAPSHOT_CONTROLS);
+                if remaining == 0 {
+                    raw.truncated = true;
+                    break;
+                }
+                let Ok(first_stamp) = reserve_frame_control_stamps(page, remaining).await else {
+                    raw.truncated = true;
+                    continue;
+                };
+                let framed = evaluate_by_value::<String>(
+                    &child.session,
+                    child_context,
+                    crate::form_snapshot::frame_form_snapshot_expression(remaining, first_stamp),
+                )
+                .await
+                .and_then(|encoded| crate::form_snapshot::decode_raw_form_snapshot(&encoded));
+                if let Ok(framed) = framed {
+                    frames += 1;
+                    crate::form_snapshot::append_frame_form_snapshot(
+                        raw,
+                        framed,
+                        &child_path,
+                        frames,
+                    );
+                }
+            }
+            pending.push((child.session, Some(child.frame), child_path));
+        }
+    }
+}
+
+/// Advances the main document's cursor in a single evaluation before another
+/// document can stamp controls. The range stays reserved even if that frame
+/// disappears or a concurrent snapshot reaches it out of order.
+async fn reserve_frame_control_stamps(page: &Page, count: usize) -> Result<u32, CommandError> {
+    let cursor = format!("{}-next", dom_engine::CONTROL_STAMP_ATTRIBUTE);
+    evaluate_by_value(
+        page,
+        None,
+        format!(
+            "(()=>{{
+                const root=document.documentElement;
+                const first=Number(root.getAttribute('{cursor}'))||1;
+                const end=first+{count};
+                if(!Number.isInteger(first)||first<1||end>999999999)throw Error('invalid control stamp range');
+                root.setAttribute('{cursor}',String(end));
+                return first;
+            }})()"
+        ),
+    )
+    .await
+}
+
+async fn evaluate_by_value<T: serde::de::DeserializeOwned>(
+    page: &Page,
+    context_id: Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>,
+    expression: String,
+) -> Result<T, CommandError> {
+    let mut params = chromiumoxide::cdp::js_protocol::runtime::EvaluateParams::new(expression);
+    params.context_id = context_id;
+    params.return_by_value = Some(true);
+    page.evaluate(params)
+        .await
+        .map_err(command_failed)?
+        .into_value()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
+}
+
+/// Splices each iframe's accessibility tree beneath its owner. A frame's
+/// targets carry the hop that re-resolves its owner at action time.
 async fn descend_a11y_iframes(
     page: &Page,
     browser: &BrowserHandle,
@@ -5504,11 +5652,12 @@ async fn descend_a11y_iframes(
     let scoped_iframes: Vec<_> = iframes
         .iter()
         .filter(|candidate| {
-            allowed_owners.is_none_or(|allowed| {
-                candidate_backend_ids
-                    .iter()
-                    .any(|(id, other)| other.id == candidate.id && allowed.contains(id))
-            })
+            candidate.role.as_deref() == Some("iframe")
+                && allowed_owners.is_none_or(|allowed| {
+                    candidate_backend_ids
+                        .iter()
+                        .any(|(id, other)| other.id == candidate.id && allowed.contains(id))
+                })
         })
         .collect();
     let mut truncated = false;

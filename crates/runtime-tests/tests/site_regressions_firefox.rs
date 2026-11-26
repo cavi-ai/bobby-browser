@@ -22,6 +22,14 @@ async fn associated_labels_and_plain_downloads() {
     cases::plain_click_reports_a_completed_download(&rig).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn named_dismissal_and_split_code_regressions() {
+    let rig = Rig::firefox().await;
+    cases::named_dismissal_checks_its_own_dialog(&rig).await;
+    cases::leaving_a_split_code_step_early_fails_verification(&rig).await;
+}
+
 /// The cases are a table of boxed futures walked by one loop. Awaiting each
 /// case inline made this test's debug-build poll frame grow with every case
 /// and overflowed the 2 MB test-thread stack before the first case finished.

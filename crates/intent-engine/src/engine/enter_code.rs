@@ -486,12 +486,19 @@ pub(super) async fn execute_enter_code(
             return outcome;
         }
     } else {
-        for (field, chunk) in &chunks {
-            if run.moved_on {
-                break;
-            }
+        for (index, (field, chunk)) in chunks.iter().enumerate() {
             if let Err(outcome) = run.fill(field, chunk, split).await {
                 return outcome;
+            }
+            if run.moved_on && index + 1 < chunks.len() {
+                return run.failed(
+                    Run::error(
+                        ErrorCode::VerificationFailed,
+                        "the page left the code step before every character was entered",
+                    ),
+                    Vec::new(),
+                    "verifyFailed",
+                );
             }
         }
         if let Err(outcome) = run.verify_filled(&chunks, split).await {
