@@ -645,7 +645,22 @@ impl ResolvedTarget {
                 self.eval::<bool>(page, "el.focus(); return true").await?;
             }
         }
-        let replaced = self.settle_focus(page).await?;
+        let mut replaced = self.settle_focus(page).await?;
+        // A frame from another origin that took focus with the field, such as
+        // an inline menu, gets Escape; the field is then focused again.
+        if self
+            .eval::<bool>(page, crate::typed_focus::FOREIGN_FRAME_FOCUS_SCRIPT)
+            .await
+            .unwrap_or(false)
+        {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+            tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+            self.eval::<bool>(page, "el.focus(); return true").await?;
+            replaced = self.settle_focus(page).await?;
+        }
         if clear_first && replaced {
             self.clear_focused(page).await?;
         } else if clear_first {
@@ -2833,6 +2848,36 @@ pub(crate) async fn page_frames(
             }
         }
     }
+}
+
+/// How long a frame overlay gets to close after Escape.
+const FRAME_OVERLAY_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Closes a frame from another origin that holds focus or covers the page's
+/// controls with Escape. `Ok(false)` when there is none; an error when it stays.
+pub(crate) async fn close_frame_overlay(page: &Page) -> Result<bool, CommandError> {
+    let found = |focus: bool| async move {
+        page.evaluate(format!(
+            "({})({focus})",
+            crate::obstruction::FRAME_OVERLAY_SCRIPT
+        ))
+        .await
+        .map_err(cdp_error)?
+        .into_value::<bool>()
+        .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
+    };
+    if !found(true).await? {
+        return Ok(false);
+    }
+    page.press_key("Escape").await.map_err(cdp_error)?;
+    tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+    if found(false).await? {
+        return Err(target_error(
+            ErrorCode::ObstructionSuspected,
+            crate::obstruction::FRAME_OVERLAY_PERSISTED,
+        ));
+    }
+    Ok(true)
 }
 
 /// Extension frames that hold a password manager's own sign-in prompt. Only

@@ -124,6 +124,7 @@ impl worker_pool::ObservationEngine for ChallengeWorker {
             title: "ZigZagZig fixture".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         }])
     }
 }

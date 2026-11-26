@@ -57,6 +57,7 @@ fn matching_evidence() -> Vec<Evidence> {
             title: "Step Two".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         },
         Evidence::Element {
             selector: "#name".into(),
@@ -119,6 +120,7 @@ fn evaluates_every_checkpoint_invariant_with_actionable_failures() {
             title: "Wrong".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         }],
     );
     assert!(!mismatched.is_match());
@@ -418,6 +420,7 @@ impl worker_pool::ObservationEngine for RecoveryWorker {
             }
             .into(),
             html: None,
+            truncated: false,
         }])
     }
 }

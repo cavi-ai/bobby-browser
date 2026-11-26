@@ -171,6 +171,12 @@ pub trait ObservationEngine: Send + Sync {
         None
     }
 
+    /// Closes a frame from another origin that holds focus or covers the
+    /// page's controls. Default: `Ok(false)`, none found.
+    async fn close_frame_overlay(&self, _page_id: &PageId) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+
     /// The page's current URL, read best-effort without mutating page state.
     /// Default: `None`, leaving `PageRuntime` with whatever URL the command's
     /// own evidence reported.

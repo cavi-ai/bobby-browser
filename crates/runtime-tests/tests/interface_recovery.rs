@@ -140,6 +140,7 @@ impl worker_pool::ObservationEngine for TestWorker {
             title: "fixture".into(),
             text: "fixture".into(),
             html: None,
+            truncated: false,
         }])
     }
 }

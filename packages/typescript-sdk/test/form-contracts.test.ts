@@ -121,3 +121,8 @@ test("file state carries the file names a widget shows", () => {
   file.state = { kind: "files", count: 0, names: [7] };
   assert.equal(isFormSnapshot(value), false);
 });
+
+test("busy form snapshots preserve the optional pageBusy marker", () => {
+  assert.equal(isFormSnapshot({ ...snapshot(), pageBusy: true }), true);
+  assert.equal(isFormSnapshot({ ...snapshot(), pageBusy: "true" }), false);
+});

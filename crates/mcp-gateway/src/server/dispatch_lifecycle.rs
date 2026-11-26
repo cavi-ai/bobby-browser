@@ -185,8 +185,16 @@ impl Server {
                                 return Err(navigation_error);
                             }
                         };
-                    let navigation_completed =
-                        matches!(navigation_outcome, types::CommandOutcome::Completed { .. });
+                    // A load that ran out of time keeps its page: the document may
+                    // still finish and can be read or navigated again.
+                    let keep_page = match &navigation_outcome {
+                        types::CommandOutcome::Completed { .. } => true,
+                        types::CommandOutcome::RetryableFailure { error, .. }
+                        | types::CommandOutcome::Failed { error, .. } => {
+                            error.code == types::ErrorCode::DeadlineExceeded
+                        }
+                        _ => false,
+                    };
                     if let types::CommandOutcome::Completed { evidence, .. } = &navigation_outcome {
                         if let Some(types::Evidence::Navigation { url, .. }) = evidence.first() {
                             page.url = Some(url.clone());
@@ -198,7 +206,7 @@ impl Server {
                         .as_object_mut()
                         .expect("page state serializes as an object");
                     object.insert("navigationOutcome".to_owned(), to_json(navigation_outcome)?);
-                    if !navigation_completed {
+                    if !keep_page {
                         let (cleanup_context, cleanup_envelope) = primitive_envelope(
                             context,
                             session_id,

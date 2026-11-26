@@ -481,6 +481,9 @@ pub enum Evidence {
         title: String,
         text: String,
         html: Option<String>,
+        /// `text` was cut at the page-text bound; present only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     /// Result of a boundary submit that used `networkQuiet` or no expected
     /// state as its postcondition. This classifies the settled page without
@@ -1038,6 +1041,10 @@ pub enum RuntimeError {
     /// resubmitting them unchanged is the right move once the engine is up.
     #[error("{0}")]
     EngineUnreachable(String),
+    /// A browser command failed. The worker's error keeps its code and
+    /// whether resubmitting the same call can succeed.
+    #[error("browser command failed: {}", .0.message)]
+    Command(CommandError),
     #[error("internal error: {0}")]
     Internal(String),
 }

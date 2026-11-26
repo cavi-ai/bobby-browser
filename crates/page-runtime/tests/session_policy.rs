@@ -117,6 +117,7 @@ impl worker_pool::ObservationEngine for RecordingWorker {
             title: "Fixture".into(),
             text: "page".into(),
             html: None,
+            truncated: false,
         }])
     }
 }

@@ -66,7 +66,7 @@ export interface JobStatusResponse {
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
 export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "context:read" | "browser:mutate" | "network:egress" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
-export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "internal";
+export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "browserCommandFailed" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
   layer: ErrorLayer;
@@ -146,7 +146,7 @@ export interface ExecutionRecord {
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
-  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; pageDerived?: true }
+  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; truncated?: true; pageDerived?: true }
   | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[]; sha256?: string[] }
@@ -248,7 +248,7 @@ export interface FormControl { id: string; formId?: string | null; groupId?: str
 export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
-export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageDerived?: true; }
+export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageBusy?: boolean; pageDerived?: true; }
 /**
  * The unified mutation vocabulary for form controls. Used both as the
  * `controlAction` primitive's payload and as {@link FillIntent} /

@@ -121,6 +121,7 @@ impl worker_pool::ObservationEngine for BoundaryWorker {
             title: "Boundary fixture".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         }])
     }
 }
@@ -282,6 +283,7 @@ impl worker_pool::ObservationEngine for RetryWorker {
             title: "Retry fixture".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         }])
     }
 }
@@ -926,6 +928,7 @@ impl worker_pool::ObservationEngine for ChallengeWorker {
             title: "Challenge fixture".into(),
             text: String::new(),
             html: None,
+            truncated: false,
         }])
     }
 }

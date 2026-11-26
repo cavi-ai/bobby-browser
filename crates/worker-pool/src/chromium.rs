@@ -2858,6 +2858,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let url = page
             .url()
             .await
@@ -2868,6 +2869,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
+        let mut truncated = false;
         let (text, html, resolution) = if command
             .target
             .as_ref()
@@ -2893,7 +2895,8 @@ impl crate::ObservationEngine for ChromiumWorker {
             // `find_element("body")` builds a chromiumoxide Element via
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
-            let text = read_page_body_text(&page).await?;
+            let (text, cut) = read_bounded_page_body_text(&page).await?;
+            truncated = cut;
             let text = self.with_form_values(&page, page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
@@ -2927,9 +2930,13 @@ impl crate::ObservationEngine for ChromiumWorker {
             title: page_title_evidence(title),
             text: redact_secret_material(text),
             html: html.map(redact_secret_material),
+            truncated,
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
+        }
+        if !settled {
+            evidence.push(page_busy_evidence());
         }
         Ok(evidence)
     }
@@ -3119,6 +3126,7 @@ impl crate::ObservationEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let max_controls = max_controls.unwrap_or(512) as usize;
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let value: serde_json::Value = page
             .evaluate(crate::form_snapshot_expression_with_limit(
                 page_id,
@@ -3134,7 +3142,8 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        let mut snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        snapshot.page_busy = !settled;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
@@ -3168,6 +3177,11 @@ impl crate::ObservationEngine for ChromiumWorker {
         crate::targeting::password_manager_prompt_point(&page, &browser)
             .await
             .map(|point| (point.x, point.y))
+    }
+
+    async fn close_frame_overlay(&self, page_id: &PageId) -> Result<bool, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        crate::targeting::close_frame_overlay(&page).await
     }
 
     async fn element_at_point(
@@ -3929,6 +3943,19 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
             ));
         }
         Ok(())
+    }
+
+    async fn take_peer_new_password(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<bool, CommandError> {
+        prepared
+            .resolved
+            .fill_secret(
+                &prepared.page,
+                crate::control_action_fill::PEER_NEW_PASSWORD_SCRIPT,
+            )
+            .await
     }
 }
 
@@ -4966,6 +4993,56 @@ async fn current_page(page: &Page) -> Option<(String, String)> {
     let url = page.url().await.ok()??;
     let title = page.get_title().await.ok()?.unwrap_or_default();
     Some((url, title))
+}
+
+/// Longest a page read waits for content the page marks as loading.
+const READ_BUSY_CAP: Duration = Duration::from_secs(2);
+
+/// Waits until no rendered element carries `aria-busy="true"`, up to
+/// [`READ_BUSY_CAP`]. `false` when the page was still busy at the cap.
+async fn settle_busy_content(page: &Page) -> bool {
+    let expression = format!(
+        "new Promise(resolve=>{{const end=Date.now()+{};\
+const busy=()=>[...document.querySelectorAll('[aria-busy=\"true\"]')]\
+.some(el=>el.checkVisibility?el.checkVisibility():true);\
+const tick=()=>{{if(!busy())return resolve(true);\
+if(Date.now()>=end)return resolve(false);setTimeout(tick,50)}};tick()}})",
+        READ_BUSY_CAP.as_millis()
+    );
+    match tokio::time::timeout(
+        READ_BUSY_CAP + Duration::from_secs(1),
+        page.evaluate(expression),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.into_value::<bool>().unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Evidence that a read returned content the page still marked as loading.
+fn page_busy_evidence() -> Evidence {
+    Evidence::Configuration {
+        name: "pageBusy".into(),
+        value: "true: the page still marked content as loading (aria-busy) when it was read; read again".into(),
+    }
+}
+
+/// Whole-page text, cut in the page at [`crate::MAX_INSPECT_TEXT_CHARS`] so a
+/// large page never ships its full text; the flag says the page had more.
+async fn read_bounded_page_body_text(page: &Page) -> Result<(String, bool), CommandError> {
+    let expression = format!(
+        "(() => {{const text=document.body?(document.body.innerText||''):'';\
+const max={};if(text.length<=max)return [text,false];\
+let cut=text.slice(0,max);if(/[\\uD800-\\uDBFF]$/.test(cut))cut=cut.slice(0,-1);\
+return [cut,true]}})()",
+        crate::MAX_INSPECT_TEXT_CHARS
+    );
+    page.evaluate(expression)
+        .await
+        .map_err(command_failed)?
+        .into_value::<(String, bool)>()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
