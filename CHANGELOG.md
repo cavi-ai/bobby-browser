@@ -15,6 +15,7 @@
 - The `recovery_status` output schema accepts the session listing `{sessionId, workflows}` with workflow ids, so MCP clients that validate output no longer reject it.
 - Chromium `selectOne` on a combobox whose suggestions carry no option role leaves live-region and visually hidden announcements out of the options it reads and lists.
 - `intent_dismiss_obstruction` without hints clicks a visible close or decline control when vision cannot place the dismissal, as it does when the purpose names no control.
+- `intent_enter_code` on a code field that leaves the page as the code goes in judges the code by the page that follows instead of failing `targetDetached` or `verificationFailed`.
 - The MCP tools reference names the Rust `regex` syntax of `regex` matchers and states that `download_url` `saveAs` names a file directly in the downloads directory.
 
 ## 0.28.0 - 2026-11-23

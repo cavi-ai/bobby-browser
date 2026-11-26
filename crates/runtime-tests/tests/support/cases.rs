@@ -6108,6 +6108,42 @@ pub async fn a_submit_without_expected_state_is_verified_by_the_page(rig: &Rig) 
     live.close().await;
 }
 
+/// A code field whose page signs in once the last digit lands: the field is
+/// gone before it can be read back, and the page that follows decides.
+pub async fn a_code_field_that_submits_itself_completes(rig: &Rig) {
+    let step = r#"<h1>Check your email</h1><p>We sent a code to a***@example.com</p>
+        <form id="verify"><label for="code">Verification code</label>
+        <input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+        <button type="submit">Verify</button></form><p id="note"></p>"#;
+    let verify = format!(
+        r#"check = () => {{
+          document.getElementById("code").value === "{GOOD_CODE}" ? accept() : reject();
+        }};
+        app.addEventListener("input", (event) => {{
+          if (event.target.id === "code" && event.target.value.length === 6) check();
+        }});"#
+    );
+    let site = FixtureSite::spawn(vec![(
+        "/signin",
+        Route::Html(code_step_page(step, &verify)),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let submitted = submit_sign_in(&live).await;
+    assert_code_required(&submitted);
+
+    let entered = live
+        .call(
+            "intent_enter_code",
+            json!({"code":"482 913","expectedState": url_contains_home()}),
+        )
+        .await;
+    assert_eq!(entered["status"], "completed", "{entered}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page.to_string().contains("Welcome back"), "{page}");
+    live.close().await;
+}
+
 /// Eight boxes where only the first has a name: the code is typed from the
 /// first box while the page moves focus on input, and every box is read back.
 pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {
