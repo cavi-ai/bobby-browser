@@ -539,8 +539,10 @@ impl ResolvedTarget {
         &self,
         page: &Page,
     ) -> Result<Option<String>, CommandError> {
-        self.eval(page, &dom_engine::enclosing_dialog_script(false))
-            .await
+        let selector = self
+            .eval(page, &dom_engine::enclosing_dialog_script(false))
+            .await?;
+        dom_engine::decode_enclosing_dialog(selector)
     }
 
     /// The element read as one form control (JSON text), or `None` when it is
@@ -816,6 +818,9 @@ impl ResolvedTarget {
         let started = Instant::now();
         let option = loop {
             let found: ComboboxOption = self.eval(page, &find).await?;
+            if found.ambiguous {
+                return Err(ambiguous_roleless_option());
+            }
             let wait = if found.loading {
                 COMBOBOX_LOADING_WAIT
             } else {
@@ -985,7 +990,9 @@ impl ResolvedTarget {
                 let press = format!(
                     "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_PRESS}"
                 );
-                self.eval::<bool>(page, &press).await?;
+                if !self.eval::<bool>(page, &press).await? {
+                    return Err(ambiguous_roleless_option());
+                }
             }
         }
         Ok(())
@@ -1003,7 +1010,8 @@ impl ResolvedTarget {
         );
         let mut last = None;
         for _ in 0..COMBOBOX_SETTLE_READS {
-            let point: ComboboxPoint = self.eval(page, &read).await?;
+            let point: Option<ComboboxPoint> = self.eval(page, &read).await?;
+            let point = point.ok_or_else(ambiguous_roleless_option)?;
             let current = point.hit.then_some((point.x, point.y));
             if current.is_some() && current == last {
                 return Ok(current);
@@ -1316,6 +1324,8 @@ struct ComboboxOption {
     #[serde(default)]
     loading: bool,
     #[serde(default)]
+    ambiguous: bool,
+    #[serde(default)]
     tracks_selection: bool,
 }
 
@@ -1340,6 +1350,13 @@ struct ComboboxItems {
     next: Option<String>,
     x: Option<f64>,
     y: Option<f64>,
+}
+
+fn ambiguous_roleless_option() -> CommandError {
+    target_error(
+        ErrorCode::TargetAmbiguous,
+        "more than one roleless option matches the requested value",
+    )
 }
 
 fn option_json(value: &str) -> Result<String, CommandError> {
@@ -1390,6 +1407,7 @@ const COMBOBOX_OPTIONS: &str = r#"
         '[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]'
     )]);
     let options = listed.filter(o => visible(o) && o.getAttribute('aria-disabled') !== 'true');
+    let inferredOptions = false;
 "#;
 
 /// After [`COMBOBOX_OPTIONS`], detects roleless rows. Only a popup associated
@@ -1419,18 +1437,25 @@ const COMBOBOX_ROLELESS: &str = r#"
             return tiny(n) || announcement
                 || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
         };
+        inferredOptions = true;
         options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>
             (useExisting || !before.has(n)) && n !== el && !n.contains(el) && visible(n) && !spoken(n) && row(n));
     };
 "#;
 
-/// With `wanted` bound, after the option lists: the option whose text is
-/// `wanted`, exactly, else ignoring case.
-const COMBOBOX_PICK: &str = "const exact=options.filter(o=>norm(o.textContent)===norm(wanted)); const match=(exact.length?exact:options.filter(o=>norm(o.textContent).toLowerCase()===norm(wanted).toLowerCase()))[0];";
+/// After the option lists: prefer exact text, then ignore case. Inferred
+/// rows have no semantic identity to break a tie.
+const COMBOBOX_PICK: &str = r#"
+    const exact = options.filter(o => norm(o.textContent) === norm(wanted));
+    const matches = exact.length ? exact : options.filter(o => key(o.textContent) === key(wanted));
+    const ambiguous = inferredOptions && matches.length > 1;
+    const match = ambiguous ? null : matches[0];
+"#;
 
 /// After [`COMBOBOX_PICK`]: the matching option's text and viewport center,
 /// or the texts of the options shown.
 const COMBOBOX_OPTION_FOUND: &str = r#"
+    if (ambiguous) return {ambiguous};
     if (!match) {
         const busy = n => n.getAttribute?.('aria-busy') === 'true';
         const loading = busy(el) || roots.some(busy) ||
@@ -1447,7 +1472,7 @@ const COMBOBOX_OPTION_FOUND: &str = r#"
 
 /// After [`COMBOBOX_PICK`]: the matching option's viewport center and whether
 /// that point hits the option.
-const COMBOBOX_OPTION_POINT: &str = "if(!match) return {x:0,y:0,hit:false}; const r=match.getBoundingClientRect(); const x=r.left+r.width/2; const y=r.top+r.height/2; const at=doc.elementFromPoint(x,y); return {x,y,hit:Boolean(at&&(at===match||match.contains(at)))};";
+const COMBOBOX_OPTION_POINT: &str = "if(ambiguous) return null; if(!match) return {x:0,y:0,hit:false}; const r=match.getBoundingClientRect(); const x=r.left+r.width/2; const y=r.top+r.height/2; const at=doc.elementFromPoint(x,y); return {x,y,hit:Boolean(at&&(at===match||match.contains(at)))};";
 
 /// Function body with `el` bound: its text, a listbox or menu reading one
 /// option per line so adjacent options never run together.
@@ -1456,7 +1481,7 @@ const LISTED_TEXT_SCRIPT: &str = "const items=el.matches('[role=\"listbox\"],[ro
 /// After [`COMBOBOX_PICK`]: hovers, then presses the matching option with the
 /// pointer and mouse events a person's click fires, so a list that commits
 /// its highlighted option commits this one.
-const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); const r=match.getBoundingClientRect(); const at={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; for(const type of ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove','pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{...at,bubbles:!type.endsWith('enter'),cancelable:true,composed:true,view:doc.defaultView}))} return true;";
+const COMBOBOX_OPTION_PRESS: &str = "if(ambiguous) return false; if(!match) throw new Error('the combobox option is gone'); const r=match.getBoundingClientRect(); const at={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; for(const type of ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove','pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{...at,bubbles:!type.endsWith('enter'),cancelable:true,composed:true,view:doc.defaultView}))} return true;";
 
 /// After the option lists: the texts of every option offered.
 const COMBOBOX_OFFERED: &str =

@@ -24,7 +24,8 @@ if (!dialog) {{
     const root = el.getRootNode();
     const ids = (el.getAttribute('aria-controls') || '').split(/\s+/);
     const related = new Set(ids.map(id => root.getElementById?.(id)).filter(isDialog));
-    if (related.size !== 1) return null;
+    if (related.size > 1) return '';
+    if (related.size === 0) return null;
     [dialog] = related;
 }}
 const key = Symbol.for('bobby.dismissalPins');
@@ -46,6 +47,22 @@ for (let host = dialog.getRootNode().host; {composed} && host; host = host.getRo
 return path.join(' >>> ');
 "#
     )
+}
+
+/// An empty selector signals multiple visible dialogs. Keep this distinct
+/// from a control that has no associated dialog.
+pub fn decode_enclosing_dialog(
+    selector: Option<String>,
+) -> Result<Option<String>, types::CommandError> {
+    if selector.as_deref() == Some("") {
+        return Err(types::CommandError {
+            code: types::ErrorCode::TargetAmbiguous,
+            message: "the dismissal control is associated with more than one visible dialog".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: false,
+        });
+    }
+    Ok(selector)
 }
 
 fn page_bindings() -> &'static str {
