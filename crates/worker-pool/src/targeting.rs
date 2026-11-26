@@ -727,14 +727,17 @@ impl ResolvedTarget {
     ) -> Result<String, CommandError> {
         let takes_text = self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await?;
         let wanted = option_json(value)?;
-        self.eval::<bool>(page, COMBOBOX_MARK_SCRIPT).await?;
+        self.eval::<bool>(page, &format!("{COMBOBOX_OPTIONS} {COMBOBOX_MARK_SCRIPT}"))
+            .await?;
         let already_open = takes_text
             && self
                 .eval::<bool>(
                     page,
                     &format!(
-                        "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_PICK}
-                         return ids.length > 0 && el.getAttribute('aria-expanded') !== 'false' && Boolean(match);"
+                        "const wanted={wanted}; {COMBOBOX_OPTIONS}
+                         if (!ids.length || el.getAttribute('aria-expanded') === 'false') return false;
+                         {COMBOBOX_ROLELESS} rolelessOptions(true); {COMBOBOX_PICK}
+                         return Boolean(match);"
                     ),
                 )
                 .await?;
@@ -747,8 +750,9 @@ impl ResolvedTarget {
         } else {
             self.click(page).await?;
         }
+        let roleless = format!("{COMBOBOX_ROLELESS} rolelessOptions({already_open});");
         let find = format!(
-            "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
+            "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
         );
         let started = Instant::now();
         let option = loop {
@@ -782,7 +786,7 @@ impl ResolvedTarget {
             ));
         };
         let readback = format!(
-            "const chosen={}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {} {COMBOBOX_CHOICE_STATE}",
+            "const chosen={}; {COMBOBOX_OPTIONS} {roleless} {} {COMBOBOX_CHOICE_STATE}",
             option_json(&text)?,
             crate::form_snapshot::SHOWN_VALUE_FUNCTION
         );
@@ -795,7 +799,7 @@ impl ResolvedTarget {
         } else {
             serde_json::Value::Null
         };
-        self.press_option(page, option.x.zip(option.y), &wanted, COMBOBOX_ROLELESS)
+        self.press_option(page, option.x.zip(option.y), &wanted, &roleless)
             .await?;
         // Older text suggestions without a selection state signal selection
         // by dismissing the results while retaining the chosen text.
@@ -955,8 +959,9 @@ impl ResolvedTarget {
     /// control then offers.
     async fn offered_options(&self, page: &Page) -> Result<Vec<String>, CommandError> {
         self.clear_editable(page).await?;
-        let read =
-            format!("const wanted=''; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_OFFERED}");
+        let read = format!(
+            "{COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} rolelessOptions(false); {COMBOBOX_OFFERED}"
+        );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT / 2;
         loop {
             let offered: Vec<String> = self.eval(page, &read).await?;
@@ -1179,10 +1184,18 @@ fn option_json(value: &str) -> Result<String, CommandError> {
 /// Function body with `el` bound: whether the combobox is a text field.
 const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
 
-/// Function body with `el` bound: records the elements shown before the
-/// control is typed into or opened, so suggestions without option roles can
-/// be told apart from the page around them.
-const COMBOBOX_MARK_SCRIPT: &str = "const shown=new WeakSet(); for(const node of el.ownerDocument.body?.querySelectorAll('*')||[]) if(node.getClientRects().length) shown.add(node); el[Symbol.for('bobby.shownBeforeOptions')]=shown; return true;";
+/// Records rendered elements in the document and the field's shadow root so
+/// the roleless fallback can recognize suggestions that appear after typing.
+const COMBOBOX_MARK_SCRIPT: &str = r#"
+    const shown = new WeakSet();
+    for (const root of pageRoots) {
+        for (const node of root.querySelectorAll('*')) {
+            if (node.getClientRects().length) shown.add(node);
+        }
+    }
+    el[Symbol.for('bobby.shownBeforeOptions')] = shown;
+    return true;
+"#;
 
 /// Shared by the option scripts, with `el` bound: the visible, enabled
 /// options and menu items of the control's own popup (`aria-controls` or
@@ -1192,6 +1205,7 @@ const COMBOBOX_OPTIONS: &str = r#"
     const key = s => norm(s).toLowerCase();
     const doc = el.ownerDocument;
     const home = el.getRootNode();
+    const pageRoots = home === doc ? [doc] : [home, doc];
     const visible = o => {
         const r = o.getBoundingClientRect();
         const s = getComputedStyle(o);
@@ -1201,28 +1215,30 @@ const COMBOBOX_OPTIONS: &str = r#"
         .flatMap(a => (el.getAttribute(a) || '').split(/\s+/)).filter(Boolean);
     const roots = ids.length
         ? [...new Set(ids.map(id => home.getElementById?.(id) || doc.getElementById(id)).filter(Boolean))]
-        : home === doc ? [doc] : [home, doc];
+        : pageRoots;
     const listed = roots.flatMap(r => [...r.querySelectorAll(
         '[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]'
     )]);
     let options = listed.filter(o => visible(o) && o.getAttribute('aria-disabled') !== 'true');
 "#;
 
-/// After COMBOBOX_OPTIONS, detects newly shown rows in widgets without option roles.
+/// After COMBOBOX_OPTIONS, detects roleless rows. Only a popup associated with
+/// the field can supply rows that were visible before the operation.
 const COMBOBOX_ROLELESS: &str = r#"
-    if (!options.length) {
+    const rolelessOptions = includeExisting => {
+        if (options.length) return;
+        const useExisting = includeExisting && ids.length > 0 && el.getAttribute('aria-expanded') !== 'false';
         const before = el[Symbol.for('bobby.shownBeforeOptions')];
+        if (!before && !useExisting) return;
         const row = n => {
             const own = norm(n.textContent);
             if (!own || own.length > 200) return false;
             const kids = [...n.children].filter(c => norm(c.textContent));
             return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
         };
-        if (before) {
-            options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>
-                !before.has(n) && n !== el && !n.contains(el) && visible(n) && row(n));
-        }
-    }
+        options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>
+            (useExisting || !before.has(n)) && n !== el && !n.contains(el) && visible(n) && row(n));
+    };
 "#;
 
 /// With `wanted` bound, after the option lists: the option whose text is
@@ -1273,11 +1289,14 @@ const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='
 
 /// Reads a choice's text, adjacent visible value, and selection state within its popup.
 const COMBOBOX_CHOICE_STATE: &str = r#"
-    const own = el.value ?? el.textContent;
+    const own = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+        ? el.value : el.innerText ?? el.textContent;
     const label = key(chosen);
     const readsChoice = o => key(o.textContent) === label;
+    // In a single-select popup aria-selected can follow the highlighted row.
     const selected = listed.some(o => readsChoice(o) &&
-        (o.getAttribute('aria-selected') === 'true' || o.getAttribute('aria-checked') === 'true'));
+        (o.getAttribute('aria-checked') === 'true' || (o.getAttribute('aria-selected') === 'true' &&
+            o.closest('[role="listbox"]')?.getAttribute('aria-multiselectable') === 'true')));
     const shown = key(shownValue(el));
 "#;
 

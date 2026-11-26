@@ -6624,7 +6624,7 @@ pub async fn button_listboxes_commit_the_named_option_and_read_it_back(rig: &Rig
                 const option = document.createElement("li");
                 option.setAttribute("role", "option");
                 option.textContent = name;
-                if (id === "degree") option.addEventListener("mousemove", () => highlight(index));
+                option.addEventListener("mousemove", () => highlight(index));
                 popup.append(option);
               });
               highlight(0);
@@ -6652,7 +6652,50 @@ pub async fn button_listboxes_commit_the_named_option_and_read_it_back(rig: &Rig
         )
         .await;
     assert_eq!(picked["status"], "completed", "{picked}");
-    let ignored = live
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "degree: Third"), "{page}");
+    live.close().await;
+
+    for label in ["Low", "High"] {
+        let live = Live::open(rig, &site.url("/listbox")).await;
+        let ignored = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"choose the level",
+                       "hints":{"role":"button","accessibleName":"Level"},
+                       "value":{"kind":"selectOne","value":label}}),
+            )
+            .await;
+        assert_eq!(ignored["error"]["code"], "verificationFailed", "{ignored}");
+        let page = live.snapshot(json!({})).await;
+        assert!(page_text_contains(&page, "level: Select..."), "{page}");
+        live.close().await;
+    }
+}
+
+pub async fn select_one_reads_the_native_button_label(rig: &Rig) {
+    let body = r#"<div>
+        <button type="button" id="level" value="field-id" aria-label="Level" aria-haspopup="listbox"
+          aria-expanded="false" aria-controls="levels">Select...</button>
+        <div id="levels" role="listbox" hidden><div role="option">High</div></div>
+        </div><p id="picked"></p>
+        <script>
+          const button = document.getElementById("level");
+          const levels = document.getElementById("levels");
+          button.addEventListener("click", () => {
+            levels.hidden = false;
+            button.setAttribute("aria-expanded", "true");
+          });
+          levels.firstElementChild.addEventListener("click", () => {
+            button.textContent = "High";
+            levels.hidden = true;
+            button.setAttribute("aria-expanded", "false");
+            document.getElementById("picked").textContent = "Committed High";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/levels", Route::Html(page("Levels", body)))]).await;
+    let live = Live::open(rig, &site.url("/levels")).await;
+    let picked = live
         .call(
             "intent_fill",
             json!({"purpose":"choose the level",
@@ -6660,12 +6703,9 @@ pub async fn button_listboxes_commit_the_named_option_and_read_it_back(rig: &Rig
                    "value":{"kind":"selectOne","value":"High"}}),
         )
         .await;
-    assert_ne!(ignored["status"], "completed", "{ignored}");
     let page = live.snapshot(json!({})).await;
-    assert!(
-        page_text_contains(&page, "degree: Third; level: Select..."),
-        "{page}"
-    );
+    assert!(page_text_contains(&page, "Committed High"), "{page}");
+    assert_eq!(picked["status"], "completed", "{picked}");
     live.close().await;
 }
 
@@ -6898,6 +6938,86 @@ pub async fn select_one_uses_its_own_open_search_results(rig: &Rig) {
         page_text_contains(&page, "Topic clicked: History"),
         "{page}"
     );
+    live.close().await;
+}
+
+pub async fn select_one_preserves_open_roleless_results(rig: &Rig) {
+    let body = r#"<label for="city">City</label>
+        <input id="city" role="combobox" aria-controls="results" aria-expanded="false" autocomplete="off">
+        <button type="button" id="search">Search cities</button>
+        <div id="results"></div><p id="picked"></p>
+        <script>
+          const input = document.getElementById("city");
+          const results = document.getElementById("results");
+          const clear = () => {
+            results.replaceChildren();
+            input.setAttribute("aria-expanded", "false");
+          };
+          input.addEventListener("input", clear);
+          document.getElementById("search").addEventListener("click", () => {
+            if (input.value !== "Par") return;
+            const row = document.createElement("div");
+            row.textContent = "Paris";
+            row.addEventListener("click", () => {
+              input.value = row.textContent;
+              document.getElementById("picked").textContent = "Committed Paris";
+              clear();
+            });
+            results.replaceChildren(row);
+            input.setAttribute("aria-expanded", "true");
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/cities", Route::Html(page("Cities", body)))]).await;
+    let live = Live::open(rig, &site.url("/cities")).await;
+    let query = live
+        .call("type_text", json!({"target":{"css":"#city"},"value":"Par"}))
+        .await;
+    assert_eq!(query["status"], "completed", "{query}");
+    let search = live
+        .call("click", json!({"target":{"css":"#search"}}))
+        .await;
+    assert_eq!(search["status"], "completed", "{search}");
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"City"},"action":{"kind":"selectOne","value":"Paris"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Committed Paris"), "{page}");
+    live.close().await;
+}
+
+pub async fn select_one_leaves_existing_shadow_controls_alone(rig: &Rig) {
+    let body = r#"<city-picker></city-picker><p id="picked"></p>
+        <script>
+          customElements.define("city-picker", class extends HTMLElement {
+            connectedCallback() {
+              const root = this.attachShadow({mode: "open"});
+              root.innerHTML = '<label for="city">City</label>' +
+                '<input id="city" role="combobox" autocomplete="off">' +
+                '<button type="button">Paris</button>';
+              root.querySelector("button").addEventListener("click", () => {
+                document.getElementById("picked").textContent = "Unrelated Paris clicked";
+              });
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/cities", Route::Html(page("Cities", body)))]).await;
+    let live = Live::open(rig, &site.url("/cities")).await;
+    let picked = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"City"},"action":{"kind":"selectOne","value":"Paris"}}),
+        )
+        .await;
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        !page_text_contains(&page, "Unrelated Paris clicked"),
+        "{page}"
+    );
+    assert_eq!(picked["error"]["code"], "targetNotFound", "{picked}");
     live.close().await;
 }
 
