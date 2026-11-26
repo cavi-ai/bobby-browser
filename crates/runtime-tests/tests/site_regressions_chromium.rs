@@ -21,6 +21,7 @@ cases::every_case!(
     chromium_cases,
     iframe_scoped_targets_reach_the_second_frame,
     iframe_scoped_snapshot_descends_into_child_frames,
+    form_snapshot_lists_a_form_inside_a_frame_from_another_site,
     scoped_snapshot_frame_targets_reach_the_second_frame,
     scoped_snapshot_targets_preserve_parent_frame_paths,
     scoped_snapshot_in_frame_descends_into_child_frames,

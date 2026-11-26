@@ -3118,7 +3118,11 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        let mut raw = crate::form_snapshot::decode_raw_form_snapshot(encoded)?;
+        let browser = self.browser_handle().await?;
+        add_unreachable_frame_forms(&page, &browser, max_controls, &mut raw).await;
+        let snapshot =
+            crate::form_snapshot::normalize_form_snapshot(page_id.clone(), raw, max_controls)?;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
@@ -5358,6 +5362,138 @@ fn find_iframe_node<'a>(
 /// hop that re-resolves the iframe element at action time. `max_nodes` bounds
 /// the composed tree, kept in document order: a frame is read only while its
 /// owner is kept. Returns whether anything was left out.
+/// Adds the forms of frames the page's script cannot read, from another site
+/// or sandboxed, to `raw`. Their new control stamps start past every stamp
+/// seen so far, and the page keeps that floor for its own next stamps.
+async fn add_unreachable_frame_forms(
+    page: &Page,
+    browser: &BrowserHandle,
+    max_controls: usize,
+    raw: &mut crate::form_snapshot::RawFormSnapshot,
+) {
+    let stamp_floor = |raw: &crate::form_snapshot::RawFormSnapshot| {
+        raw.controls
+            .iter()
+            .filter_map(|control| control.stamp)
+            .max()
+            .unwrap_or(0)
+            + 1
+    };
+    let main_floor = stamp_floor(raw);
+    let next = format!("{}-next", dom_engine::CONTROL_STAMP_ATTRIBUTE);
+    // The page's next stamp passes every stamp an earlier snapshot gave out.
+    let mut page_next = None;
+    let mut frames = 0;
+    let mut pending = vec![(page.clone(), None, Vec::new())];
+    while let Some((session, frame, path)) = pending.pop() {
+        if path.len() >= crate::targeting::MAX_TARGET_PATH_DEPTH {
+            continue;
+        }
+        let context_id = match frame {
+            Some(frame) => match session.frame_execution_context(frame).await {
+                Ok(context_id) => context_id,
+                Err(_) => continue,
+            },
+            None => None,
+        };
+        let Ok(iframes) = crate::targeting::iframe_candidates(&session, context_id).await else {
+            continue;
+        };
+        let scope = crate::targeting::LocatorScope::Context(context_id);
+        let visible: Vec<&dom_engine::Candidate> =
+            iframes.iter().filter(|other| other.state.visible).collect();
+        for candidate in visible.iter().copied() {
+            let Ok(Some(child)) =
+                crate::targeting::owned_frame(&session, Some(browser), &scope, &[], candidate)
+                    .await
+            else {
+                continue;
+            };
+            let Ok(child_context) = child
+                .session
+                .frame_execution_context(child.frame.clone())
+                .await
+            else {
+                continue;
+            };
+            let mut child_path = path.clone();
+            child_path.push(types::SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: candidate.name.clone().unwrap_or_default(),
+                ordinal: iframe_hop_ordinal(&visible, candidate),
+            });
+            // A frame its parent's script can read is in the parent's snapshot.
+            let readable = evaluate_by_value::<bool>(
+                &child.session,
+                child_context,
+                "(()=>{try{return Boolean(window.parent.document)}catch{return false}})()".into(),
+            )
+            .await
+            .unwrap_or(true);
+            if !readable {
+                let remaining = max_controls.saturating_sub(raw.controls.len());
+                if remaining == 0 {
+                    raw.truncated = true;
+                    break;
+                }
+                if page_next.is_none() {
+                    let read = evaluate_by_value::<u32>(
+                        page,
+                        None,
+                        format!("Number(document.documentElement?.getAttribute('{next}'))||1"),
+                    )
+                    .await;
+                    page_next = Some(read.unwrap_or(1));
+                }
+                let floor = stamp_floor(raw).max(page_next.unwrap_or(1));
+                let framed = evaluate_by_value::<String>(
+                    &child.session,
+                    child_context,
+                    crate::form_snapshot::frame_form_snapshot_expression(remaining, floor),
+                )
+                .await
+                .and_then(|encoded| crate::form_snapshot::decode_raw_form_snapshot(&encoded));
+                if let Ok(framed) = framed {
+                    frames += 1;
+                    crate::form_snapshot::append_frame_form_snapshot(
+                        raw,
+                        framed,
+                        &child_path,
+                        frames,
+                    );
+                }
+            }
+            pending.push((child.session, Some(child.frame), child_path));
+        }
+    }
+    let floor = stamp_floor(raw);
+    if floor > main_floor {
+        let _ = evaluate_by_value::<bool>(
+            page,
+            None,
+            format!(
+                "(()=>{{const d=document.documentElement;if(d&&!(Number(d.getAttribute('{next}'))>={floor}))d.setAttribute('{next}','{floor}');return true}})()"
+            ),
+        )
+        .await;
+    }
+}
+
+async fn evaluate_by_value<T: serde::de::DeserializeOwned>(
+    page: &Page,
+    context_id: Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>,
+    expression: String,
+) -> Result<T, CommandError> {
+    let mut params = chromiumoxide::cdp::js_protocol::runtime::EvaluateParams::new(expression);
+    params.context_id = context_id;
+    params.return_by_value = Some(true);
+    page.evaluate(params)
+        .await
+        .map_err(command_failed)?
+        .into_value()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
+}
+
 async fn descend_a11y_iframes(
     page: &Page,
     browser: &BrowserHandle,

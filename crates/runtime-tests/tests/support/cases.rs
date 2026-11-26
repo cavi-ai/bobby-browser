@@ -4523,6 +4523,62 @@ pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
     live.close().await;
 }
 
+/// A form inside a frame from another site is listed by the page's form
+/// snapshot under IDs of its own, and its control's target acts in that frame.
+pub async fn form_snapshot_lists_a_form_inside_a_frame_from_another_site(rig: &Rig) {
+    let frame = page(
+        "Frame",
+        r#"<form aria-label="Apply"><label>Email <input type="email" oninput="parent.postMessage('email:' + this.value,'*')"></label>
+        <label>Resume <input type="file"></label></form>
+        <script>parent.postMessage('ready','*')</script>"#,
+    );
+    let frame_site = FixtureSite::spawn(vec![("/frame", Route::Html(frame))]).await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let body = format!(
+        r#"<main><h1>Host</h1><label>Search <input type="search"></label>
+        <iframe title="Widget" src="{frame_url}" style="width:400px;height:200px"></iframe>
+        <p role="status" aria-label="Result">idle</p></main>
+        <script>addEventListener('message', (event) => {{ document.querySelector('[aria-label="Result"]').textContent = String(event.data); }});</script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &body)))]).await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut controls = Vec::new();
+    for name in ["Search", "Email", "Resume"] {
+        controls_named(&snapshot, name, &mut controls);
+    }
+    let ids: std::collections::HashSet<_> = controls
+        .iter()
+        .map(|control| control["id"].to_string())
+        .collect();
+    assert_eq!(
+        (controls.len(), ids.len()),
+        (3, 3),
+        "one control apiece under distinct IDs: {snapshot}"
+    );
+    let typed = live
+        .call(
+            "control_action",
+            json!({"target":controls[1]["target"],"action":{"kind":"setText","value":"a@b.co"}}),
+        )
+        .await;
+    assert_eq!(
+        typed["status"], "completed",
+        "control_action through the framed form: {typed}"
+    );
+    let landed = wait_for_result(&live, "email:a@b.co").await;
+    assert_eq!(
+        landed["status"], "completed",
+        "the framed field never got the value: {landed}"
+    );
+    live.close().await;
+}
+
 /// Two identical frames from another site side by side: the second frame's
 /// snapshot target acts on the second frame.
 pub async fn identical_frames_from_another_site_keep_their_own_targets(rig: &Rig) {

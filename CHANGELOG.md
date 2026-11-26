@@ -5,6 +5,7 @@
 ### Added
 
 - Chromium `upload_files` on a button that opens the file chooser, with no file input in the page, sets the files on the input the chooser opens.
+- Chromium `form_snapshot` lists forms inside frames from another site and sandboxed frames, with targets that act in those frames.
 
 ### Fixed
 
