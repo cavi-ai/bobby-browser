@@ -1879,9 +1879,15 @@ async fn fill_with_password_manager(
                 );
             }
             evidence.append(&mut watched);
-            let Some((mut moved, opened)) =
-                page_change::submitted_after_fill(page_id, browser, target, &before, &open_dialogs)
-                    .await
+            let Some((mut moved, opened)) = page_change::submitted_after_fill(
+                page_id,
+                browser,
+                target,
+                &before,
+                &open_dialogs,
+                true,
+            )
+            .await
             else {
                 evidence.push(record("passwordManagerFilled".into(), details));
                 return IntentOutcome::Completed { evidence };
@@ -1911,13 +1917,23 @@ async fn fill_with_password_manager(
             evidence.push(record("passwordManagerSubmitted".into(), details));
             IntentOutcome::Completed { evidence }
         }
-        // A submit that navigates mid-read can fail it with any browser error;
-        // the page moving on is still the manager's submit.
+        // A submit can interrupt the browser's read. Recover only when there
+        // is independent evidence of progress, and preserve validation errors.
         Err(error) => {
-            if let Some((mut moved, opened)) =
-                page_change::submitted_after_fill(page_id, browser, target, &before, &open_dialogs)
-                    .await
-            {
+            let submitted = if error.code == ErrorCode::BrowserCommandFailed {
+                page_change::submitted_after_fill(
+                    page_id,
+                    browser,
+                    target,
+                    &before,
+                    &open_dialogs,
+                    false,
+                )
+                .await
+            } else {
+                None
+            };
+            if let Some((mut moved, opened)) = submitted {
                 evidence.append(&mut moved);
                 if let Ok(mut settled) = browser.inspect_settled_page(page_id).await {
                     evidence.append(&mut settled);
@@ -3259,39 +3275,43 @@ async fn execute_dismiss_obstruction(
         }
         _ => true,
     };
-    // Without hints, a frame from another origin over the page's controls is
-    // the obstruction: it closes on Escape, with no vision.
-    if !hinted {
-        let purpose = match intent {
-            IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
-            _ => None,
-        };
-        let record = |verification: &str| {
-            intent_evidence(execution_record(
-                "dismissObstruction",
-                purpose.clone(),
-                "frameOverlay",
-                Vec::new(),
-                None,
-                verification,
-            ))
-        };
+    let record_frame_overlay = |verification: &str| {
+        intent_evidence(execution_record(
+            "dismissObstruction",
+            match intent {
+                IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
+                _ => None,
+            },
+            "frameOverlay",
+            Vec::new(),
+            None,
+            verification,
+        ))
+    };
+    // Without hints, try Escape first. Some frame overlays have a Close
+    // control and ignore Escape, so let semantic dismissal try them too.
+    let frame_error = if hinted {
+        None
+    } else {
         match browser.close_frame_overlay(page_id).await {
-            Ok(false) => {}
             Ok(true) => {
                 return IntentOutcome::Completed {
-                    evidence: vec![record("frameOverlayClosed")],
+                    evidence: vec![record_frame_overlay("frameOverlayClosed")],
                 };
             }
-            Err(error) => {
-                return IntentOutcome::Failed {
-                    error,
-                    evidence: vec![record("obstructionPersisted")],
-                };
-            }
+            Ok(false) => None,
+            Err(error) => Some(error),
         }
+    };
+    let outcome =
+        dismiss_target(intent, page_id, browser, vision, target, timeout_ms, hinted).await;
+    match (outcome, frame_error) {
+        (IntentOutcome::Failed { mut evidence, .. }, Some(error)) => {
+            evidence.push(record_frame_overlay("obstructionPersisted"));
+            IntentOutcome::Failed { error, evidence }
+        }
+        (outcome, _) => outcome,
     }
-    dismiss_target(intent, page_id, browser, vision, target, timeout_ms, hinted).await
 }
 
 /// Whether an accessible name reads as a control that closes what it sits

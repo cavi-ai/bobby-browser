@@ -29,6 +29,7 @@ cases::every_case!(
     password_manager_fill_never_touches_the_field,
     password_manager_fill_requires_the_session_opt_in,
     password_manager_fill_completes_on_a_field_the_manager_filled,
+    password_manager_fill_keeps_distinct_form_owners_separate,
     set_text_closes_a_frame_menu_that_takes_the_fields_focus,
     dismiss_obstruction_closes_a_frame_menu_without_vision,
     a_split_code_with_one_named_box_takes_the_code,

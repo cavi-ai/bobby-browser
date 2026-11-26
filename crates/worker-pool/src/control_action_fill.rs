@@ -169,11 +169,13 @@ pub trait ControlActionAdapter: Send + Sync {
 /// marked `current-password`, through the native setter with `input` and
 /// `change` events. The value stays in the page. Returns whether it was set.
 pub(crate) const PEER_NEW_PASSWORD_SCRIPT: &str = "\
-    if (!(el instanceof HTMLInputElement) || el.type !== 'password' || el.value) return false; \
-    const scope = el.form || el.getRootNode(); \
-    const fields = Array.from(scope.querySelectorAll('input[type=password]')); \
+    if (!(el instanceof HTMLInputElement) || el.type !== 'password' || el.value || \
+        !el.form || !el.isConnected || el.readOnly || el.matches(':disabled')) return false; \
+    const elements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get.call(el.form); \
+    const fields = Array.from(elements).filter((field) => \
+        field instanceof HTMLInputElement && field.type === 'password'); \
     if (fields.length !== 2 || fields.some((field) => \
-        /\\bcurrent-password\\b/.test(field.getAttribute('autocomplete') || ''))) return false; \
+        /\\bcurrent-password\\b/i.test(field.getAttribute('autocomplete') || ''))) return false; \
     const peer = fields.find((field) => field !== el && field.value); \
     if (!peer) return false; \
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, peer.value); \

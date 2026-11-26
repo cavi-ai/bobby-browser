@@ -5402,9 +5402,9 @@ fn password_manager_sign_up_page() -> String {
         "Create account",
         r#"<form id="signup">
             <label>Password <input id="pass" type="password" autocomplete="new-password"></label>
-            <label>Confirm password <input id="repeat" type="password" autocomplete="new-password"></label>
             <button>Create account</button>
         </form>
+        <label>Confirm password <input id="repeat" form="signup" type="password" autocomplete="new-password"></label>
         <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#ff00aa;color:#fff;display:flex;align-items:center;justify-content:center">Suggested password</div>
         <p role="status" aria-label="Match" id="match">unset</p>
         <script>
@@ -5471,6 +5471,55 @@ pub async fn password_manager_fill_sets_both_new_password_fields(rig: &Rig) {
     let page = live.call("a11y_snapshot", json!({})).await.to_string();
     assert!(page.contains("\"match\""), "the fields differ: {page}");
     live.close().await;
+}
+
+pub async fn password_manager_fill_keeps_distinct_form_owners_separate(rig: &Rig) {
+    const FIELDS: &str = r#"
+        <label>Password <input type="password" autocomplete="new-password"></label>
+        <label>Other password <input form="other" type="password" autocomplete="new-password" value="fixture-value"></label>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/unowned", Route::Html(page("Unowned fields", FIELDS))),
+        (
+            "/different-owners",
+            Route::Html(page(
+                "Separate forms",
+                &format!(r#"<form id="signup">{FIELDS}</form><form id="other"></form>"#),
+            )),
+        ),
+    ])
+    .await;
+    for path in ["/unowned", "/different-owners"] {
+        let started =
+            start_password_manager_session(rig, &site.url(path), json!({"passwordManager":true}))
+                .await;
+        let live = Live {
+            rig,
+            session_id: started["sessionId"].clone(),
+            page_id: started["pageId"].clone(),
+            started,
+        };
+        let filled = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"Use the suggested password",
+                       "hints":{"role":"textbox","accessibleName":"Password"},
+                       "value":{"kind":"passwordManagerFill"}}),
+            )
+            .await;
+        assert_eq!(
+            filled["status"], "failed",
+            "unexpected fill on {path}: {filled}"
+        );
+        let snapshot = live.call("form_snapshot", json!({})).await;
+        let mut fields = Vec::new();
+        controls_named(&snapshot, "Password", &mut fields);
+        assert_eq!(
+            fields.first().map(|control| control["state"].clone()),
+            Some(json!({"kind":"redacted","present":false})),
+            "the target field changed on {path}: {snapshot}"
+        );
+        live.close().await;
+    }
 }
 
 /// The document of an inline menu served from another origin: it keeps focus
