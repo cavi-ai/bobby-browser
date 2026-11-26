@@ -1454,6 +1454,121 @@ async fn control_action_set_text_verifies_a_multi_line_textarea_value() {
     worker.close().await.unwrap();
 }
 
+/// A worker on `html`, for control actions by accessible name.
+async fn text_fixture(
+    root: &std::path::Path,
+    html: &str,
+) -> (std::sync::Arc<dyn worker_pool::BrowserWorker>, PageId) {
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.to_path_buf()],
+        downloads_dir: root.join("downloads"),
+        artifacts_dir: root.join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("data:text/html,{html}"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    (worker, page_id)
+}
+
+/// Sets `value` on the control named `name`; returns the read-back text.
+async fn set_text_by_name(
+    worker: &dyn worker_pool::BrowserWorker,
+    page_id: &PageId,
+    name: &str,
+    value: &str,
+) -> Result<String, types::CommandError> {
+    let snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(page_id, None)
+        .await?;
+    let target = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| control.accessible_name.as_deref() == Some(name))
+                .and_then(|control| control.target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name} control target"));
+    let evidence = worker_pool::input_or_default(worker.input())
+        .control_action(
+            page_id,
+            &ControlActionCommand {
+                target,
+                action: ControlAction::SetText {
+                    value: value.into(),
+                    clear_first: true,
+                },
+            },
+        )
+        .await?;
+    Ok(evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::ControlAction { action } => match &action.state {
+                types::FormControlState::Text { value } => Some(value.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_default())
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_retypes_a_value_that_lost_a_keystroke() {
+    let root = tempfile::tempdir().unwrap();
+    // The page drops the fourth keystroke of the first typing.
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        "<input id=answer aria-label=Answer><script>let lost=false;answer.addEventListener('input',()=>{if(!lost&&answer.value.length===4){lost=true;answer.value=answer.value.slice(0,3)}})</script>",
+    )
+    .await;
+    let typed = set_text_by_name(worker.as_ref(), &page_id, "Answer", "Hello world").await;
+    assert_eq!(typed.as_deref(), Ok("Hello world"));
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_retypes_into_a_field_the_page_re_rendered() {
+    let root = tempfile::tempdir().unwrap();
+    // The page replaces the field with an empty copy when typing starts.
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        "<div id=box><input aria-label=Answer></div><script>let swapped=false;box.addEventListener('input',()=>{if(!swapped){swapped=true;box.innerHTML='<input aria-label=Answer>'}})</script>",
+    )
+    .await;
+    let typed = set_text_by_name(worker.as_ref(), &page_id, "Answer", "Hello world").await;
+    assert_eq!(typed.as_deref(), Ok("Hello world"));
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_clear_empties_a_text_input() {

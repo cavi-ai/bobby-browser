@@ -45,11 +45,11 @@ For uploads, pass the current file control's `id` as `upload_files.controlId`. H
 
 ## Act on controls
 
-Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.
+Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once, apart from the `setText` retype below, and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.
 
 | Kind | Shape | Effect |
 |---|---|---|
-| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text |
+| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text. A replace whose read-back differs, from a lost keystroke or a field the page re-rendered, is retyped once into the control the target names |
 | `setChecked` | `{kind, checked}` | Set a checkbox or radio |
 | `selectOne` | `{kind, value}` | Select an option by value or visible label; a text box takes the suggestion that reads the value |
 | `selectMany` | `{kind, values}` | Select several options, or check a menu button's items |
