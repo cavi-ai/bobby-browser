@@ -90,6 +90,8 @@ pub struct PageRuntime {
     /// carries a durable profile identity (Firefox companion); Chromium
     /// sessions never promote.
     promotion: Option<Arc<ContextPromotion>>,
+    /// `navigate` accepts `file://` URLs only when set.
+    allow_file_urls: bool,
 }
 
 impl PageRuntime {
@@ -130,7 +132,14 @@ impl PageRuntime {
             phase_observer: None,
             context: Arc::new(ContextGraph::new()),
             promotion: None,
+            allow_file_urls: false,
         }
+    }
+
+    /// Lets `navigate` open `file://` URLs.
+    pub fn with_file_urls_allowed(mut self) -> Self {
+        self.allow_file_urls = true;
+        self
     }
 
     #[doc(hidden)]

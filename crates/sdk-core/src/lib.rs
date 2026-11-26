@@ -486,6 +486,9 @@ impl RuntimeService {
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         pages = pages.with_context_graph_attached();
+        if config.http.allow_file_urls {
+            pages = pages.with_file_urls_allowed();
+        }
         if config.vision.prefill {
             pages = pages.with_vision_prefill_enabled();
         }

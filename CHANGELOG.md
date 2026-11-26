@@ -5,6 +5,7 @@
 ### Added
 
 - `intent_detect_challenge` classifies a Turnstile widget as its own `turnstile` challenge type.
+- `[http].allow_file_urls` lets `navigate` and `workflow_start` open `file://` URLs for local previews; it is off by default.
 
 ### Fixed
 

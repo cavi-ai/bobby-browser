@@ -541,7 +541,8 @@ impl PageRuntime {
         if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(command)) = &envelope.command {
             if !(command.url.starts_with("http://")
                 || command.url.starts_with("https://")
-                || command.url.starts_with("data:"))
+                || command.url.starts_with("data:")
+                || (self.allow_file_urls && command.url.starts_with("file://")))
             {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
