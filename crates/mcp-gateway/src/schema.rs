@@ -556,7 +556,8 @@ pub(crate) fn screenshot_schema() -> (Value, Vec<&'static str>) {
             "sessionId": id(),
             "pageId": id(),
             "mode": {"$ref":"#/$defs/ScreenshotMode"},
-            "maxEdge": {"type":"integer","minimum":1,"description":"Shrink the stored image so its longest side is at most this many pixels."}
+            "maxEdge": {"type":"integer","minimum":1,"description":"Shrink the stored image so its longest side is at most this many pixels."},
+            "saveAs": string(1, 4096)
         }),
         vec!["sessionId", "pageId"],
     )
@@ -697,7 +698,8 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
                 &[]
             ),
             "zigzagzig":{"type":"boolean"},
-            "url": string(1, MAX_URL_BYTES)
+            "url": string(1, MAX_URL_BYTES),
+            "callerKey": string(1, 128)
         }),
         vec!["profile"],
     )
@@ -804,6 +806,8 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("download_url", "url") => "URL to download.",
         ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
         ("download_url", "saveAs") => "Absolute path to save the file to.",
+        ("screenshot", "saveAs") => "Same rules as download_url saveAs.",
+        ("workflow_start", "callerKey") => "Job key echoed in evidenceKey.",
         ("download_url", "expectedContentType") => "Content type the response must have.",
         ("intent_complete_form", "fields") => "Fields to fill, in order.",
         ("workflow_run", "workflow") => "Name in bobby://workflows.",
@@ -1107,7 +1111,12 @@ pub(crate) fn advertised_tool_schema_for_capabilities(
     schema
 }
 
-pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_download_bytes: usize) {
+pub(crate) fn apply_runtime_tool_limits(
+    name: &str,
+    schema: &mut Value,
+    max_download_bytes: usize,
+    downloads_root: Option<&std::path::Path>,
+) {
     if name != "download_url" {
         return;
     }
@@ -1116,6 +1125,12 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
     // applies regardless of which branch an instance matches, so patching it
     // alone is enough.
     schema["properties"]["maxBytes"]["maximum"] = json!(max_download_bytes);
+    if let Some(root) = downloads_root {
+        schema["properties"]["saveAs"]["description"] = json!(format!(
+            "Filename or absolute path directly in the downloads root {}",
+            root.display()
+        ));
+    }
 }
 
 /// Adds the handle alternative only to the advertised schema. The dispatcher
@@ -1505,6 +1520,14 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 "engineScope":{"type":"string","enum":["chromium","firefox","webKit"]},
                 "capabilities":array(string(0, 64), 32),
                 "active_sessions":{"type":"integer","minimum":0},
+                // Sessions the previous runtime held when it stopped; they are gone.
+                "lostSessions":{"type":"array","items":object(
+                    json!({
+                        "sessionId":{"type":"string"},
+                        "pageIds":{"type":"array","items":{"type":"string"}}
+                    }),
+                    &["sessionId", "pageIds"],
+                )},
                 "queued_jobs":{"type":"integer","minimum":0},
                 "uptime_ms":{"type":"integer","minimum":0},
                 "credentialExpiresAt":{"type":"string","format":"date-time"},
@@ -1563,8 +1586,9 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["closed"],
         ),
         // `PageState`'s own fields plus `navigationOutcome` (present whenever `url`
-        // was given) and, only if that navigation did not complete, `cleanupOutcome`
-        // and `pageClosed`. Those three are declared but not required.
+        // was given) and, only if that navigation failed for a reason other than
+        // running out of time, `cleanupOutcome` and `pageClosed`. Those three are
+        // declared but not required.
         //
         // Must be inlined into `page_state()`'s `properties`, not `allOf`-ed as a
         // `$ref`: JSON Schema 2020-12 `additionalProperties` is not annotation-aware
@@ -1757,9 +1781,10 @@ fn advertised_output_shape(name: &str) -> Value {
             let mut schema = object(
                 json!({
                     "workflowId":id(),
+                    "sessionId":id(),
                     "checkpoint":json!({"type":"object"}),
                     "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
-                    "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+                    "workflows":array(id(), MAX_RECOVERABLE_WORKFLOWS)
                 }),
                 &[],
             );
@@ -1840,6 +1865,12 @@ fn advertised_output_shape(name: &str) -> Value {
                 .as_object_mut()
                 .expect("output schemas are objects")
                 .remove("$defs");
+            // `lostSessions` stays in `tool_output_schema` only: naming it here
+            // would exceed the explore-catalog size ceiling.
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("lostSessions");
+            }
+            schema["additionalProperties"] = json!(true);
             schema
         }
         _ => {
@@ -3148,7 +3179,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "inspection",
-            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES))}),
+            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES)),"truncated":{"type":"boolean"}}),
             &["selector", "url", "title", "text", "html"],
         ),
         tagged_fields(
@@ -3345,7 +3376,8 @@ fn evidence_variants() -> Vec<Value> {
                             "recaptchaV3",
                             "textCaptcha",
                             "imageGridCaptcha",
-                            "mfaCodeEntry"
+                            "mfaCodeEntry",
+                            "turnstile"
                         ]},
                         "confidence":{"type":"number"},
                         "region":object(
@@ -3423,7 +3455,8 @@ fn error_code() -> Value {
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
         "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
-        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired"
+        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired",
+        "verificationLinkRequired","confirmedOutsideExpectedState"
     ]})
 }
 
@@ -3491,6 +3524,8 @@ fn command_outcome_properties() -> Value {
         "priorAttemptId":id(),
         "attemptId":id(),
         "artifactRegistration":{"type":"object"},
+        "evidenceKey":evidence_key(),
+        "savedTo":string(1, 4096),
         "downloadPreviews":array(
             object(
                 json!({
@@ -3623,9 +3658,23 @@ fn page_state() -> Value {
 /// The persisted `types::WorkflowCheckpoint` as `checkpoint_save` and `recovery_status`
 /// return it. Distinct from the input definition (`workflow_checkpoint()`), which forces
 /// `evidence`/`recoveryHistory`/`recoveryReceipts` empty; the runtime populates all three.
+/// The `workflow_start` `callerKey` with the page URL and screenshot digest
+/// of the result that carries it.
+fn evidence_key() -> Value {
+    object(
+        json!({
+            "callerKey":string(1, 128),
+            "url":nullable(string(1, MAX_URL_BYTES)),
+            "sha256":nullable(sha256())
+        }),
+        &["callerKey", "url", "sha256"],
+    )
+}
+
 fn checkpoint_record() -> Value {
     object(
         json!({
+            "evidenceKey":evidence_key(),
             "schemaVersion":{"type":"integer","const":1},
             "checkpointId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(), "pageId":id(),
             "restartUrl":string(1, MAX_URL_BYTES), "currentUrl":string(1, MAX_URL_BYTES),
@@ -5013,17 +5062,43 @@ fn deref_schema<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
 }
 
 fn schema_at<'a>(root: &'a Value, schema: &'a Value, pointer: &str) -> Option<&'a Value> {
-    let mut node = deref_schema(root, schema)?;
+    let mut node = deref_non_null(root, schema)?;
     for token in pointer.split('/').skip(1) {
         let token = token.replace("~1", "/").replace("~0", "~");
-        node = deref_schema(root, node)?;
+        node = deref_non_null(root, node)?;
         node = node
             .get("properties")
             .and_then(|properties| properties.get(&token))
             .or_else(|| node.get("items").filter(|_| token.parse::<usize>().is_ok()))
             .or_else(|| node.get("additionalProperties").filter(|v| v.is_object()))?;
     }
-    deref_schema(root, node)
+    deref_non_null(root, node)
+}
+
+/// The non-null schema of `{"oneOf":[X,{"type":"null"}]}`, the shape
+/// `nullable(X)` writes.
+fn nullable_inner(choices: &[Value]) -> Option<&Value> {
+    let null = json!({"type":"null"});
+    match choices {
+        [inner, other] | [other, inner] if *other == null && *inner != null => Some(inner),
+        _ => None,
+    }
+}
+
+/// [`deref_schema`], then the non-null schema of each nullable wrapper.
+fn deref_non_null<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    let mut node = deref_schema(root, schema)?;
+    for _ in 0..8 {
+        let Some(inner) = node
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .and_then(|choices| nullable_inner(choices))
+        else {
+            return Some(node);
+        };
+        node = deref_schema(root, inner)?;
+    }
+    None
 }
 
 fn variant_kind(variant: &Value) -> Option<&str> {
@@ -5222,15 +5297,22 @@ fn validate_at(
         return validate_at(root, target, value, depth, pointer);
     }
     if let Some(choices) = schema.get("oneOf").and_then(Value::as_array) {
-        // Report the branch point rather than one arbitrary branch's failure:
-        // with a discriminated union the useful signal is "this value matched
-        // no variant", not why the last variant disagreed.
-        let matches = choices
-            .iter()
-            .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
-            .count();
-        if matches != 1 {
-            return Err(SchemaViolation::at(pointer, "oneOf"));
+        match nullable_inner(choices) {
+            // A nullable field holding a value reports where that value
+            // breaks its own schema.
+            Some(inner) if !value.is_null() => validate_at(root, inner, value, depth, pointer)?,
+            // Report the branch point rather than one arbitrary branch's failure:
+            // with a discriminated union the useful signal is "this value matched
+            // no variant", not why the last variant disagreed.
+            _ => {
+                let matches = choices
+                    .iter()
+                    .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
+                    .count();
+                if matches != 1 {
+                    return Err(SchemaViolation::at(pointer, "oneOf"));
+                }
+            }
         }
     }
     if let Some(choices) = schema.get("anyOf").and_then(Value::as_array) {

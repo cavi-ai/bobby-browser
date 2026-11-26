@@ -304,7 +304,12 @@ impl Server {
                                 ) || (matches!(status, Some("failed"))
                                     && matches!(
                                         code,
-                                        Some("verificationFailed" | "verificationCodeRequired")
+                                        Some(
+                                            "verificationFailed"
+                                                | "verificationCodeRequired"
+                                                | "verificationLinkRequired"
+                                                | "confirmedOutsideExpectedState"
+                                        )
                                     )))
                         }
                         Err(_) => false,

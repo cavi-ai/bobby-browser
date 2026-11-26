@@ -21,6 +21,8 @@ cases::every_case!(
     chromium_cases,
     iframe_scoped_targets_reach_the_second_frame,
     iframe_scoped_snapshot_descends_into_child_frames,
+    form_snapshot_lists_a_form_inside_a_frame_from_another_site,
+    form_snapshot_reserves_control_ids_before_stamping_a_frame,
     scoped_snapshot_frame_targets_reach_the_second_frame,
     scoped_snapshot_targets_preserve_parent_frame_paths,
     scoped_snapshot_in_frame_descends_into_child_frames,
@@ -28,7 +30,17 @@ cases::every_case!(
     scoped_iframe_descent_respects_the_node_budget,
     password_manager_fill_never_touches_the_field,
     password_manager_fill_requires_the_session_opt_in,
+    password_manager_fill_completes_on_a_field_the_manager_filled,
+    password_manager_fill_keeps_distinct_form_owners_separate,
+    set_text_closes_a_frame_menu_that_takes_the_fields_focus,
+    dismiss_obstruction_closes_a_frame_menu_without_vision,
     a_split_code_with_one_named_box_takes_the_code,
+    a_code_field_that_submits_itself_completes,
+    a_fill_only_code_requires_readback,
+    leaving_a_split_code_step_early_fails_verification,
+    disappearing_unnamed_code_boxes_require_a_verified_outcome,
+    named_dismissal_checks_its_own_dialog,
+    named_dismissal_rejects_multiple_associated_dialogs,
     select_one_picks_the_exact_option_of_an_aria_combobox,
     a_submit_without_expected_state_is_verified_by_the_page,
     control_ids_stay_on_unnamed_controls_when_the_form_grows,
@@ -39,8 +51,16 @@ cases::every_case!(
     snapshot_targets_reach_controls_inside_custom_elements,
     complete_form_honors_a_field_ordinal,
     button_menus_take_select_one_and_select_many,
+    button_listboxes_commit_the_named_option_and_read_it_back,
     text_boxes_pick_a_suggestion_without_a_role,
     a_combobox_without_the_value_lists_its_options,
+    select_one_does_not_submit_a_search_field,
+    select_one_uses_its_own_open_search_results,
+    select_one_does_not_verify_an_uncommitted_search_result,
+    select_one_reads_the_native_button_label,
+    select_one_preserves_open_roleless_results,
+    select_one_refuses_ambiguous_roleless_live_rows,
+    select_one_leaves_existing_shadow_controls_alone,
     type_text_css_prefers_the_editable_node,
     a_phone_field_is_a_text_box,
     locate_retry_hints_follow_accessibility_order,
@@ -100,6 +120,50 @@ async fn an_attach_button_uploads_into_its_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn a_button_that_opens_the_file_chooser_takes_the_upload() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_button_that_opens_the_file_chooser_takes_the_upload(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_covered_upload_trigger_leaves_the_covering_input_empty() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_covered_upload_trigger_leaves_the_covering_input_empty(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_chooser_upload_preserves_an_existing_file_selection() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_chooser_upload_preserves_an_existing_file_selection(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn the_only_file_input_takes_its_snapshot_target() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::the_only_file_input_takes_its_snapshot_target(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn an_unlabeled_file_input_keeps_its_snapshot_ordinal_beside_a_matching_button() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::an_unlabeled_file_input_keeps_its_snapshot_ordinal_beside_a_matching_button(
+        &rig,
+        dir.path(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn uploads_by_label_refuse_a_slot_that_shows_a_file() {
     let dir = tempfile::tempdir().expect("upload dir");
     let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
@@ -146,6 +210,15 @@ async fn password_manager_fill_clicks_the_managers_prompt() {
     let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
     let rig = Rig::chromium_with_vision_node(&endpoint).await;
     cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn password_manager_fill_sets_both_new_password_fields() {
+    let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
+    let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
+    let rig = Rig::chromium_with_vision_node(&endpoint).await;
+    cases::password_manager_fill_sets_both_new_password_fields(&rig).await;
 }
 
 /// Screenshots of a display with two device pixels per CSS pixel are twice

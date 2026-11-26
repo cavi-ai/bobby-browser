@@ -132,6 +132,15 @@ pub trait ObservationEngine: Send + Sync {
         target.clone()
     }
 
+    /// A target that pins the dialog associated with a dismissal control.
+    async fn enclosing_dialog(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        Ok(None)
+    }
+
     /// The value of `attribute` on the element `target` resolves to; `None`
     /// when the element has no such attribute.
     async fn read_attribute(
@@ -169,6 +178,12 @@ pub trait ObservationEngine: Send + Sync {
     /// prompt frame on the page. Default: none, which leaves it to vision.
     async fn password_manager_prompt(&self, _page_id: &PageId) -> Option<(f64, f64)> {
         None
+    }
+
+    /// Closes a frame from another origin that holds focus or covers the
+    /// page's controls. Default: `Ok(false)`, none found.
+    async fn close_frame_overlay(&self, _page_id: &PageId) -> Result<bool, CommandError> {
+        Ok(false)
     }
 
     /// The page's current URL, read best-effort without mutating page state.

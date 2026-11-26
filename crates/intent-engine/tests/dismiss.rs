@@ -31,6 +31,8 @@ struct FakeBrowser {
     click_xy_calls: Arc<AtomicUsize>,
     /// The candidates once a vision click has landed, when it changes them.
     candidates_after_vision_click: Option<Vec<Candidate>>,
+    candidates_after_click: Option<Vec<Candidate>>,
+    enclosing_dialog: Option<TargetSpec>,
 }
 
 #[async_trait]
@@ -48,6 +50,14 @@ impl IntentBrowser for FakeBrowser {
         }
     }
 
+    async fn enclosing_dialog(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        Ok(self.enclosing_dialog.clone())
+    }
+
     async fn click(
         &self,
         _page_id: &PageId,
@@ -58,6 +68,9 @@ impl IntentBrowser for FakeBrowser {
             .expect("call log")
             .clicks
             .push(command.clone());
+        if let Some(after) = &self.candidates_after_click {
+            *self.candidate_sequence.lock().expect("sequence") = VecDeque::from([after.clone()]);
+        }
         Ok(self.click_evidence.clone())
     }
 
@@ -401,6 +414,7 @@ async fn dismiss_still_present_after_click_escalates_to_vision_and_preserves_pri
         screenshot_png: b"png".to_vec(),
         click_xy_calls: click_xy_calls.clone(),
         candidates_after_vision_click: Some(Vec::new()),
+        ..FakeBrowser::default()
     };
     let assist = Arc::new(FakeVision {
         proposal: VisionProposal {
@@ -580,4 +594,79 @@ async fn unhinted_vision_dismiss_fails_while_the_dialog_stays_open() {
     let (error, record) = failure(outcome);
     assert_eq!(error.code, ErrorCode::ObstructionSuspected);
     assert_eq!(record.verification, "obstructionPersisted");
+}
+
+#[tokio::test]
+async fn unhinted_dismiss_clicks_a_named_close_control_when_vision_fails() {
+    let close_modal = Candidate {
+        id: "close-modal".into(),
+        css: Some("#close-modal".into()),
+        name: Some("Close modal".into()),
+        text: String::new(),
+        ..overlay_close_button()
+    };
+    let editor = Candidate {
+        id: "editor".into(),
+        css: None,
+        role: Some("dialog".into()),
+        name: Some("Edit profile".into()),
+        text: "Edit profile".into(),
+        ..overlay_close_button()
+    };
+    let unsure = VisionContext {
+        assist: Some(Arc::new(FakeVision {
+            proposal: VisionProposal {
+                confidence: 0.0,
+                action: VisionAction::Click { x: 5.0, y: 6.0 },
+            },
+        })),
+        ..vision_clicking()
+    };
+    for dialog_stays_open in [false, true] {
+        let browser = FakeBrowser {
+            candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![
+                editor.clone(),
+                close_modal.clone(),
+            ]]))),
+            screenshot_png: b"png".to_vec(),
+            candidates_after_click: Some(if dialog_stays_open {
+                vec![editor.clone()]
+            } else {
+                Vec::new()
+            }),
+            enclosing_dialog: Some(TargetSpec {
+                role: editor.role.clone(),
+                accessible_name: editor.name.clone(),
+                ..TargetSpec::default()
+            }),
+            ..FakeBrowser::default()
+        };
+        let outcome = IntentEngine::execute(
+            &dismiss("dismiss the profile editor", None, 60),
+            &PageId::new(),
+            &browser,
+            &unsure,
+        )
+        .await;
+        let clicks = browser.calls.lock().expect("call log").clicks.clone();
+        assert_eq!(clicks.len(), 1, "{clicks:?}");
+        assert_eq!(
+            clicks[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.accessible_name.as_deref()),
+            Some("Close modal")
+        );
+        assert_eq!(browser.click_xy_calls.load(Ordering::SeqCst), 0);
+        if dialog_stays_open {
+            let (error, record) = failure(outcome);
+            assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+            assert_eq!(record.verification, "obstructionPersisted");
+        } else {
+            assert!(
+                matches!(outcome, IntentOutcome::Completed { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
 }

@@ -7,7 +7,9 @@ use crate::pointer_hit::{
     covering_element_function, parse_pointer_hit, pointer_hit_function, CoveringElement, PointerHit,
 };
 use chromiumoxide::browser::BrowserHandle;
-use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
+use chromiumoxide::cdp::browser_protocol::accessibility::{
+    GetPartialAxTreeParams, QueryAxTreeParams,
+};
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
@@ -16,11 +18,12 @@ use chromiumoxide::cdp::browser_protocol::dom::{
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, GetFrameTreeParams, GetLayoutMetricsParams, Viewport,
+    CaptureScreenshotFormat, EventFileChooserOpened, GetFrameTreeParams, GetLayoutMetricsParams,
+    SetInterceptFileChooserDialogParams, Viewport,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
-    RemoteObjectId,
+    CallFunctionOnParams, EvaluateParams, ExecutionContextId, GetPropertiesParams,
+    ReleaseObjectGroupParams, ReleaseObjectParams, RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
@@ -499,6 +502,49 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Presses Escape on another focused, expanded control outside a dialog.
+    /// Returns whether Escape was sent so the caller can check the new state.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<bool, CommandError> {
+        let open = self
+            .eval::<bool>(
+                page,
+                r#"
+                const doc = el.ownerDocument;
+                if (!doc.hasFocus()) return false;
+                let active = doc.activeElement;
+                while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+                if (!active || active === el || el.contains(active) || active.contains(el) ||
+                    active.getAttribute('aria-expanded') !== 'true') return false;
+
+                // A trusted Escape can cancel the dialog even if it targets a child.
+                const dialog = 'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]';
+                for (let node = active; node; node = node.parentNode || node.host) {
+                    if (node.matches?.(dialog)) return false;
+                }
+                return !doc.querySelector('dialog:modal');
+                "#,
+            )
+            .await?;
+        if open {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+        }
+        Ok(open)
+    }
+
+    /// Pins the dialog that contains or is controlled by this element.
+    pub(crate) async fn enclosing_dialog(
+        &self,
+        page: &Page,
+    ) -> Result<Option<String>, CommandError> {
+        let selector = self
+            .eval(page, &dom_engine::enclosing_dialog_script(false))
+            .await?;
+        dom_engine::decode_enclosing_dialog(selector)
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {
@@ -613,7 +659,22 @@ impl ResolvedTarget {
                 self.eval::<bool>(page, "el.focus(); return true").await?;
             }
         }
-        let replaced = self.settle_focus(page).await?;
+        let mut replaced = self.settle_focus(page).await?;
+        // A frame from another origin that took focus with the field, such as
+        // an inline menu, gets Escape; the field is then focused again.
+        if self
+            .eval::<bool>(page, crate::typed_focus::FOREIGN_FRAME_FOCUS_SCRIPT)
+            .await
+            .unwrap_or(false)
+        {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+            tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+            self.eval::<bool>(page, "el.focus(); return true").await?;
+            replaced = self.settle_focus(page).await?;
+        }
         if clear_first && replaced {
             self.clear_focused(page).await?;
         } else if clear_first {
@@ -717,30 +778,49 @@ impl ResolvedTarget {
     }
 
     /// Chooses the option of an ARIA combobox, menu button or text box whose
-    /// text is `value` (ignoring case and spacing): types `value` to filter it
-    /// when it takes text, else opens it, waits for that option (or, with no
-    /// option roles, a newly shown element reading `value`), presses it, and
-    /// returns the option text once the control or its menu shows it. With no
-    /// such option the error lists every option the control offers.
+    /// text is `value` (ignoring case and spacing). Uses matching results
+    /// already open in the text field's popup or types to filter them. For
+    /// a button, opens its menu. Verifies the choice after pressing the option.
     pub async fn select_combobox_option(
         &self,
         page: &Page,
         value: &str,
     ) -> Result<String, CommandError> {
         let takes_text = self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await?;
-        self.eval::<bool>(page, COMBOBOX_MARK_SCRIPT).await?;
+        let wanted = option_json(value)?;
+        self.eval::<bool>(page, &format!("{COMBOBOX_OPTIONS} {COMBOBOX_MARK_SCRIPT}"))
+            .await?;
+        let already_open = takes_text
+            && self
+                .eval::<bool>(
+                    page,
+                    &format!(
+                        "const wanted={wanted}; {COMBOBOX_OPTIONS}
+                         if (!ids.length || el.getAttribute('aria-expanded') === 'false') return false;
+                         {COMBOBOX_ROLELESS} rolelessOptions(true); {COMBOBOX_PICK}
+                         return Boolean(match);"
+                    ),
+                )
+                .await?;
         if takes_text {
-            self.type_text(page, value, true).await?;
+            if !already_open {
+                // Typing a newline emits Enter. Option labels use normalized spaces.
+                self.type_text(page, &value.replace(['\r', '\n'], " "), true)
+                    .await?;
+            }
         } else {
             self.click(page).await?;
         }
-        let wanted = option_json(value)?;
+        let roleless = format!("{COMBOBOX_ROLELESS} rolelessOptions({already_open});");
         let find = format!(
-            "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
+            "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
         );
         let started = Instant::now();
         let option = loop {
             let found: ComboboxOption = self.eval(page, &find).await?;
+            if found.ambiguous {
+                return Err(ambiguous_roleless_option());
+            }
             let wait = if found.loading {
                 COMBOBOX_LOADING_WAIT
             } else {
@@ -769,12 +849,27 @@ impl ResolvedTarget {
                 ),
             ));
         };
-        self.press_option(page, option.x.zip(option.y), &wanted, COMBOBOX_ROLELESS)
-            .await?;
-        let shows = format!(
-            "const chosen={}; {} {COMBOBOX_SHOWS_SCRIPT}",
+        let readback = format!(
+            "const chosen={}; {COMBOBOX_OPTIONS} {roleless} {} {COMBOBOX_CHOICE_STATE}",
             option_json(&text)?,
             crate::form_snapshot::SHOWN_VALUE_FUNCTION
+        );
+        let before = if takes_text {
+            self.eval::<serde_json::Value>(
+                page,
+                &format!("{readback} return {{own, shown, selected}};"),
+            )
+            .await?
+        } else {
+            serde_json::Value::Null
+        };
+        self.press_option(page, option.x.zip(option.y), &wanted, &roleless)
+            .await?;
+        // Older text suggestions without a selection state signal selection
+        // by dismissing the results while retaining the chosen text.
+        let allow_dismissal = !already_open && !option.tracks_selection;
+        let shows = format!(
+            "{readback} const before={before}; const allowDismissal={allow_dismissal}; {COMBOBOX_SHOWS_SCRIPT}"
         );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
         loop {
@@ -895,7 +990,9 @@ impl ResolvedTarget {
                 let press = format!(
                     "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_PRESS}"
                 );
-                self.eval::<bool>(page, &press).await?;
+                if !self.eval::<bool>(page, &press).await? {
+                    return Err(ambiguous_roleless_option());
+                }
             }
         }
         Ok(())
@@ -913,7 +1010,8 @@ impl ResolvedTarget {
         );
         let mut last = None;
         for _ in 0..COMBOBOX_SETTLE_READS {
-            let point: ComboboxPoint = self.eval(page, &read).await?;
+            let point: Option<ComboboxPoint> = self.eval(page, &read).await?;
+            let point = point.ok_or_else(ambiguous_roleless_option)?;
             let current = point.hit.then_some((point.x, point.y));
             if current.is_some() && current == last {
                 return Ok(current);
@@ -928,8 +1026,9 @@ impl ResolvedTarget {
     /// control then offers.
     async fn offered_options(&self, page: &Page) -> Result<Vec<String>, CommandError> {
         self.clear_editable(page).await?;
-        let read =
-            format!("const wanted=''; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_OFFERED}");
+        let read = format!(
+            "{COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} rolelessOptions(false); {COMBOBOX_OFFERED}"
+        );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT / 2;
         loop {
             let offered: Vec<String> = self.eval(page, &read).await?;
@@ -1024,49 +1123,100 @@ impl ResolvedTarget {
         .map_err(cdp_error)
     }
 
+    /// Sets `paths` on the file input the target is, labels or holds; a target
+    /// with none is clicked and the files go to the input its chooser opens.
     pub async fn set_files(&self, page: &Page, paths: Vec<String>) -> Result<(), CommandError> {
-        let page = self.execution_page(page);
+        let session = self.execution_page(page);
+        let input = match self.file_input_node(session).await? {
+            Some(input) => input,
+            None => self.open_file_chooser(page).await?,
+        };
+        check_file_selection(session, input, &paths).await?;
+        set_input_files(session, input, paths).await
+    }
+
+    async fn file_input_node(&self, page: &Page) -> Result<Option<BackendNodeId>, CommandError> {
         // Raw selectors own a stable native element handle. Semantic targets,
         // however, are gathered and then re-resolved; using the opportunistic
         // native handle here can hand DOM.setFileInputFiles an already-invalid
         // backend node even when the freshly stamped JS locator still resolves.
-        if self.locator.id.is_empty() {
+        let describe = if self.locator.id.is_empty() {
             let element = self.native.as_ref().ok_or_else(|| {
                 target_error(
                     ErrorCode::TargetNotFound,
                     "file input selector did not resolve to a native element",
                 )
             })?;
-            page.execute(
-                SetFileInputFilesParams::builder()
-                    .files(paths)
-                    .backend_node_id(element.backend_node_id)
-                    .build()
-                    .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
+            DescribeNodeParams::builder()
+                .backend_node_id(element.backend_node_id)
+                .build()
+        } else {
+            let expression = locator_expression(&self.locator, FILE_INPUT_OF_SCRIPT)?;
+            let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
+            DescribeNodeParams::builder().object_id(object_id).build()
+        };
+        let node = page.execute(describe).await.map_err(cdp_error)?.result.node;
+        let file_input = node.node_name.eq_ignore_ascii_case("input")
+            && node.attributes.as_deref().is_some_and(|attributes| {
+                attributes.as_chunks::<2>().0.iter().any(|[name, value]| {
+                    name.eq_ignore_ascii_case("type") && value.trim().eq_ignore_ascii_case("file")
+                })
+            });
+        Ok(file_input.then_some(node.backend_node_id))
+    }
+
+    /// A form's submit or reset button is never clicked to look for a chooser.
+    async fn open_file_chooser(&self, page: &Page) -> Result<BackendNodeId, CommandError> {
+        let submits = self
+            .eval::<bool>(
+                page,
+                "return Boolean(el.form)&&['submit','reset','image'].includes(el.type)",
             )
+            .await?;
+        if submits {
+            return Err(target_error(
+                ErrorCode::InvalidRequest,
+                "target is a form's submit or reset button, not a file input",
+            ));
+        }
+        use futures::StreamExt;
+        let session = self.execution_page(page);
+        let mut opened = session
+            .event_listener::<EventFileChooserOpened>()
             .await
             .map_err(cdp_error)?;
-            return Ok(());
-        }
-        let expression = locator_expression(&self.locator, FILE_INPUT_OF_SCRIPT)?;
-        let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
-        let backend_node_id = page
-            .execute(DescribeNodeParams::builder().object_id(object_id).build())
+        session
+            .execute(SetInterceptFileChooserDialogParams::new(true))
             .await
-            .map_err(cdp_error)?
-            .result
-            .node
-            .backend_node_id;
-        page.execute(
-            SetFileInputFilesParams::builder()
-                .files(paths)
-                .backend_node_id(backend_node_id)
-                .build()
-                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
-        )
-        .await
-        .map_err(cdp_error)?;
-        Ok(())
+            .map_err(cdp_error)?;
+        let chosen = async {
+            // Only trusted input may open a file chooser.
+            self.scroll_into_view(page).await?;
+            let point = self.clickable_point(page).await?.ok_or_else(|| {
+                target_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "target has no clickable point",
+                )
+            })?;
+            crate::chromium::pointer_check(self.receives_pointer(page).await?)?;
+            page.click(point).await.map_err(cdp_error)?;
+            tokio::time::timeout(FILE_CHOOSER_WAIT, opened.next())
+                .await
+                .ok()
+                .flatten()
+                .and_then(|event| event.backend_node_id)
+                .ok_or_else(|| {
+                    target_error(
+                        ErrorCode::TargetNotFound,
+                        "target is not a file input and opened no file chooser",
+                    )
+                })
+        }
+        .await;
+        let _ = session
+            .execute(SetInterceptFileChooserDialogParams::new(false))
+            .await;
+        chosen
     }
 
     /// Whether the target takes typed text; see [`ACCEPTS_TEXT_SCRIPT`].
@@ -1095,6 +1245,66 @@ impl ResolvedTarget {
     }
 }
 
+/// How long a clicked upload target may take to open the file chooser.
+const FILE_CHOOSER_WAIT: Duration = Duration::from_secs(3);
+
+/// Read the input we will write to, including one created by the click and
+/// kept outside the document.
+async fn check_file_selection(
+    page: &Page,
+    input: BackendNodeId,
+    paths: &[String],
+) -> Result<(), CommandError> {
+    let object_id = page
+        .execute(ResolveNodeParams::builder().backend_node_id(input).build())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .object
+        .object_id
+        .ok_or_else(|| target_error(ErrorCode::TargetNotFound, "file input is gone"))?;
+    let mut request = CallFunctionOnParams::new(format!(
+        "function() {{ const el=this; {} }}",
+        crate::form_snapshot::file_input_control_script()
+    ));
+    request.object_id = Some(object_id.clone());
+    request.return_by_value = Some(true);
+    // Call on the resolved object in its own context. CDP rejects a separate
+    // execution context when an object id is supplied.
+    let result = page.execute(request).await;
+    let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+    let result = result.map_err(cdp_error)?.result;
+    if let Some(exception) = result.exception_details {
+        return Err(cdp_error(
+            chromiumoxide::error::CdpError::JavascriptException(Box::new(exception)),
+        ));
+    }
+    let encoded = result
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| target_error(ErrorCode::TargetNotFound, "file input is gone"))?;
+    crate::chromium::refuse_shown_files_on_control(encoded, paths)
+}
+
+async fn set_input_files(
+    page: &Page,
+    input: BackendNodeId,
+    paths: Vec<String>,
+) -> Result<(), CommandError> {
+    page.execute(
+        SetFileInputFilesParams::builder()
+            .files(paths)
+            .backend_node_id(input)
+            .build()
+            .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
+    )
+    .await
+    .map_err(cdp_error)?;
+    Ok(())
+}
+
 /// How long an ARIA combobox may take to show the wanted option, and to show
 /// the choice once the option is pressed.
 const COMBOBOX_OPTION_WAIT: Duration = Duration::from_secs(3);
@@ -1113,6 +1323,10 @@ struct ComboboxOption {
     shown: Vec<String>,
     #[serde(default)]
     loading: bool,
+    #[serde(default)]
+    ambiguous: bool,
+    #[serde(default)]
+    tracks_selection: bool,
 }
 
 #[derive(Deserialize)]
@@ -1138,6 +1352,13 @@ struct ComboboxItems {
     y: Option<f64>,
 }
 
+fn ambiguous_roleless_option() -> CommandError {
+    target_error(
+        ErrorCode::TargetAmbiguous,
+        "more than one roleless option matches the requested value",
+    )
+}
+
 fn option_json(value: &str) -> Result<String, CommandError> {
     serde_json::to_string(value).map_err(|error| {
         target_error(
@@ -1150,39 +1371,117 @@ fn option_json(value: &str) -> Result<String, CommandError> {
 /// Function body with `el` bound: whether the combobox is a text field.
 const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
 
-/// Function body with `el` bound: records the elements shown before the
-/// control is typed into or opened, so suggestions without option roles can
-/// be told apart from the page around them.
-const COMBOBOX_MARK_SCRIPT: &str = "const shown=new WeakSet(); for(const node of el.ownerDocument.body?.querySelectorAll('*')||[]) if(node.getClientRects().length) shown.add(node); el[Symbol.for('bobby.shownBeforeOptions')]=shown; return true;";
+/// Records rendered elements in the document and the field's shadow root so
+/// the roleless fallback can recognize suggestions that appear after typing.
+const COMBOBOX_MARK_SCRIPT: &str = r#"
+    const shown = new WeakSet();
+    for (const root of pageRoots) {
+        for (const node of root.querySelectorAll('*')) {
+            if (node.getClientRects().length) shown.add(node);
+        }
+    }
+    el[Symbol.for('bobby.shownBeforeOptions')] = shown;
+    return true;
+"#;
 
 /// Shared by the option scripts, with `el` bound: the visible, enabled
 /// options and menu items of the control's own popup (`aria-controls` or
 /// `aria-owns`), else of its document.
-const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]')]).filter(o=>visible(o)&&enabled(o)); const home=el.getRootNode(); const owner=home.getElementById?home:doc; let options=of(ids.map(id=>owner.getElementById(id)).filter(Boolean)); if(!options.length) options=of(home===doc?[doc]:[home,doc]);";
+const COMBOBOX_OPTIONS: &str = r#"
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
+    const key = s => norm(s).toLowerCase();
+    const doc = el.ownerDocument;
+    const home = el.getRootNode();
+    const pageRoots = home === doc ? [doc] : [home, doc];
+    const visible = o => {
+        const r = o.getBoundingClientRect();
+        const s = getComputedStyle(o);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    };
+    const ids = ['aria-controls', 'aria-owns']
+        .flatMap(a => (el.getAttribute(a) || '').split(/\s+/)).filter(Boolean);
+    const roots = ids.length
+        ? [...new Set(ids.map(id => home.getElementById?.(id) || doc.getElementById(id)).filter(Boolean))]
+        : pageRoots;
+    const listed = roots.flatMap(r => [...r.querySelectorAll(
+        '[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]'
+    )]);
+    let options = listed.filter(o => visible(o) && o.getAttribute('aria-disabled') !== 'true');
+    let inferredOptions = false;
+"#;
 
-/// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
-/// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
-const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&row(n)); }";
+/// After [`COMBOBOX_OPTIONS`], detects roleless rows. Only a popup associated
+/// with the field can supply rows that were visible before the operation.
+/// Visible live containers can hold options alongside announcement nodes.
+const COMBOBOX_ROLELESS: &str = r#"
+    const rolelessOptions = includeExisting => {
+        if (options.length) return;
+        const useExisting = includeExisting && ids.length > 0 && el.getAttribute('aria-expanded') !== 'false';
+        const before = el[Symbol.for('bobby.shownBeforeOptions')];
+        if (!before && !useExisting) return;
+        const row = n => {
+            const own = norm(n.textContent);
+            if (!own || own.length > 200) return false;
+            const kids = [...n.children].filter(c => norm(c.textContent));
+            return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
+        };
+        const tiny = n => {
+            const r = n.getBoundingClientRect();
+            return r.width <= 1 || r.height <= 1;
+        };
+        const spoken = n => {
+            const region = n.closest('[aria-live]');
+            const live = region?.getAttribute('aria-live').trim().toLowerCase();
+            const announcement = (live === 'polite' || live === 'assertive')
+                && (region === n || tiny(region));
+            return tiny(n) || announcement
+                || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
+        };
+        inferredOptions = true;
+        options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>
+            (useExisting || !before.has(n)) && n !== el && !n.contains(el) && visible(n) && !spoken(n) && row(n));
+    };
+"#;
 
-/// With `wanted` bound, after the option lists: the option whose text is
-/// `wanted`, exactly, else ignoring case.
-const COMBOBOX_PICK: &str = "const exact=options.filter(o=>norm(o.textContent)===norm(wanted)); const match=(exact.length?exact:options.filter(o=>norm(o.textContent).toLowerCase()===norm(wanted).toLowerCase()))[0];";
+/// After the option lists: prefer exact text, then ignore case. Inferred
+/// rows have no semantic identity to break a tie.
+const COMBOBOX_PICK: &str = r#"
+    const exact = options.filter(o => norm(o.textContent) === norm(wanted));
+    const matches = exact.length ? exact : options.filter(o => key(o.textContent) === key(wanted));
+    const ambiguous = inferredOptions && matches.length > 1;
+    const match = ambiguous ? null : matches[0];
+"#;
 
 /// After [`COMBOBOX_PICK`]: the matching option's text and viewport center,
 /// or the texts of the options shown.
-const COMBOBOX_OPTION_FOUND: &str = "if(!match){ const busy=n=>n?.getAttribute('aria-busy')==='true'; const loading=busy(el)||ids.some(id=>busy(owner.getElementById(id)))||(options.length>0&&options.every(o=>/^(loading|searching|please wait)\\b/i.test(norm(o.textContent)))); return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80)), loading}; } match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
+const COMBOBOX_OPTION_FOUND: &str = r#"
+    if (ambiguous) return {ambiguous};
+    if (!match) {
+        const busy = n => n.getAttribute?.('aria-busy') === 'true';
+        const loading = busy(el) || roots.some(busy) ||
+            (options.length > 0 && options.every(o => /^(loading|searching|please wait)\b/i.test(norm(o.textContent))));
+        return {shown: options.slice(0, 10).map(o => norm(o.textContent).slice(0, 80)), loading};
+    }
+    match.scrollIntoView({block: 'nearest'});
+    const r = match.getBoundingClientRect();
+    return {
+        text: norm(match.textContent), x: r.left + r.width / 2, y: r.top + r.height / 2,
+        tracks_selection: match.hasAttribute('aria-selected') || match.hasAttribute('aria-checked')
+    };
+"#;
 
 /// After [`COMBOBOX_PICK`]: the matching option's viewport center and whether
 /// that point hits the option.
-const COMBOBOX_OPTION_POINT: &str = "if(!match) return {x:0,y:0,hit:false}; const r=match.getBoundingClientRect(); const x=r.left+r.width/2; const y=r.top+r.height/2; const at=doc.elementFromPoint(x,y); return {x,y,hit:Boolean(at&&(at===match||match.contains(at)))};";
+const COMBOBOX_OPTION_POINT: &str = "if(ambiguous) return null; if(!match) return {x:0,y:0,hit:false}; const r=match.getBoundingClientRect(); const x=r.left+r.width/2; const y=r.top+r.height/2; const at=doc.elementFromPoint(x,y); return {x,y,hit:Boolean(at&&(at===match||match.contains(at)))};";
 
 /// Function body with `el` bound: its text, a listbox or menu reading one
 /// option per line so adjacent options never run together.
 const LISTED_TEXT_SCRIPT: &str = "const items=el.matches('[role=\"listbox\"],[role=\"menu\"]')?[...el.querySelectorAll('[role=\"option\"],[role=\"menuitem\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"]')]:[]; return items.length?items.map(o=>String(o.innerText||o.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).join('\\n'):(el.innerText||'');";
 
-/// After [`COMBOBOX_PICK`]: presses the matching option with the pointer
-/// and mouse events a person's click fires.
-const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); for(const type of ['pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{bubbles:true,cancelable:true,composed:true,view:doc.defaultView}))} return true;";
+/// After [`COMBOBOX_PICK`]: hovers, then presses the matching option with the
+/// pointer and mouse events a person's click fires, so a list that commits
+/// its highlighted option commits this one.
+const COMBOBOX_OPTION_PRESS: &str = "if(ambiguous) return false; if(!match) throw new Error('the combobox option is gone'); const r=match.getBoundingClientRect(); const at={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; for(const type of ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove','pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{...at,bubbles:!type.endsWith('enter'),cancelable:true,composed:true,view:doc.defaultView}))} return true;";
 
 /// After the option lists: the texts of every option offered.
 const COMBOBOX_OFFERED: &str =
@@ -1191,15 +1490,46 @@ const COMBOBOX_OFFERED: &str =
 /// With `chosen` bound, after [`COMBOBOX_OPTIONS`]: the menu's items, the
 /// chosen values no item reads, the checked items, and the first item whose
 /// checked state differs from `chosen`, with its viewport center.
-const COMBOBOX_ITEMS_STATE: &str = "const key=s=>norm(s).toLowerCase(); const want=new Set(chosen.map(key)); const on=o=>o.getAttribute('aria-checked')==='true'||o.getAttribute('aria-selected')==='true'; const items=options.map(o=>({o,text:norm(o.textContent),on:on(o)})); const missing=items.length?chosen.filter(v=>!items.some(i=>key(i.text)===key(v))):[]; const next=items.find(i=>want.has(key(i.text))!==i.on); let x=null,y=null; if(next){next.o.scrollIntoView({block:'nearest'}); const r=next.o.getBoundingClientRect(); x=r.left+r.width/2; y=r.top+r.height/2;} return {items:items.slice(0,50).map(i=>i.text.slice(0,120)), missing, checked:items.filter(i=>i.on).map(i=>i.text), next:next?next.text:null, x, y};";
+const COMBOBOX_ITEMS_STATE: &str = "const want=new Set(chosen.map(key)); const on=o=>o.getAttribute('aria-checked')==='true'||o.getAttribute('aria-selected')==='true'; const items=options.map(o=>({o,text:norm(o.textContent),on:on(o)})); const missing=items.length?chosen.filter(v=>!items.some(i=>key(i.text)===key(v))):[]; const next=items.find(i=>want.has(key(i.text))!==i.on); let x=null,y=null; if(next){next.o.scrollIntoView({block:'nearest'}); const r=next.o.getBoundingClientRect(); x=r.left+r.width/2; y=r.top+r.height/2;} return {items:items.slice(0,50).map(i=>i.text.slice(0,120)), missing, checked:items.filter(i=>i.on).map(i=>i.text), next:next?next.text:null, x, y};";
 
 /// Function body with `el` bound: whether the control's menu is still open.
 const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='false') return false; const visible=o=>{const r=o.getBoundingClientRect(); return r.width>0&&r.height>0&&getComputedStyle(o).visibility!=='hidden'}; return [...el.ownerDocument.querySelectorAll('[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"],[role=\"option\"]')].some(visible);";
 
-/// Function body with `el` and `chosen` bound: whether the control, a menu
-/// item checked for the chosen text, or the nearest ancestor of the control
-/// that holds no option shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); const compact=s=>s.replace(/\\s/g,''); if(!norm(own)&&shown&&(words(shown).every(w=>words(norm(chosen)).includes(w))||compact(norm(chosen)).includes(compact(shown)))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+/// Reads a choice's text, adjacent visible value, and selection state within its popup.
+const COMBOBOX_CHOICE_STATE: &str = r#"
+    const own = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+        ? el.value : el.innerText ?? el.textContent;
+    const label = key(chosen);
+    const readsChoice = o => key(o.textContent) === label;
+    // In a single-select popup aria-selected can follow the highlighted row.
+    const selected = listed.some(o => readsChoice(o) &&
+        (o.getAttribute('aria-checked') === 'true' || (o.getAttribute('aria-selected') === 'true' &&
+            o.closest('[role="listbox"]')?.getAttribute('aria-multiselectable') === 'true')));
+    const shown = key(shownValue(el));
+"#;
+
+/// A text field must show evidence beyond the query typed before the press.
+/// A button may display the choice in its own text or adjacent visible text.
+const COMBOBOX_SHOWS_SCRIPT: &str = r#"
+    const value = key(own);
+    if (selected && (!before || !before.selected)) return {chosen: true, value: label};
+    if (value === label && (!before || own !== before.own ||
+        (allowDismissal && !options.some(readsChoice)))) return {chosen: true, value};
+    const words = s => s.split(' ').filter(Boolean);
+    const compact = s => s.replace(/\s/g, '');
+    const showsLabel = shown && (shown === label || (!value &&
+        (words(shown).every(w => words(label).includes(w)) || compact(label).includes(compact(shown)))));
+    if (showsLabel && (!before || shown !== before.shown)) return {chosen: true, value: shown};
+    if (before) return {chosen: false, value};
+
+    let node = el.parentElement;
+    for (let hop = 0; node && hop < 3; hop++, node = node.parentElement) {
+        if (node.querySelector('[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]')) break;
+        const text = key(node.innerText);
+        if (text.length <= label.length + 200 && text.includes(label)) return {chosen: true, value: text};
+    }
+    return {chosen: false, value};
+"#;
 
 /// Function body with `el` bound: the page rectangle to capture for `el`,
 /// scrolled into view. An element under 4 px a side (a hidden file input)
@@ -1351,7 +1681,7 @@ pub(crate) async fn iframe_candidates(
     Ok(raw
         .into_iter()
         .map(into_candidate)
-        .filter(|candidate| candidate.role.as_deref() == Some("iframe") && candidate.state.attached)
+        .filter(|candidate| candidate.tag.as_deref() == Some("iframe") && candidate.state.attached)
         .collect())
 }
 
@@ -1380,7 +1710,7 @@ fn semantic_iframe_hop(
     let visible_iframes: Vec<_> = candidates
         .iter()
         .filter(|other| {
-            other.role.as_deref() == Some("iframe") && other.state.attached && other.state.visible
+            other.tag.as_deref() == Some("iframe") && other.state.attached && other.state.visible
         })
         .collect();
     types::SemanticTargetSegment {
@@ -1578,7 +1908,19 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        let mut candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        // A generated iframe hop identifies a DOM frame owner regardless of
+        // its ARIA role. Keep explicit non-iframe role selectors as written.
+        if normalized_frame_target
+            .role
+            .as_deref()
+            .is_some_and(|role| role.eq_ignore_ascii_case("iframe"))
+        {
+            candidates.retain(|candidate| candidate.tag.as_deref() == Some("iframe"));
+            for candidate in &mut candidates {
+                candidate.role = Some("iframe".into());
+            }
+        }
         let (candidate, evidence, _) = choose(&normalized_frame_target, &candidates, true)?;
         frame_path.push(semantic_iframe_hop(&candidate, &candidates));
         frame_trace.push(evidence);
@@ -1721,6 +2063,54 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     }
 }
 
+/// The CSS selector of a target that carries `css` and nothing else.
+pub(crate) fn css_only_selector(target: &TargetSpec) -> Option<&str> {
+    target.css.as_deref().filter(|_| {
+        target.test_id.is_none()
+            && target.role.is_none()
+            && target.accessible_name.is_none()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.attributes.is_empty()
+            && target.frame_path.is_empty()
+            && target.shadow_path.is_empty()
+            && target.ordinal.is_none()
+    })
+}
+
+fn selector_target(
+    page_id: &PageId,
+    element: Element,
+    target: TargetSpec,
+    best_match_authorized: bool,
+) -> ResolvedTarget {
+    ResolvedTarget {
+        native: Some(element),
+        locator: JsLocator {
+            scope: LocatorScope::Context(None),
+            shadow_hosts: Vec::new(),
+            id: String::new(),
+        },
+        execution_page: None,
+        frame_id: None,
+        iframe_hop: None,
+        frame_path: Vec::new(),
+        frame_owners: Vec::new(),
+        evidence: Evidence::Resolution {
+            target: Box::new(target),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: page_id.clone(),
+                frame: None,
+                role: None,
+                name: None,
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized,
+        },
+    }
+}
+
 pub async fn resolve_target_with_visibility(
     page_id: &PageId,
     page: &Page,
@@ -1736,20 +2126,11 @@ pub async fn resolve_target_with_visibility(
                 format!("no element matches selector `{selector}`"),
             )
         })?;
-        return Ok(ResolvedTarget {
-            native: Some(element),
-            locator: JsLocator {
-                scope: LocatorScope::Context(None),
-                shadow_hosts: Vec::new(),
-                id: String::new(),
-            },
-            execution_page: None,
-            frame_id: None,
-            iframe_hop: None,
-            frame_path: Vec::new(),
-            frame_owners: Vec::new(),
-            evidence: selector_evidence(page_id, selector),
-        });
+        let target = TargetSpec {
+            css: Some(selector.into()),
+            ..TargetSpec::default()
+        };
+        return Ok(selector_target(page_id, element, target, false));
     };
     validate_target_spec(target)?;
 
@@ -1767,7 +2148,28 @@ pub async fn resolve_target_with_visibility(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) = match choose(target, &raw, require_visible) {
+        Ok(chosen) => chosen,
+        // A css-only target on an element no candidate covers (a container,
+        // a landmark, a class or combinator selector) resolves as a selector.
+        Err(error) if error.code == ErrorCode::TargetNotFound => {
+            let Some(css) = css_only_selector(target) else {
+                return Err(error);
+            };
+            return match query_css_target(page, css, require_visible, target.allow_best_match).await
+            {
+                Ok(Some((element, best_match_authorized))) => Ok(selector_target(
+                    page_id,
+                    element,
+                    target.clone(),
+                    best_match_authorized,
+                )),
+                Err(ambiguous) if ambiguous.code == ErrorCode::TargetAmbiguous => Err(ambiguous),
+                _ => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let iframe_hop = (candidate.role.as_deref() == Some("iframe"))
         .then(|| semantic_iframe_hop(&candidate, &raw));
     let owner = owners.get(&candidate.id).cloned();
@@ -1931,9 +2333,56 @@ async fn align_with_accessibility(
     {
         return Ok(candidates);
     }
-    let exposed = accessibility_matches(page, context_id, role, name).await?;
+    let mut exposed = accessibility_matches(page, context_id, role, name).await?;
+    add_unlabeled_file_matches(page, context_id, role, name, &candidates, &mut exposed).await;
     apply_accessibility_alignment(&mut candidates, role, name, &exposed);
     Ok(candidates)
+}
+
+/// An unlabeled file input takes the name the accessibility tree gives it from
+/// the browser's own button text, which a name query does not find.
+async fn add_unlabeled_file_matches(
+    page: &Page,
+    context_id: Option<ExecutionContextId>,
+    role: &str,
+    name: &str,
+    candidates: &[Candidate],
+    matches: &mut Vec<String>,
+) {
+    if role != "button" {
+        return;
+    }
+    let scope = LocatorScope::Context(context_id);
+    for candidate in candidates.iter().filter(|candidate| {
+        candidate.name.as_deref().is_none_or(str::is_empty)
+            && candidate.attributes.get("type").map(String::as_str) == Some("file")
+    }) {
+        let Ok(backend_node_id) = candidate_backend_node_id(page, &scope, &[], candidate).await
+        else {
+            continue;
+        };
+        let Ok(tree) = page
+            .execute(
+                GetPartialAxTreeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .fetch_relatives(false)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let name_matches = tree
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.backend_dom_node_id == Some(backend_node_id) && !node.ignored)
+            .and_then(|node| node.name.as_ref()?.value.as_ref()?.as_str().map(str::trim))
+            == Some(name.trim());
+        if name_matches {
+            matches.push(candidate.id.clone());
+        }
+    }
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
@@ -2294,6 +2743,64 @@ async fn element_from_remote_object(
         .map_err(cdp_error)
 }
 
+/// Resolve CSS matches outside the action candidate census, keeping the
+/// selected node and its uniqueness check in the same DOM read.
+async fn query_css_target(
+    page: &Page,
+    selector: &str,
+    require_visible: bool,
+    allow_best_match: bool,
+) -> Result<Option<(Element, bool)>, CommandError> {
+    let css = serde_json::to_string(selector)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let visibility = dom_engine::ELEMENT_VISIBILITY_SCRIPT;
+    let group = format!(
+        "bobby-css-resolve-{}",
+        TARGET_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut params = EvaluateParams::new(format!(
+        r#"(() => {{
+            const matches = [];
+            for (const el of document.querySelectorAll({css})) {{
+                if ({require_visible} && !(() => {{ {visibility} }})()) continue;
+                matches.push(el);
+                if (matches.length === 2) break;
+            }}
+            return matches;
+        }})()"#
+    ));
+    params.return_by_value = Some(false);
+    params.object_group = Some(group.clone());
+    let matched = async {
+        let result = page.evaluate(params).await.map_err(cdp_error)?;
+        let Some(array_id) = result.object().object_id.clone() else {
+            return Ok(None);
+        };
+        let mut params = GetPropertiesParams::new(array_id);
+        params.own_properties = Some(true);
+        let properties = page.execute(params).await.map_err(cdp_error)?.result.result;
+        let multiple = properties.iter().any(|property| property.name == "1");
+        if multiple && !allow_best_match {
+            return Err(target_error(
+                ErrorCode::TargetAmbiguous,
+                "CSS selector matched multiple eligible elements. Narrow the selector or set allowBestMatch",
+            ));
+        }
+        let first = properties
+            .into_iter()
+            .find(|property| property.name == "0")
+            .and_then(|property| property.value)
+            .and_then(|object| object.object_id);
+        match first {
+            Some(id) => Ok(Some((element_from_remote_object(page, id).await?, multiple))),
+            None => Ok(None),
+        }
+    }
+    .await;
+    let _ = page.execute(ReleaseObjectGroupParams::new(group)).await;
+    matched
+}
+
 /// The first element `selector` matches under `owner`, or in the page's
 /// document without one.
 async fn query_element(
@@ -2505,22 +3012,14 @@ pub(crate) async fn frame_session(
         .map(|session| (frame, session)))
 }
 
-/// Every frame id the page holds, its own frame tree and each frame from
-/// another site nested in it at any depth, with the sessions of those frames.
+/// Every frame id in the page's tree, including nested cross-site frames.
 pub(crate) async fn page_frames(
     page: &Page,
     browser: &BrowserHandle,
-) -> Result<
-    (
-        HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>,
-        Vec<Page>,
-    ),
-    CommandError,
-> {
+) -> Result<HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
     use chromiumoxide::cdp::browser_protocol::page::FrameId;
     use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
     let mut ids = frame_tree_ids(page).await?;
-    let mut sessions = Vec::new();
     let targets = browser
         .execute(GetTargetsParams::default())
         .await
@@ -2540,7 +3039,7 @@ pub(crate) async fn page_frames(
             })
             .collect();
         if nested.is_empty() {
-            return Ok((ids, sessions));
+            return Ok(ids);
         }
         for target in nested {
             ids.insert(FrameId::new(target.target_id.inner().clone()));
@@ -2550,10 +3049,39 @@ pub(crate) async fn page_frames(
             };
             if let Ok(frames) = frame_tree_ids(&session).await {
                 ids.extend(frames);
-                sessions.push(session);
             }
         }
     }
+}
+
+/// How long a frame overlay gets to close after Escape.
+const FRAME_OVERLAY_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Closes a frame from another origin that holds focus or covers the page's
+/// controls with Escape. `Ok(false)` when there is none; an error when it stays.
+pub(crate) async fn close_frame_overlay(page: &Page) -> Result<bool, CommandError> {
+    let found = |focus: bool| async move {
+        page.evaluate(format!(
+            "({})({focus})",
+            crate::obstruction::FRAME_OVERLAY_SCRIPT
+        ))
+        .await
+        .map_err(cdp_error)?
+        .into_value::<bool>()
+        .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
+    };
+    if !found(true).await? {
+        return Ok(false);
+    }
+    page.press_key("Escape").await.map_err(cdp_error)?;
+    tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+    if found(false).await? {
+        return Err(target_error(
+            ErrorCode::ObstructionSuspected,
+            crate::obstruction::FRAME_OVERLAY_PERSISTED,
+        ));
+    }
+    Ok(true)
 }
 
 /// Extension frames that hold a password manager's own sign-in prompt. Only
@@ -2841,29 +3369,10 @@ async fn evaluate_in_context<T: DeserializeOwned>(
     let mut params = EvaluateParams::new(expression);
     params.context_id = context_id;
     params.return_by_value = Some(true);
-    page.evaluate(params)
-        .await
-        .map_err(cdp_error)?
-        .into_value()
+    let result = page.evaluate(params).await.map_err(cdp_error)?;
+    // A script that returns `null` or `undefined` decodes as JSON null.
+    serde_json::from_value(result.value().cloned().unwrap_or(serde_json::Value::Null))
         .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
-}
-
-fn selector_evidence(page_id: &PageId, selector: &str) -> Evidence {
-    Evidence::Resolution {
-        target: Box::new(TargetSpec {
-            css: Some(selector.into()),
-            ..TargetSpec::default()
-        }),
-        fingerprint: Box::new(TargetFingerprint {
-            page_id: page_id.clone(),
-            frame: None,
-            role: None,
-            name: None,
-            stable_attributes: BTreeMap::new(),
-        }),
-        candidates: Vec::new(),
-        best_match_authorized: false,
-    }
 }
 
 /// A dead browser target rewritten to this message must still be recognized

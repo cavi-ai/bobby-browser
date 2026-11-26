@@ -481,6 +481,9 @@ pub enum Evidence {
         title: String,
         text: String,
         html: Option<String>,
+        /// `text` was cut at the page-text bound; present only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     /// Result of a boundary submit that used `networkQuiet` or no expected
     /// state as its postcondition. This classifies the settled page without
@@ -999,6 +1002,12 @@ pub enum ErrorCode {
     // A submit did not reach its expected state because the page now asks for
     // a one-time code. Not a failure of the submit: the code is the next step.
     VerificationCodeRequired,
+    // A submit did not reach its expected state because the page asks to
+    // confirm an email address through a link it sent.
+    VerificationLinkRequired,
+    // A submit missed its expected state while the page reads as a
+    // confirmation: the effect likely landed somewhere the caller did not expect.
+    ConfirmedOutsideExpectedState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1042,6 +1051,10 @@ pub enum RuntimeError {
     /// resubmitting them unchanged is the right move once the engine is up.
     #[error("{0}")]
     EngineUnreachable(String),
+    /// A browser command failed. The worker's error keeps its code and
+    /// whether resubmitting the same call can succeed.
+    #[error("browser command failed: {}", .0.message)]
+    Command(CommandError),
     #[error("internal error: {0}")]
     Internal(String),
 }

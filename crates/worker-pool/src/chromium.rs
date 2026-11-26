@@ -39,7 +39,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
+    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, FrameId,
     NavigateParams, Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::system_info::GetInfoParams;
@@ -72,8 +72,9 @@ use zeroize::Zeroizing;
 use crate::{
     process_registry, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
-        resolve_target as resolve_browser_target, resolve_target_with_visibility,
+        css_only_selector, gather_candidates, inspect_page_scoped_target, page_frames,
+        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -433,6 +434,9 @@ pub struct ChromiumWorkerFactory {
     /// with the session. `Some(dir)` persists it across sessions instead, the
     /// Chromium counterpart to a Firefox companion's enrolled profile.
     durable_profile_dir: Option<PathBuf>,
+    /// A durable profile's Chrome uses the system keychain and password store
+    /// instead of the mock keychain; disposable profiles always use the mock.
+    system_keychain: bool,
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
@@ -455,6 +459,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -472,6 +477,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -511,6 +517,13 @@ impl ChromiumWorkerFactory {
         self
     }
 
+    /// Whether a durable profile's Chrome launches with the system keychain
+    /// and password store. Disposable profiles keep the mock keychain.
+    pub fn with_system_keychain(mut self, system_keychain: bool) -> Self {
+        self.system_keychain = system_keychain;
+        self
+    }
+
     fn chromium_config(&self, profile_dir: &Path) -> Result<ChromiumConfig, CommandError> {
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir)
@@ -532,6 +545,9 @@ impl ChromiumWorkerFactory {
         // password manager; disposable profiles have none to run.
         if self.durable_profile_dir.is_some() {
             builder = builder.installed_extensions();
+            if self.system_keychain {
+                builder = builder.system_keychain();
+            }
         }
         // The fingerprint screen is spoofed at the JS layer, but CSS media
         // queries are evaluated natively against the real window: a default
@@ -2300,7 +2316,7 @@ async fn press(
     resolved.click(page).await
 }
 
-fn pointer_check(
+pub(crate) fn pointer_check(
     (hit, cover): (PointerHit, Option<crate::CoveringElement>),
 ) -> Result<(), CommandError> {
     match hit {
@@ -2842,6 +2858,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let url = page
             .url()
             .await
@@ -2852,6 +2869,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
+        let mut truncated = false;
         let (text, html, resolution) = if command
             .target
             .as_ref()
@@ -2877,7 +2895,8 @@ impl crate::ObservationEngine for ChromiumWorker {
             // `find_element("body")` builds a chromiumoxide Element via
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
-            let text = read_page_body_text(&page).await?;
+            let (text, cut) = read_bounded_page_body_text(&page).await?;
+            truncated = cut;
             let text = self.with_form_values(&page, page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
@@ -2911,9 +2930,13 @@ impl crate::ObservationEngine for ChromiumWorker {
             title: page_title_evidence(title),
             text: redact_secret_material(text),
             html: html.map(redact_secret_material),
+            truncated,
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
+        }
+        if !settled {
+            evidence.push(page_busy_evidence());
         }
         Ok(evidence)
     }
@@ -3103,6 +3126,7 @@ impl crate::ObservationEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let max_controls = max_controls.unwrap_or(512) as usize;
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let value: serde_json::Value = page
             .evaluate(crate::form_snapshot_expression_with_limit(
                 page_id,
@@ -3118,7 +3142,12 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        let mut raw = crate::form_snapshot::decode_raw_form_snapshot(encoded)?;
+        let browser = self.browser_handle().await?;
+        add_unreachable_frame_forms(&page, &browser, max_controls, &mut raw).await;
+        let mut snapshot =
+            crate::form_snapshot::normalize_form_snapshot(page_id.clone(), raw, max_controls)?;
+        snapshot.page_busy = !settled;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
@@ -3130,6 +3159,25 @@ impl crate::ObservationEngine for ChromiumWorker {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
         gather_candidates(&page, target, Some(&browser)).await
+    }
+
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        let resolved =
+            resolve_browser_target(page_id, &page, "", Some(target), Some(&browser)).await?;
+        Ok(resolved
+            .enclosing_dialog(&page)
+            .await?
+            .map(|css| TargetSpec {
+                css: Some(css),
+                frame_path: target.frame_path.clone(),
+                ..TargetSpec::default()
+            }))
     }
 
     async fn read_attribute(
@@ -3152,6 +3200,11 @@ impl crate::ObservationEngine for ChromiumWorker {
         crate::targeting::password_manager_prompt_point(&page, &browser)
             .await
             .map(|point| (point.x, point.y))
+    }
+
+    async fn close_frame_overlay(&self, page_id: &PageId) -> Result<bool, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        crate::targeting::close_frame_overlay(&page).await
     }
 
     async fn element_at_point(
@@ -3632,12 +3685,11 @@ impl crate::InputEngine for ChromiumWorker {
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         if let Some(encoded) = resolved.form_control(&page).await? {
-            let control = crate::decode_form_control(&encoded, unnamed_control_target())?;
-            refuse_shown_files(&control.state, &path_strings)?;
+            refuse_shown_files_on_control(&encoded, &path_strings)?;
         }
         let digests = crate::upload::content_digests(paths)?;
         upload_cache.commit(resolved_uploads);
-        resolved.set_files(&page, path_strings.clone()).await?;
+        resolved.set_files(&page, path_strings).await?;
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
@@ -3754,6 +3806,13 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
         clear_first: bool,
     ) -> Result<(), CommandError> {
         refuse_dialog_covered_field(&prepared.page, &prepared.resolved).await?;
+        if prepared
+            .resolved
+            .close_foreign_popup(&prepared.page)
+            .await?
+        {
+            refuse_dialog_covered_field(&prepared.page, &prepared.resolved).await?;
+        }
         if crate::SessionSettings::humanization_enabled(self) {
             self.humanized_type_text(&prepared.page, &prepared.resolved, value, clear_first)
                 .await?;
@@ -3906,6 +3965,19 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
             ));
         }
         Ok(())
+    }
+
+    async fn take_peer_new_password(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<bool, CommandError> {
+        prepared
+            .resolved
+            .fill_secret(
+                &prepared.page,
+                crate::control_action_fill::PEER_NEW_PASSWORD_SCRIPT,
+            )
+            .await
     }
 }
 
@@ -4165,113 +4237,124 @@ impl crate::EventsEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
-        // A frame from another site reports its downloads on its own session.
-        let (frame_ids, frame_sessions) = page_frames(&page, &browser).await?;
-        let behavior = SetDownloadBehaviorParams::builder()
-            .behavior(SetDownloadBehaviorBehavior::Allow)
-            .download_path(self.download_dir.to_string_lossy())
-            .events_enabled(true)
-            .build()
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        let mut begin_streams = Vec::new();
-        let mut progress_streams = Vec::new();
-        for session in std::iter::once(&page).chain(&frame_sessions) {
-            tokio::time::timeout(
-                Duration::from_millis(command.timeout_ms),
-                session.execute(behavior.clone()),
-            )
-            .await
-            .map_err(|_| timeout_error(command.timeout_ms))?
-            .map_err(command_failed)?;
-            begin_streams.push(
-                session
-                    .event_listener::<EventDownloadWillBegin>()
-                    .await
-                    .map_err(command_failed)?,
-            );
-            progress_streams.push(
-                session
-                    .event_listener::<EventDownloadProgress>()
-                    .await
-                    .map_err(command_failed)?,
-            );
-        }
-        let mut begins = futures::stream::select_all(begin_streams);
-        let mut progress = futures::stream::select_all(progress_streams);
-        // A popup may have backgrounded the opener. Activate it before DOM
-        // resolution, which can stall on a background target too.
         let _front = self.bring_page_to_front(&page).await;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
-        // Download events reach every connection to a shared browser: only
-        // this page's frames start this session's download.
-        let frames = self.shared_browser.then_some(frame_ids);
-        press(&page, &resolved).await?;
-        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let begin = begins.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download event stream closed",
-                    )
-                })?;
-                if frames
-                    .as_ref()
-                    .is_none_or(|frames| frames.contains(&begin.frame_id))
-                {
-                    return Ok::<_, CommandError>(begin);
-                }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let completed = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let event = progress.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download progress stream closed",
-                    )
-                })?;
-                if event.guid == begin.guid {
+        let mut frames = bounded_cmd(page_frames(&page, &browser)).await?;
+        let behavior = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+            .download_path(self.download_dir.to_string_lossy())
+            .events_enabled(true)
+            .build()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        bounded_cdp(browser.execute(behavior), command_failed).await?;
+        // Browser-level events include downloads that start in a newly opened tab
+        // before a CDP session attaches to it.
+        let mut popups = bounded_cdp(
+            browser.event_listener::<EventTargetCreated>(),
+            command_failed,
+        )
+        .await?;
+        let mut begins = bounded_cdp(
+            browser.event_listener::<EventDownloadWillBegin>(),
+            command_failed,
+        )
+        .await?;
+        let mut progress = bounded_cdp(
+            browser.event_listener::<EventDownloadProgress>(),
+            command_failed,
+        )
+        .await?;
+        let (begin, completed) =
+            tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+                press(&page, &resolved).await?;
+                let begin = loop {
+                    tokio::select! {
+                        biased;
+                        created = popups.next() => {
+                            let popup = &created.ok_or_else(|| {
+                                driver_error(ErrorCode::BrowserCommandFailed, "target event stream closed")
+                            })?.target_info;
+                            if popup.r#type == "page"
+                                && (popup.opener_id.as_ref() == Some(page.target_id())
+                                    || popup.opener_frame_id.as_ref().is_some_and(|id| frames.contains(id)))
+                            {
+                                frames.insert(FrameId::new(popup.target_id.inner().clone()));
+                            }
+                        }
+                        begin = begins.next() => {
+                            let begin = begin.ok_or_else(|| {
+                                driver_error(ErrorCode::BrowserCommandFailed, "download event stream closed")
+                            })?;
+                            if frames.contains(&begin.frame_id) {
+                                break begin;
+                            }
+                        }
+                    }
+                };
+                loop {
+                    let event = progress.next().await.ok_or_else(|| {
+                        driver_error(ErrorCode::BrowserCommandFailed, "download progress stream closed")
+                    })?;
+                    if event.guid != begin.guid {
+                        continue;
+                    }
                     match event.state {
-                        DownloadProgressState::Completed => return Ok::<_, CommandError>(event),
+                        DownloadProgressState::Completed => return Ok((begin, event)),
                         DownloadProgressState::Canceled => {
                             return Err(driver_error(
                                 ErrorCode::BrowserCommandFailed,
                                 "download was canceled",
-                            ))
+                            ));
                         }
                         DownloadProgressState::InProgress => {}
                     }
                 }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let mut path = completed
+            })
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))??;
+
+        uuid::Uuid::parse_str(&begin.guid)
+            .map_err(|_| driver_error(ErrorCode::BrowserCommandFailed, "invalid download GUID"))?;
+        let filename = begin.suggested_filename.clone();
+        let name = Path::new(&filename)
+            .file_name()
+            .filter(|name| *name == filename.as_str())
+            .ok_or_else(|| {
+                driver_error(ErrorCode::BrowserCommandFailed, "invalid download filename")
+            })?;
+        // With AllowAndName, even Chrome versions that omit filePath can identify
+        // the exact file by GUID. On shared Chrome, filePath may name another
+        // session's directory if it configured the browser between commands.
+        let source = completed
             .file_path
-            .clone()
+            .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
-        // The download directory is browser-wide, so on a shared browser
-        // another session may have redirected it: bring the file home.
-        if self.shared_browser && !path.starts_with(&self.download_dir) {
-            let home = self
-                .download_dir
-                .join(format!("{}-{}", begin.guid, begin.suggested_filename));
-            tokio::fs::rename(&path, &home)
-                .await
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            path = home;
+            .unwrap_or_else(|| self.download_dir.join(&begin.guid));
+        if source
+            .file_name()
+            .is_none_or(|name| name != begin.guid.as_str())
+        {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "completed download path does not match its GUID",
+            ));
         }
+        let directory = self.download_dir.join(format!("download-{}", begin.guid));
+        tokio::fs::create_dir(&directory)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let path = directory.join(name);
+        tokio::fs::rename(source, &path)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         Ok(vec![
             Evidence::Download {
-                filename: begin.suggested_filename.clone(),
+                filename,
                 path: path.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
                 sha256: hex::encode(Sha256::digest(&bytes)),
@@ -4629,7 +4712,7 @@ impl WaitDom for ChromiumWaitDom<'_> {
         state: types::ElementState,
     ) -> Result<ElementProbe, CommandError> {
         let page = self.page;
-        let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
+        let resolved = if let Some(selector) = css_only_selector(target) {
             resolve_target_with_visibility(self.page_id, page, selector, None, false, None).await
         } else {
             let handle = self.browser.lock().await.as_ref().map(Browser::handle);
@@ -4763,20 +4846,6 @@ impl WaitDom for ChromiumWaitDom<'_> {
         })?;
         Ok(tracker.snapshot(filters).await)
     }
-}
-
-fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
-    target.css.as_deref().filter(|_| {
-        target.test_id.is_none()
-            && target.role.is_none()
-            && target.accessible_name.is_none()
-            && target.label.is_none()
-            && target.text.is_none()
-            && target.attributes.is_empty()
-            && target.frame_path.is_empty()
-            && target.shadow_path.is_empty()
-            && target.ordinal.is_none()
-    })
 }
 
 /// CDP reports a node removed from the page, or left in a replaced document, as gone.
@@ -4949,6 +5018,56 @@ async fn current_page(page: &Page) -> Option<(String, String)> {
     let url = page.url().await.ok()??;
     let title = page.get_title().await.ok()?.unwrap_or_default();
     Some((url, title))
+}
+
+/// Longest a page read waits for content the page marks as loading.
+const READ_BUSY_CAP: Duration = Duration::from_secs(2);
+
+/// Waits until no rendered element carries `aria-busy="true"`, up to
+/// [`READ_BUSY_CAP`]. `false` when the page was still busy at the cap.
+async fn settle_busy_content(page: &Page) -> bool {
+    let expression = format!(
+        "new Promise(resolve=>{{const end=Date.now()+{};\
+const busy=()=>[...document.querySelectorAll('[aria-busy=\"true\"]')]\
+.some(el=>el.checkVisibility?el.checkVisibility():true);\
+const tick=()=>{{if(!busy())return resolve(true);\
+if(Date.now()>=end)return resolve(false);setTimeout(tick,50)}};tick()}})",
+        READ_BUSY_CAP.as_millis()
+    );
+    match tokio::time::timeout(
+        READ_BUSY_CAP + Duration::from_secs(1),
+        page.evaluate(expression),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.into_value::<bool>().unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Evidence that a read returned content the page still marked as loading.
+fn page_busy_evidence() -> Evidence {
+    Evidence::Configuration {
+        name: "pageBusy".into(),
+        value: "true: the page still marked content as loading (aria-busy) when it was read; read again".into(),
+    }
+}
+
+/// Whole-page text, cut in the page at [`crate::MAX_INSPECT_TEXT_CHARS`] so a
+/// large page never ships its full text; the flag says the page had more.
+async fn read_bounded_page_body_text(page: &Page) -> Result<(String, bool), CommandError> {
+    let expression = format!(
+        "(() => {{const text=document.body?(document.body.innerText||''):'';\
+const max={};if(text.length<=max)return [text,false];\
+let cut=text.slice(0,max);if(/[\\uD800-\\uDBFF]$/.test(cut))cut=cut.slice(0,-1);\
+return [cut,true]}})()",
+        crate::MAX_INSPECT_TEXT_CHARS
+    );
+    page.evaluate(expression)
+        .await
+        .map_err(command_failed)?
+        .into_value::<(String, bool)>()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
@@ -5160,16 +5279,21 @@ fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError 
     }
 }
 
-/// A target for a control read outside a control action.
-fn unnamed_control_target() -> types::FormControlTarget {
-    types::FormControlTarget {
+/// Checks a control read outside a control action, before setting its files.
+pub(crate) fn refuse_shown_files_on_control(
+    encoded: &str,
+    paths: &[String],
+) -> Result<(), CommandError> {
+    let target = types::FormControlTarget {
         attributes: Default::default(),
         role: String::new(),
         accessible_name: String::new(),
         ordinal: None,
         frame_path: Vec::new(),
         shadow_path: Vec::new(),
-    }
+    };
+    let control = crate::decode_form_control(encoded, target)?;
+    refuse_shown_files(&control.state, paths)
 }
 
 /// An upload into a file control that already holds or shows other files
@@ -5343,13 +5467,134 @@ fn find_iframe_node<'a>(
     go(nodes, name, &mut 0, occurrence)
 }
 
-/// Descends one level into iframes, same-process or from another site, so the
-/// snapshot does not stop at `Iframe` nodes. Each frame's compacted tree, read
-/// through the session that serves it, is spliced under its parent-tree
-/// `Iframe` node and every in-frame target is stamped with the role/name/ordinal
-/// hop that re-resolves the iframe element at action time. `max_nodes` bounds
-/// the composed tree, kept in document order: a frame is read only while its
-/// owner is kept. Returns whether anything was left out.
+/// Adds the forms of frames the page's script cannot read, from another site
+/// or sandboxed, to `raw`.
+async fn add_unreachable_frame_forms(
+    page: &Page,
+    browser: &BrowserHandle,
+    max_controls: usize,
+    raw: &mut crate::form_snapshot::RawFormSnapshot,
+) {
+    let mut frames = 0;
+    let mut pending = vec![(page.clone(), None, Vec::new())];
+    while let Some((session, frame, path)) = pending.pop() {
+        if path.len() >= crate::targeting::MAX_TARGET_PATH_DEPTH {
+            continue;
+        }
+        let context_id = match frame {
+            Some(frame) => match session.frame_execution_context(frame).await {
+                Ok(context_id) => context_id,
+                Err(_) => continue,
+            },
+            None => None,
+        };
+        let Ok(iframes) = crate::targeting::iframe_candidates(&session, context_id).await else {
+            continue;
+        };
+        let scope = crate::targeting::LocatorScope::Context(context_id);
+        let visible: Vec<&dom_engine::Candidate> =
+            iframes.iter().filter(|other| other.state.visible).collect();
+        for candidate in visible.iter().copied() {
+            let Ok(Some(child)) =
+                crate::targeting::owned_frame(&session, Some(browser), &scope, &[], candidate)
+                    .await
+            else {
+                continue;
+            };
+            let Ok(child_context) = child
+                .session
+                .frame_execution_context(child.frame.clone())
+                .await
+            else {
+                continue;
+            };
+            let mut child_path = path.clone();
+            child_path.push(types::SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: candidate.name.clone().unwrap_or_default(),
+                ordinal: iframe_hop_ordinal(&visible, candidate),
+            });
+            // A frame its parent's script can read is in the parent's snapshot.
+            let readable = evaluate_by_value::<bool>(
+                &child.session,
+                child_context,
+                "(()=>{try{return Boolean(window.parent.document)}catch{return false}})()".into(),
+            )
+            .await
+            .unwrap_or(true);
+            if !readable {
+                let remaining = max_controls
+                    .saturating_sub(raw.controls.len())
+                    .min(types::MAX_FORM_SNAPSHOT_CONTROLS);
+                if remaining == 0 {
+                    raw.truncated = true;
+                    break;
+                }
+                let Ok(first_stamp) = reserve_frame_control_stamps(page, remaining).await else {
+                    raw.truncated = true;
+                    continue;
+                };
+                let framed = evaluate_by_value::<String>(
+                    &child.session,
+                    child_context,
+                    crate::form_snapshot::frame_form_snapshot_expression(remaining, first_stamp),
+                )
+                .await
+                .and_then(|encoded| crate::form_snapshot::decode_raw_form_snapshot(&encoded));
+                if let Ok(framed) = framed {
+                    frames += 1;
+                    crate::form_snapshot::append_frame_form_snapshot(
+                        raw,
+                        framed,
+                        &child_path,
+                        frames,
+                    );
+                }
+            }
+            pending.push((child.session, Some(child.frame), child_path));
+        }
+    }
+}
+
+/// Advances the main document's cursor in a single evaluation before another
+/// document can stamp controls. The range stays reserved even if that frame
+/// disappears or a concurrent snapshot reaches it out of order.
+async fn reserve_frame_control_stamps(page: &Page, count: usize) -> Result<u32, CommandError> {
+    let cursor = format!("{}-next", dom_engine::CONTROL_STAMP_ATTRIBUTE);
+    evaluate_by_value(
+        page,
+        None,
+        format!(
+            "(()=>{{
+                const root=document.documentElement;
+                const first=Number(root.getAttribute('{cursor}'))||1;
+                const end=first+{count};
+                if(!Number.isInteger(first)||first<1||end>999999999)throw Error('invalid control stamp range');
+                root.setAttribute('{cursor}',String(end));
+                return first;
+            }})()"
+        ),
+    )
+    .await
+}
+
+async fn evaluate_by_value<T: serde::de::DeserializeOwned>(
+    page: &Page,
+    context_id: Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>,
+    expression: String,
+) -> Result<T, CommandError> {
+    let mut params = chromiumoxide::cdp::js_protocol::runtime::EvaluateParams::new(expression);
+    params.context_id = context_id;
+    params.return_by_value = Some(true);
+    page.evaluate(params)
+        .await
+        .map_err(command_failed)?
+        .into_value()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
+}
+
+/// Splices each iframe's accessibility tree beneath its owner. A frame's
+/// targets carry the hop that re-resolves its owner at action time.
 async fn descend_a11y_iframes(
     page: &Page,
     browser: &BrowserHandle,
@@ -5399,11 +5644,12 @@ async fn descend_a11y_iframes(
     let scoped_iframes: Vec<_> = iframes
         .iter()
         .filter(|candidate| {
-            allowed_owners.is_none_or(|allowed| {
-                candidate_backend_ids
-                    .iter()
-                    .any(|(id, other)| other.id == candidate.id && allowed.contains(id))
-            })
+            candidate.role.as_deref() == Some("iframe")
+                && allowed_owners.is_none_or(|allowed| {
+                    candidate_backend_ids
+                        .iter()
+                        .any(|(id, other)| other.id == candidate.id && allowed.contains(id))
+                })
         })
         .collect();
     let mut truncated = false;
@@ -6253,6 +6499,39 @@ mod tests {
     }
 
     #[test]
+    fn only_an_opted_out_durable_profile_launches_without_keychain_mocking() {
+        use super::ChromiumWorkerFactory;
+        let config = config::BrowserConfig {
+            executable: Some("/usr/bin/true".into()),
+            ..config::BrowserConfig::default()
+        };
+        let dir = std::path::Path::new("/profiles/p");
+        // The arguments the shared-profile launcher passes to Chrome.
+        let args = |factory: &ChromiumWorkerFactory| {
+            super::shared_chrome_launch_args(&factory.chromium_config(dir).unwrap())
+        };
+        let mocked = |args: &[String]| {
+            args.contains(&"--use-mock-keychain".to_string())
+                && args.contains(&"--password-store=basic".to_string())
+        };
+        let registry = tempfile::tempdir().unwrap();
+        let disposable =
+            ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into());
+        let durable = disposable.clone().with_durable_profile_dir(dir.into());
+        assert!(mocked(&args(&durable)), "{:?}", args(&durable));
+        let system = durable.with_system_keychain(true);
+        let system_args = args(&system);
+        assert!(
+            !system_args
+                .iter()
+                .any(|arg| arg == "--use-mock-keychain" || arg.starts_with("--password-store")),
+            "{system_args:?}"
+        );
+        let disposable = disposable.with_system_keychain(true);
+        assert!(mocked(&args(&disposable)), "{:?}", args(&disposable));
+    }
+
+    #[test]
     fn only_a_headless_launch_skips_the_startup_window() {
         use super::ChromiumWorkerFactory;
         let args = |headless: bool| {
@@ -6351,8 +6630,8 @@ mod tests {
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
         is_missing_css_node, should_retry_click_target_detach,
         should_retry_plain_click_target_drift, should_retry_transient_click_loss,
-        snapshot_iframe_owners, text_matches, unscoped_css_wait_selector, validate_clip,
-        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        snapshot_iframe_owners, text_matches, validate_clip, wait_should_retry_replaced_context,
+        ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
     };
     use crate::targeting::ACCEPTS_TEXT_SCRIPT;
     use types::{
@@ -6782,7 +7061,7 @@ mod tests {
         };
 
         assert_eq!(
-            unscoped_css_wait_selector(&target),
+            crate::targeting::css_only_selector(&target),
             Some("a[href='/customers/cus_atlas']")
         );
     }

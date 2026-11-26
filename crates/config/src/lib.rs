@@ -108,6 +108,10 @@ pub struct BrowserSelectionConfig {
 pub struct ChromiumProfileConfig {
     pub profile_id: String,
     pub profile_dir: PathBuf,
+    /// Launch its Chrome with the system keychain and password store instead
+    /// of the mock keychain. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub system_keychain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +508,9 @@ impl AppConfig {
 pub struct HttpConfig {
     pub allow_loopback: bool,
     pub allow_private_network: bool,
+    /// Lets `navigate` open `file://` URLs, for local previews. Off by
+    /// default: navigation accepts only `http`, `https` and `data` URLs.
+    pub allow_file_urls: bool,
     pub max_redirects: usize,
     pub max_header_bytes: usize,
     pub max_body_bytes: usize,
@@ -517,6 +524,7 @@ impl Default for HttpConfig {
         Self {
             allow_loopback: false,
             allow_private_network: false,
+            allow_file_urls: false,
             max_redirects: 5,
             max_header_bytes: 64 * 1024,
             max_body_bytes: 8 * 1024 * 1024,
@@ -892,6 +900,12 @@ scheduler_journal_path = "s"
             parsed.chromium[0].profile_dir,
             std::path::PathBuf::from("/profiles/signed-in")
         );
+        assert!(!parsed.chromium[0].system_keychain);
+        let system: BrowserSelectionConfig = serde_json::from_value(serde_json::json!({
+            "chromium": [{ "profileId": "p", "profileDir": "/p", "systemKeychain": true }]
+        }))
+        .unwrap();
+        assert!(system.chromium[0].system_keychain);
         assert!(
             serde_json::from_value::<BrowserSelectionConfig>(serde_json::json!({
                 "chromium": [{ "profileId": "signed-in", "profileDir": "/p", "port": 9222 }]

@@ -3794,13 +3794,20 @@ async fn read_typed_control_value(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return null;const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
             }),
         )
         .await?;
+    if response.pointer("/result/type").and_then(Value::as_str) == Some("null") {
+        return Err(driver_error(
+            ErrorCode::TargetDetached,
+            "Firefox control detached during post-input readback",
+            false,
+        ));
+    }
     let encoded = response
         .pointer("/result/value")
         .and_then(Value::as_str)
@@ -3840,13 +3847,20 @@ async fn form_control_validity_evidence(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return null;const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
             }),
         )
         .await?;
+    if response.pointer("/result/type").and_then(Value::as_str) == Some("null") {
+        return Err(driver_error(
+            ErrorCode::TargetDetached,
+            "Firefox control detached during post-input readback",
+            false,
+        ));
+    }
     let encoded = response
         .pointer("/result/value")
         .and_then(Value::as_str)
@@ -4469,6 +4483,47 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         }
     }
 
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<Option<types::TargetSpec>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let script = dom_engine::enclosing_dialog_script(true);
+        let response = self.transport.send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});{script}}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        ).await?;
+        let result = &response["result"];
+        if result["type"] == "null" {
+            return Ok(None);
+        }
+        let css = result["value"].as_str().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "could not identify the dismissal control's dialog",
+                false,
+            )
+        })?;
+        Ok(
+            dom_engine::decode_enclosing_dialog(Some(css.into()))?.map(|css| types::TargetSpec {
+                css: Some(css),
+                frame_path: target.frame_path.clone(),
+                ..types::TargetSpec::default()
+            }),
+        )
+    }
+
     async fn read_attribute(
         &self,
         page_id: &PageId,
@@ -4720,6 +4775,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                         title: String::new(),
                         text: text.to_owned(),
                         html: None,
+                        truncated: false,
                     },
                     self.evidence(InteractionPath::EngineNative),
                 ]);
@@ -4778,6 +4834,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     title: String::new(),
                     text: text.to_owned(),
                     html: None,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::EngineNative),
             ]);
@@ -4818,6 +4875,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     title: observation.title,
                     text: observation.visible_text,
                     html: observation.html,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::ExtensionApi),
             ]));
@@ -4882,6 +4940,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 title: observation.title,
                 text,
                 html: observation.html,
+                truncated: false,
             },
             self.evidence(InteractionPath::ExtensionApi),
         ]))
@@ -5145,6 +5204,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     title: String::new(),
                     text: "[redacted]".into(),
                     html: None,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::EngineNative),
             ])),
@@ -5481,6 +5541,16 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         let replaced = settle_typing_focus(&self.transport, &context, &selector_json).await?;
 
         let humanize = self.humanization_enabled.load(Ordering::Relaxed);
+        // A simulated mistake can trigger a page action before the correction
+        // arrives, such as advancing focus to the next code box.
+        let literal_typing = (!humanize).then(|| {
+            TypingSimulator::new(
+                behavioral_engine::TextConfig::default()
+                    .with_correction_probability(0.0)
+                    .with_copy_paste_probability(0.0),
+            )
+        });
+        let simulator = literal_typing.as_ref().unwrap_or(&self.typing_simulator);
         let typing_actions = self.with_session_random(|random| {
             let mut actions = Vec::new();
             if humanize {
@@ -5495,7 +5565,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     });
                 }
             }
-            actions.extend(self.typing_simulator.generate_with_clear(
+            actions.extend(simulator.generate_with_clear(
                 random,
                 &command.value,
                 command.clear_first,

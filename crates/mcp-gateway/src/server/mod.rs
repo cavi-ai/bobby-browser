@@ -259,6 +259,8 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     workflow_handles: Arc<WorkflowHandles>,
+    /// `workflow_start` `callerKey` by the session it created.
+    caller_keys: std::sync::Mutex<BTreeMap<String, String>>,
     /// Sessions this connection opened and has not closed; `serve` closes
     /// them when the connection ends.
     sessions: Arc<connection_sessions::ConnectionSessions>,
@@ -331,6 +333,7 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             workflow_handles: Arc::new(WorkflowHandles::new()),
+            caller_keys: std::sync::Mutex::default(),
             sessions: Arc::default(),
             boundary_executions: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
@@ -825,6 +828,7 @@ impl Server {
                     name,
                     &mut input_schema,
                     self.resources.max_download_bytes(),
+                    self.resources.downloads_root(),
                 );
                 tools.push(json!({
                     "name": name,
@@ -1107,13 +1111,115 @@ impl Server {
         // have already completed. Preserve the explicit diagnostic paths.
         let compact = call.name != "command_execute"
             && call.arguments.get("evidenceDetail").and_then(Value::as_str) != Some("full");
+        let tool_name = call.name.clone();
+        let caller_key = call
+            .arguments
+            .get("callerKey")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let session_arg = call
+            .arguments
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let mut response = self
             .dispatch_named_tool(id, call, context, handle, defaulted_handle)
             .await;
+        self.apply_caller_key(&tool_name, caller_key, session_arg, &mut response);
         if compact {
             crate::response_projection::compact_tool_response(&mut response);
         }
         response
+    }
+
+    /// Records a `workflow_start` `callerKey` for the session it created, and
+    /// stamps keyed results of that session with `evidenceKey`.
+    fn apply_caller_key(
+        &self,
+        tool: &str,
+        caller_key: Option<String>,
+        session_arg: Option<String>,
+        response: &mut Value,
+    ) {
+        let Ok(mut keys) = self.caller_keys.lock() else {
+            return;
+        };
+        let outcome = response
+            .get("result")
+            .and_then(|result| result.get("structuredContent"));
+        let session = session_arg.or_else(|| {
+            let outcome = outcome?;
+            outcome
+                .get("sessionId")
+                .or_else(|| first_screenshot(outcome)?.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        match tool {
+            "workflow_start" => {
+                let completed = outcome
+                    .and_then(|outcome| outcome.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("completed");
+                if let (Some(key), Some(session), true) = (caller_key, session, completed) {
+                    if keys.len() >= MAX_CALLER_KEYS {
+                        keys.pop_first();
+                    }
+                    keys.insert(session, key);
+                }
+            }
+            "session_close" => {
+                if let Some(session) = session {
+                    keys.remove(&session);
+                }
+            }
+            "screenshot" | "checkpoint_save" | "intent_submit_and_verify" => {
+                if let Some(key) = session.and_then(|session| keys.get(&session)) {
+                    attach_evidence_key(response, key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Saves the screenshot a completed `screenshot` result names to `save_as`,
+    /// under `download_url` `saveAs` rules; a refused path fails the call.
+    async fn save_screenshot_as(&self, outcome: &mut Value, save_as: &str) {
+        if outcome.get("status").and_then(Value::as_str) != Some("completed") {
+            return;
+        }
+        let Some(artifact_id) = first_screenshot(outcome)
+            .and_then(|shot| shot.get("artifactId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let context = self.request_context();
+        let artifact = self
+            .resources
+            .read(&self.handle, &context, &artifact_id)
+            .await;
+        let saved = match (self.resources.downloads_root(), artifact) {
+            (Some(root), Ok(Some(artifact))) => {
+                page_runtime::save_file_as(root, save_as, &types::CommandId::new(), &artifact.bytes)
+                    .await
+            }
+            _ => Err(types::CommandError {
+                code: types::ErrorCode::PolicyDenied,
+                message: "saveAs needs a configured downloads directory and a readable screenshot"
+                    .into(),
+                layer: types::ErrorLayer::Interface,
+                retryable: false,
+            }),
+        };
+        match saved {
+            Ok(()) => outcome["savedTo"] = json!(save_as),
+            Err(error) => {
+                outcome["status"] = json!("failed");
+                outcome["error"] = json!(error);
+            }
+        }
     }
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
@@ -1990,20 +2096,12 @@ fn is_page_not_open_failure(value: &Value) -> bool {
         })
 }
 
-/// `form_snapshot`, `context_ask`, and `context_neighbors` bypass
-/// `submit_envelope` -- they call `RuntimeInterface` directly, so a closed
-/// page never reaches the executor's `is_page_not_open_failure` shape.
-/// `PageRuntime::form_snapshot` leases the worker directly and folds any
-/// worker `CommandError` into `RuntimeError::Internal(error.message)`,
-/// which `map_runtime_error` then turns into
-/// `InterfaceErrorCode::Internal` with a `"runtime operation failed: "`
-/// prefix -- the `NotFound` code chromium's `page_missing()` raised does
-/// not survive that fold. Gated on both fields, like
-/// `is_page_not_open_failure`, so an unrelated internal failure worded
-/// differently is never mistaken for this one.
+/// Direct form reads bypass `submit_envelope`. Match the worker's closed-page
+/// error after interface mapping, since other resources can also be missing.
 fn is_interface_page_not_open_failure(error: &types::InterfaceError) -> bool {
-    error.code == types::InterfaceErrorCode::Internal
-        && error.message.contains("browser page is not open")
+    error.code == types::InterfaceErrorCode::NotFound
+        && error.layer == types::ErrorLayer::Driver
+        && error.message == "browser command failed: browser page is not open"
 }
 
 /// `CommandOutcome::Failed`-shaped, for a prerequisite call (`upload_files`'
@@ -2360,6 +2458,66 @@ fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
+/// Sessions whose `callerKey` the server keeps; the oldest is dropped first.
+const MAX_CALLER_KEYS: usize = 1024;
+
+fn first_screenshot(outcome: &Value) -> Option<&Value> {
+    outcome
+        .get("evidence")?
+        .as_array()?
+        .iter()
+        .find(|item| item["kind"] == "screenshot")
+}
+
+/// `evidenceKey`: the caller key with the URL and digest of the result's
+/// screenshot, or the checkpoint, post-state, or URL wait when it has none.
+fn attach_evidence_key(response: &mut Value, caller_key: &str) {
+    let Some(outcome) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("structuredContent"))
+        .filter(|outcome| outcome.is_object())
+    else {
+        return;
+    };
+    let shot = first_screenshot(outcome);
+    let url = shot
+        .and_then(|shot| shot["url"].as_str())
+        .or_else(|| outcome["currentUrl"].as_str())
+        .or_else(|| outcome["postState"]["url"].as_str())
+        .or_else(|| {
+            outcome["evidence"]
+                .as_array()?
+                .iter()
+                .rev()
+                .filter(|item| item["kind"] == "wait" && item["condition"]["kind"] == "url")
+                .find_map(|item| item["observed"].as_str())
+        });
+    let sha256 = shot
+        .and_then(|shot| shot.get("sha256"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    outcome["evidenceKey"] = json!({"callerKey": caller_key, "url": url, "sha256": sha256});
+    sync_structured_text(response);
+}
+
+/// Keeps the text block identical to `structuredContent` after a change.
+fn sync_structured_text(response: &mut Value) {
+    let Some(result) = response.get_mut("result") else {
+        return;
+    };
+    let Some(text) = result.get("structuredContent").map(Value::to_string) else {
+        return;
+    };
+    if let Some(block) = result
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+        .and_then(|content| content.first_mut())
+        .filter(|block| block["type"] == "text")
+    {
+        block["text"] = Value::String(text);
+    }
+}
+
 fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
     match value {
         Value::Array(values) => {
@@ -2388,6 +2546,8 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const MAX_COMMAND_DEADLINE_MS: i64 = 300_000;
+/// Command time a form adds for each character it types.
+const TYPED_CHAR_BUDGET_MS: u64 = 150;
 
 /// Builds the envelope a flat tool submits.
 ///
@@ -2442,6 +2602,18 @@ fn requested_wait_ms(command: &types::RuntimeCommand) -> Option<u64> {
             .expected_state
             .as_ref()
             .map(|expected| expected.timeout_ms),
+        // Typing time: every character at the slowest humanized keystroke.
+        RuntimeCommand::Intent(Intent::CompleteForm(intent)) => {
+            let chars = intent
+                .fields
+                .iter()
+                .map(|field| match &field.value {
+                    types::ControlAction::SetText { value, .. } => value.chars().count() as u64,
+                    _ => 0,
+                })
+                .sum::<u64>();
+            (chars > 0).then(|| chars.saturating_mul(TYPED_CHAR_BUDGET_MS))
+        }
         RuntimeCommand::Primitive(Primitive::WaitFor(command)) => Some(command.timeout_ms),
         RuntimeCommand::Primitive(Primitive::Navigate(command)) => Some(command.timeout_ms),
         _ => None,
@@ -2671,6 +2843,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn submit_evidence_key_uses_the_observed_url_without_a_screenshot() {
+        let mut response = json!({
+            "result": {
+                "structuredContent": {
+                    "status": "completed",
+                    "currentUrl": null,
+                    "postState": {"status": "completed"},
+                    "evidence": [
+                        {"kind": "wait", "condition": {"kind": "document", "ready": "complete"},
+                         "elapsedMs": 5, "observations": 1, "observed": "complete"},
+                        {"kind": "wait", "condition": {"kind": "url",
+                            "matcher": {"kind": "contains", "value": "/sent"}},
+                         "elapsedMs": 5, "observations": 1, "observed": "https://example.test/sent"}
+                    ]
+                }
+            }
+        });
+
+        attach_evidence_key(&mut response, "test-job");
+
+        assert_eq!(
+            response["result"]["structuredContent"]["evidenceKey"],
+            json!({"callerKey": "test-job", "url": "https://example.test/sent", "sha256": null})
+        );
+    }
+
+    #[test]
     fn an_envelope_outlasts_the_wait_its_command_asks_for() {
         let short = types::WireTimestamp::now() + Duration::from_secs(60);
         let context = || {
@@ -2716,6 +2915,48 @@ mod tests {
             types::PageId::new(),
             None,
             wait(300_000),
+        );
+        assert!(
+            envelope.deadline
+                <= types::WireTimestamp::now() + Duration::from_millis(MAX_COMMAND_DEADLINE_MS)
+        );
+    }
+
+    #[test]
+    fn a_form_envelope_grows_with_the_text_it_types() {
+        let short = types::WireTimestamp::now() + Duration::from_secs(30);
+        let context = || {
+            types::RequestContext::new_for_test(
+                types::PrincipalId::from_uuid(uuid::Uuid::from_u128(705)),
+                [],
+                short,
+            )
+        };
+        let form = |answer: &str| -> types::IntentCommand {
+            serde_json::from_value(json!({"kind":"completeForm","input":{
+                "purpose":"application",
+                "fields":[
+                    {"name":"name","purpose":"name","value":{"kind":"setText","value":"Ada"}},
+                    {"name":"essay","purpose":"essay","value":{"kind":"setText","value":answer}}
+                ]
+            }}))
+            .expect("complete form intent")
+        };
+        let before = types::WireTimestamp::now();
+        let (_, envelope) = intent_envelope(
+            context(),
+            types::SessionId::new(),
+            types::PageId::new(),
+            None,
+            form(&"a".repeat(700)),
+        );
+        assert!(envelope.deadline >= before + Duration::from_millis(30_000 + 703 * 150));
+        let (_, envelope) = intent_envelope(
+            context(),
+            types::SessionId::new(),
+            types::PageId::new(),
+            None,
+            form(&"a".repeat(4_000)),
         );
         assert!(
             envelope.deadline

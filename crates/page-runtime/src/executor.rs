@@ -541,7 +541,8 @@ impl PageRuntime {
         if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(command)) = &envelope.command {
             if !(command.url.starts_with("http://")
                 || command.url.starts_with("https://")
-                || command.url.starts_with("data:"))
+                || command.url.starts_with("data:")
+                || (self.allow_file_urls && command.url.starts_with("file://")))
             {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
@@ -603,6 +604,7 @@ impl PageRuntime {
             _ => None,
         };
         if let Some((outcome_label, error)) = failure_fields {
+            // The live error message can contain page observations.
             tracing::warn!(
                 command = crate::context::command_kind_name(&envelope.command),
                 session_id = %envelope.session_id.0,
@@ -610,7 +612,6 @@ impl PageRuntime {
                 outcome = outcome_label,
                 code = ?error.code,
                 retryable = error.retryable,
-                message = %error.message,
                 "command failed"
             );
         }
@@ -935,6 +936,8 @@ fn is_postcondition_failure(error: &CommandError) -> bool {
         error.code,
         ErrorCode::VerificationFailed
             | ErrorCode::VerificationCodeRequired
+            | ErrorCode::VerificationLinkRequired
+            | ErrorCode::ConfirmedOutsideExpectedState
             | ErrorCode::WaitConditionTimedOut
     )
 }

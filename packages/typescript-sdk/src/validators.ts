@@ -32,6 +32,7 @@ import type {
   JobResolutionRequest,
   JobResolutionReceipt,
   StorageIntegrityIssue,
+  LostSession,
   JobResult,
   JobStatusResponse,
   JobSubmitResponse,
@@ -111,7 +112,7 @@ const unique = (values: readonly unknown[]): boolean => new Set(values).size ===
 const CONTROL_KINDS = ["text", "email", "password", "search", "number", "checkbox", "radio", "switch", "selectOne", "selectMultiple", "date", "time", "dateTimeLocal", "range", "file", "contentEditable", "combobox", "listbox", "submit", "reset", "other"] as const;
 const OPERATIONS = ["setText", "setChecked", "selectOne", "selectMany", "setFiles", "clear", "activate", "passwordManagerFill"] as const;
 const VALIDITY_FLAGS = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"] as const;
-const COMMAND_ERROR_CODES = ["invalidRequest", "notFound", "deadlineExceeded", "browserLaunchFailed", "browserCommandFailed", "verificationFailed", "journalFailed", "resourceExhausted", "policyDenied", "internal", "targetNotFound", "targetAmbiguous", "frameNotFound", "shadowRootUnavailable", "targetDetached", "targetObscured", "targetOutOfBounds", "waitConditionTimedOut", "screenshotCaptureFailed", "networkPolicyDenied", "httpResponseTooLarge", "httpTransferFailed", "httpStateConflict", "httpEquivalenceUnproven", "intentCompileFailed", "intentActionMismatch", "obstructionSuspected", "visionAssistDenied", "visionAssistFailed", "expectedStatePreSatisfied", "boundaryAlreadyExecuted", "verificationCodeRequired"] as const;
+const COMMAND_ERROR_CODES = ["invalidRequest", "notFound", "deadlineExceeded", "browserLaunchFailed", "browserCommandFailed", "verificationFailed", "journalFailed", "resourceExhausted", "policyDenied", "internal", "targetNotFound", "targetAmbiguous", "frameNotFound", "shadowRootUnavailable", "targetDetached", "targetObscured", "targetOutOfBounds", "waitConditionTimedOut", "screenshotCaptureFailed", "networkPolicyDenied", "httpResponseTooLarge", "httpTransferFailed", "httpStateConflict", "httpEquivalenceUnproven", "intentCompileFailed", "intentActionMismatch", "obstructionSuspected", "visionAssistDenied", "visionAssistFailed", "expectedStatePreSatisfied", "boundaryAlreadyExecuted", "verificationCodeRequired", "verificationLinkRequired", "confirmedOutsideExpectedState"] as const;
 
 function isCommandErrorCode(value: unknown): value is CommandErrorCode {
   return oneOf(value, COMMAND_ERROR_CODES);
@@ -174,7 +175,7 @@ function isFormDescriptor(value: unknown, globalIds: Set<string>): value is Form
   return hasExactKeys(value.validity, ["valid", "invalidControlIds"]) && typeof value.validity.valid === "boolean" && Array.isArray(value.validity.invalidControlIds) && value.validity.invalidControlIds.length <= 512 && unique(value.validity.invalidControlIds) && value.validity.invalidControlIds.every((id) => controls.has(id));
 }
 export function isFormSnapshot(value: unknown): value is FormSnapshot {
-  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"], ["pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
+  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"], ["pageDerived", "pageBusy"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || (value.pageBusy !== undefined && typeof value.pageBusy !== "boolean") || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
   const ids = new Set<string>(); const formIds = new Set<string>();
   for (const form of value.forms) { if (!isRecord(form) || typeof form.id !== "string" || formIds.has(form.id) || !isFormDescriptor(form, ids)) return false; formIds.add(form.id); }
   if (value.unownedControls.length + [...value.forms].reduce((n, form) => n + (isRecord(form) && Array.isArray(form.controls) ? form.controls.length : 0), 0) > 512) return false;
@@ -285,10 +286,17 @@ export function isStorageIntegrityIssue(value: unknown): value is StorageIntegri
     && oneOf(value.reason, ["unreadableLedger", "duplicateLedgerKey", "ledgerCapacityExceeded", "unreadableJobHistory"]);
 }
 
+export function isLostSession(value: unknown): value is LostSession {
+  return hasExactKeys(value, ["sessionId", "pageIds"])
+    && isString(value.sessionId)
+    && isStringArray(value.pageIds);
+}
+
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["engineScope", "visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity"])
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["engineScope", "visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity", "lostSessions"])
     && optional(value, "engineScope", (engine): engine is "chromium" | "firefox" | "webKit" => oneOf(engine, ["chromium", "firefox", "webKit"]))
     && optional(value, "storageIntegrity", (issues): issues is StorageIntegrityIssue[] => Array.isArray(issues) && issues.length <= 4 && issues.every(isStorageIntegrityIssue))
+    && optional(value, "lostSessions", (sessions): sessions is LostSession[] => Array.isArray(sessions) && sessions.every(isLostSession))
     && isString(value.version)
     && isStringArray(value.capabilities)
     && isSafeUnsigned(value.active_sessions)
@@ -460,7 +468,7 @@ export function isEvidence(value: unknown): value is Evidence {
         && ((value.bytes === null) === (value.sha256 === null))
         && validExecutionPathOptionalFields(value);
     case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
-    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["truncated", "pageDerived"]) && (value.truncated === undefined || value.truncated === true) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
     case "submitSettlement": return hasExactKeys(value, ["kind", "outcome"]) && (value.outcome === "settled" || value.outcome === "validationRejected");
     case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
     case "upload": return hasExactKeys(value, ["kind", "selector", "paths"], ["sha256"]) && isString(value.selector) && isStringArray(value.paths) && optional(value, "sha256", (digests): digests is string[] => Array.isArray(digests) && digests.every(isLowerSha256));
@@ -490,7 +498,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "challengeDetection": {
       if (!hasExactKeys(value, ["kind", "confidence", "detection"], ["priorKind"]) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || !optional(value, "priorKind", isString)) return false;
       if (value.detection === null) return true;
-      if (!hasExactKeys(value.detection, ["challenge_type", "confidence", "blocking"], ["region", "hints"]) || !oneOf(value.detection.challenge_type, ["recaptchaV2Checkbox", "recaptchaV3", "textCaptcha", "imageGridCaptcha", "mfaCodeEntry"] as const) || typeof value.detection.confidence !== "number" || !Number.isFinite(value.detection.confidence) || typeof value.detection.blocking !== "boolean") return false;
+      if (!hasExactKeys(value.detection, ["challenge_type", "confidence", "blocking"], ["region", "hints"]) || !oneOf(value.detection.challenge_type, ["recaptchaV2Checkbox", "recaptchaV3", "textCaptcha", "imageGridCaptcha", "mfaCodeEntry", "turnstile"] as const) || typeof value.detection.confidence !== "number" || !Number.isFinite(value.detection.confidence) || typeof value.detection.blocking !== "boolean") return false;
       const regionValid = value.detection.region === undefined || (hasExactKeys(value.detection.region, ["x", "y", "width", "height"]) && [value.detection.region.x, value.detection.region.y, value.detection.region.width, value.detection.region.height].every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate)));
       const hintsValid = value.detection.hints === undefined || (hasExactKeys(value.detection.hints, [], ["target_field_purpose", "instruction_text"]) && optional(value.detection.hints, "target_field_purpose", isString) && optional(value.detection.hints, "instruction_text", isString));
       return regionValid && hintsValid;

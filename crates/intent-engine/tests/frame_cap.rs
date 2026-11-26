@@ -132,3 +132,25 @@ async fn a_detected_challenge_region_maps_back_to_the_captured_frame() {
         (1280, 662)
     );
 }
+
+#[tokio::test]
+async fn a_turnstile_answer_is_its_own_challenge_class() {
+    let (url, _requests) = vision_endpoint(serde_json::json!({
+        "confidence": 0.9,
+        "action": {"kind": "challengeDetected", "challenge_type": "turnstile", "blocking": true}
+    }))
+    .await;
+
+    let proposal = assist(&url)
+        .propose(request("detectChallenge", frame(1280, 662)))
+        .await
+        .unwrap();
+
+    let VisionAction::ChallengeDetected { challenge_type, .. } = proposal.action else {
+        panic!(
+            "a detection answer stays a detection: {:?}",
+            proposal.action
+        );
+    };
+    assert_eq!(challenge_type, types::ChallengeType::Turnstile);
+}

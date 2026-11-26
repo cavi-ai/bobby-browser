@@ -139,6 +139,87 @@ fn chrome_executable() -> std::path::PathBuf {
         })
 }
 
+async fn navigate_to(allow_file_urls: bool, url: String) -> CommandOutcome {
+    let root = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        http: config::HttpConfig {
+            allow_file_urls,
+            ..config::HttpConfig::default()
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            ..BrowserConfig::default()
+        },
+        storage: StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            journal_key_path: None,
+        },
+        ..AppConfig::default()
+    };
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "local-preview".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .submit(envelope(
+            &session.id,
+            &page.id,
+            CommandId::new(),
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url,
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 10_000,
+            }),
+        ))
+        .await
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn file_urls_navigate_only_when_the_config_allows_them() {
+    let preview = tempfile::tempdir().unwrap();
+    let page = preview.path().join("preview.html");
+    std::fs::write(&page, "<title>Local Preview</title><p>Draft</p>").unwrap();
+    let url = format!("file://{}", page.display());
+
+    match navigate_to(false, url.clone()).await {
+        CommandOutcome::Failed { error, .. } => {
+            assert!(
+                error.message.contains("scheme is not supported"),
+                "{error:?}"
+            )
+        }
+        outcome => panic!("file navigation ran without the opt-in: {outcome:?}"),
+    }
+    match navigate_to(true, url).await {
+        CommandOutcome::Completed { evidence, .. } => assert!(
+            evidence.iter().any(
+                |item| matches!(item, Evidence::Navigation { title, .. } if title == "Local Preview")
+            ),
+            "{evidence:?}"
+        ),
+        outcome => panic!("file navigation failed with the opt-in: {outcome:?}"),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn completes_dynamic_form_with_durable_evidence() {

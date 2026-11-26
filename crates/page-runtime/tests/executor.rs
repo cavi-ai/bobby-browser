@@ -21,6 +21,8 @@ use workflow_journal::{
     CommandJournal, JournalError, JournalRecord, JournalScan, JsonlJournal, PreparedResult,
 };
 
+const WAIT_TIMEOUT_CANARY: &str = "synthetic-wait-log-canary";
+
 #[derive(Clone, Copy)]
 enum DriverMode {
     CookieOnly,
@@ -286,6 +288,22 @@ impl worker_pool::NavigationEngine for FakeWorker {
 
 #[async_trait]
 impl worker_pool::ObservationEngine for FakeWorker {
+    async fn form_snapshot(
+        &self,
+        _: &PageId,
+        _: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if matches!(self.mode, DriverMode::FailInspect) {
+            return Err(driver_failure());
+        }
+        Err(CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "fixture has no form snapshot".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+
     async fn inspect(
         &self,
         _: &PageId,
@@ -313,6 +331,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "not-the-typed-value".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::AppendPrefill) {
@@ -322,6 +341,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "prefilledx".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::MaskedPhone) {
@@ -331,6 +351,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "(555) 010-0199".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::FailInspect) {
@@ -354,6 +375,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
             title: "Fixture".into(),
             text: text.into(),
             html: None,
+            truncated: false,
         }])
     }
 
@@ -658,12 +680,9 @@ impl FakeWorker {
             });
         }
         if matches!(self.mode, DriverMode::WaitTimeout) {
-            return Err(CommandError {
-                code: ErrorCode::WaitConditionTimedOut,
-                message: "wait condition was not satisfied within 1000ms".into(),
-                layer: ErrorLayer::Driver,
-                retryable: false,
-            });
+            return Ok(worker_pool::wait::WaitObservation::Text(vec![
+                WAIT_TIMEOUT_CANARY.into(),
+            ]));
         }
         Ok(fake_wait_observation(condition))
     }
@@ -1597,6 +1616,22 @@ async fn replayable_driver_failure_is_retryable() {
     assert!(matches!(outcome, CommandOutcome::RetryableFailure { .. }));
 }
 
+/// A failed form snapshot read returns the worker's code and retry hint, not
+/// an opaque internal error.
+#[tokio::test]
+async fn form_snapshot_failure_keeps_the_worker_code_and_retry_hint() {
+    let (runtime, session, page, _) = runtime(DriverMode::FailInspect, None).await;
+    let error = runtime
+        .form_snapshot(&session, &page, None)
+        .await
+        .unwrap_err();
+    let types::RuntimeError::Command(error) = error else {
+        panic!("worker failure lost its code: {error:?}");
+    };
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(error.retryable, "{error:?}");
+}
+
 /// A dead browser must not wedge the session: open_browser invalidates the
 /// dead worker and retries on a fresh one instead of returning `internal`.
 #[tokio::test]
@@ -1711,6 +1746,7 @@ async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliati
 /// never the bare wait timeout that would invite a duplicate POST.
 #[tokio::test]
 async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
+    let capture = observability::test_support::CaptureSink::install();
     let events = Arc::new(Mutex::new(Vec::new()));
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
@@ -1747,7 +1783,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
                 }),
                 matcher: TextMatch::Contains("Priority saved".into()),
             },
-            timeout_ms: 1_000,
+            timeout_ms: 75,
         }),
     });
     let request = intent_envelope(session.clone(), page.id.clone(), submit);
@@ -1773,6 +1809,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
         })
         .await
         .unwrap();
+    let request_session = request.session_id.0.to_string();
     let outcome = runtime.execute(request).await;
     let CommandOutcome::Failed { error, .. } = outcome else {
         panic!("expected Failed, got {outcome:?}");
@@ -1780,6 +1817,19 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     assert_eq!(error.code, ErrorCode::VerificationFailed);
     assert!(!error.retryable);
     assert!(error.message.contains("click landed"), "{error:?}");
+    assert!(error.message.contains(WAIT_TIMEOUT_CANARY), "{error:?}");
+
+    let events = capture.events();
+    assert!(
+        events.iter().any(|event| {
+            event["fields"]["session_id"] == request_session
+                && event["fields"]["code"] == "VerificationFailed"
+        }),
+        "expected a failure diagnostic: {events:?}"
+    );
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains(WAIT_TIMEOUT_CANARY));
 }
 
 /// A pre-satisfied expected state means the matcher hit static page copy
@@ -2733,6 +2783,51 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
     let events = events.lock().await;
     assert!(!events.iter().any(|event| event.starts_with("browser:")));
     assert!(!events.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn download_url_rejects_unproven_response_cookies_without_browser_fetch() {
+    for (case, set_cookie, expected_code) in [
+        (
+            "domain",
+            "Set-Cookie: sid=1; Domain=127.0.0.1; Path=/",
+            ErrorCode::HttpEquivalenceUnproven,
+        ),
+        (
+            "partitioned",
+            "Set-Cookie: sid=1; Secure; Partitioned; Path=/",
+            ErrorCode::NetworkPolicyDenied,
+        ),
+    ] {
+        let url = http_fixture_with_header("direct-bytes", "text/csv", Some(set_cookie)).await;
+        let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::Succeed).await;
+        events.lock().await.push(format!("url:{url}"));
+        let outcome = runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: Some("text/csv".into()),
+                    max_bytes: 1024,
+                    save_as: Some(format!("{case}.csv")),
+                }),
+            ))
+            .await;
+        let error = match &outcome {
+            CommandOutcome::NeedsReconciliation { error, .. }
+            | CommandOutcome::PolicyDenied { error, .. } => error,
+            _ => panic!("{case}: unexpected outcome: {outcome:?}"),
+        };
+        assert_eq!(error.code, expected_code, "{case}");
+        assert!(!root.path().join(format!("downloads/{case}.csv")).exists());
+        let events = events.lock().await;
+        assert!(
+            !events.iter().any(|event| event.starts_with("browser:")),
+            "{case}"
+        );
+        assert!(!events.contains(&"http:commit".to_string()), "{case}");
+    }
 }
 
 #[tokio::test]
@@ -4093,6 +4188,7 @@ impl worker_pool::ObservationEngine for LifecycleTestWorker {
             title: "Inspected".into(),
             text: "ok".into(),
             html: None,
+            truncated: false,
         }])
     }
 

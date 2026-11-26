@@ -91,7 +91,7 @@ to retry its wait.
 
 When `intent_locate` or a fill finds no control, its evidence lists up to ten candidates, before any vision step, ranked by how many purpose words match each control's role, name or label. Fill suggestions are filtered for the requested action. A row those words single out reads `purposeOverlap` and carries a score. To retry a visible candidate, copy its `role` and any `ordinal` into hints, use its `name` as `accessibleName`, and keep any original `framePath` or `shadowPath`.
 
-Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete.
+Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete. On Chromium, a `dismissObstruction` with no hints first closes a frame from another origin that holds focus or covers the page's controls, such as an inline menu, with Escape and no vision; it completes `frameOverlayClosed`, or fails `obstructionSuspected` when the frame stays.
 
 ## Fill values
 
@@ -129,6 +129,7 @@ A fill succeeds only with postcondition evidence. It also reads the browser's co
 
 - `fields` has 1 to 128 entries. Each `name` is unique and labels the evidence. If `name` is a `controlId` from `form_snapshot` and a field has no hints, or a field's only hint is `accessibleName` holding a `controlId`, bobby uses that control.
 - Execution stops at the first failed field. The evidence keeps the fields already filled, so retry only the rest.
+- The command deadline grows by 150 ms for each character `setText` types, up to five minutes. A fill or reveal near the deadline stops the form with `deadlineExceeded` and names the current field. The response keeps evidence from earlier fills and completed reveal clicks. If the deadline interrupted a reveal click or visibility wait, inspect the page before activating the reveal control again.
 - Success evidence is compact by default and lists `revealedControls` with usable targets. Pass `evidenceDetail: "full"` to debug.
 - `screenshot: true` adds `screenshot` evidence on success: the viewport, at most 1280 px on its longest side. `intent_submit_and_verify` takes it too. Unset follows [`success_screenshots`](configuration.md#mcp). The evidence names the `sessionId`, `workflowId`, `pageId`, `url` and `capturedAt` of the shot.
 - The MCP tool accepts top-level `hints` only when `fields` has exactly one entry without its own hints. Otherwise it fails with `hintsPerField`.
@@ -155,6 +156,12 @@ Use a `text` or `url` condition when you know the success state, or `networkQuie
 - `validationRejected`: fix the fields listed in `formValidation` (control, kind, name, target, validity, never values) and do not resubmit blindly.
 
 A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`. A submit rejected with `validationRejected` does not count, so the corrected submit needs no `reSubmit`.
+
+## Email links and confirmations elsewhere
+
+A submit that lands on a page asking to confirm an email address through a link it sent, instead of reaching `expectedState`, fails `verificationLinkRequired` (not retryable). The page has no code field and says so in words such as "verification link", "verify your email" or "check your email to". The error message quotes the page's line about where the link went (page-derived text). Open the link with your own mail tool; do not resubmit.
+
+With vision assist on, a submit that misses `expectedState` while its `outcomeReading` reads `confirmed` fails `confirmedOutsideExpectedState` (not retryable) instead of `verificationFailed`. The evidence carries the reading and a `screenshot` of the page. Do not resubmit; widen `expectedState` or record the confirmation.
 
 ## One-time codes
 

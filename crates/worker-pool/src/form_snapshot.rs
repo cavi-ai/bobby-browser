@@ -90,6 +90,10 @@ pub struct RawFormControl {
     pub validation_message: Option<String>,
     pub described_by: Vec<String>,
     pub options: Vec<RawFormOption>,
+    /// Values of a native select's selected options, including options past
+    /// the `options` cap.
+    #[serde(default)]
+    pub selected_values: Option<Vec<String>>,
     pub frame_path: Vec<SemanticTargetSegment>,
     pub shadow_path: Vec<SemanticTargetSegment>,
     /// The number the snapshot stamped on the element; an element keeps it
@@ -252,6 +256,7 @@ pub fn normalize_form_snapshot(
         forms,
         unowned_controls,
         truncated,
+        page_busy: false,
     };
     snapshot
         .validate()
@@ -264,14 +269,55 @@ pub fn decode_form_snapshot(
     encoded: &str,
     max_controls: usize,
 ) -> Result<FormSnapshot, CommandError> {
-    let raw: RawFormSnapshot = serde_json::from_str(encoded).map_err(|error| {
+    normalize_form_snapshot(page_id, decode_raw_form_snapshot(encoded)?, max_controls)
+}
+
+pub(crate) fn decode_raw_form_snapshot(encoded: &str) -> Result<RawFormSnapshot, CommandError> {
+    serde_json::from_str(encoded).map_err(|error| {
         snapshot_error(
             ErrorCode::BrowserCommandFailed,
             format!("invalid raw form snapshot: {error}"),
         )
-    })?;
-    normalize_form_snapshot(page_id, raw, max_controls)
+    })
 }
+
+/// Adds a frame's snapshot to `raw` under keys of its own, with `frame_path`,
+/// the hops into that frame, before each form's and control's own path.
+pub(crate) fn append_frame_form_snapshot(
+    raw: &mut RawFormSnapshot,
+    framed: RawFormSnapshot,
+    frame_path: &[SemanticTargetSegment],
+    frame: usize,
+) {
+    let rekey = |key: &str| format!("frame-{frame}-{key}");
+    let within = |path: &[SemanticTargetSegment]| [frame_path, path].concat();
+    raw.truncated |= framed.truncated;
+    raw.forms.extend(framed.forms.into_iter().map(|mut form| {
+        form.key = rekey(&form.key);
+        form.frame_path = within(&form.frame_path);
+        form
+    }));
+    raw.groups
+        .extend(framed.groups.into_iter().map(|mut group| {
+            group.key = rekey(&group.key);
+            group.form_key = rekey(&group.form_key);
+            group
+        }));
+    raw.controls
+        .extend(framed.controls.into_iter().map(|mut control| {
+            control.key = rekey(&control.key);
+            control.form_key = control.form_key.as_deref().map(rekey);
+            control.group_key = control.group_key.as_deref().map(rekey);
+            control.frame_path = within(&control.frame_path);
+            control
+        }));
+    if raw.forms.len() > MAX_FORM_SNAPSHOT_FORMS {
+        raw.forms.truncate(MAX_FORM_SNAPSHOT_FORMS);
+        raw.truncated = true;
+    }
+}
+
+const MAX_FORM_SNAPSHOT_FORMS: usize = 64;
 
 /// A control target's ordinal counts the controls with its role and name in
 /// the frame and shadow root its target resolves in.
@@ -360,12 +406,13 @@ fn normalize_control(
         }
         FormControlKind::SelectOne | FormControlKind::SelectMultiple | FormControlKind::Listbox => {
             FormControlState::Selection {
-                values: raw
-                    .options
-                    .iter()
-                    .filter(|option| option.selected)
-                    .map(|option| option.value.clone())
-                    .collect(),
+                values: raw.selected_values.clone().unwrap_or_else(|| {
+                    raw.options
+                        .iter()
+                        .filter(|option| option.selected)
+                        .map(|option| option.value.clone())
+                        .collect()
+                }),
             }
         }
         // An input the widget emptied still holds the files its row shows.
@@ -854,15 +901,29 @@ pub fn form_snapshot_expression(page_id: &PageId) -> String {
 }
 
 pub fn form_snapshot_expression_with_limit(_page_id: &PageId, max_controls: usize) -> String {
-    form_projection_expression(max_controls, true)
+    form_projection_expression(max_controls, true, None)
+}
+
+/// The snapshot of a frame and its readable descendants. New stamps come
+/// from a range already reserved in the top document.
+pub(crate) fn frame_form_snapshot_expression(max_controls: usize, first_stamp: u32) -> String {
+    form_projection_expression(max_controls, true, Some(first_stamp))
 }
 
 pub(crate) fn inspection_form_expression(max_controls: usize) -> String {
-    form_projection_expression(max_controls, false)
+    form_projection_expression(max_controls, false, None)
 }
 
-fn form_projection_expression(max_controls: usize, stamp_controls: bool) -> String {
+fn form_projection_expression(
+    max_controls: usize,
+    stamp_controls: bool,
+    first_reserved_stamp: Option<u32>,
+) -> String {
+    let first_reserved_stamp = first_reserved_stamp
+        .map(|stamp| stamp.to_string())
+        .unwrap_or_else(|| "null".into());
     RAW_FORM_SNAPSHOT_SCRIPT
+        .replace("__FIRST_RESERVED_STAMP__", &first_reserved_stamp)
         .replace(
             "__STAMP_CONTROLS__",
             if stamp_controls { "true" } else { "false" },
@@ -881,8 +942,18 @@ fn form_projection_expression(max_controls: usize, stamp_controls: bool) -> Stri
 /// Returns a function body that reads `el` as one raw form control, as JSON
 /// text, or null when `el` is detached or not a form control.
 pub fn form_control_script() -> String {
+    form_control_projection_script(&format!(
+        "!el.isConnected||!el.matches('{CONTROL_SELECTOR}')"
+    ))
+}
+
+pub(crate) fn file_input_control_script() -> String {
+    form_control_projection_script("el.localName!=='input'||el.type!=='file'")
+}
+
+fn form_control_projection_script(skip: &str) -> String {
     format!(
-        "{RAW_CONTROL_FUNCTIONS}if(!el.isConnected||!el.matches('{CONTROL_SELECTOR}'))return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
+        "{RAW_CONTROL_FUNCTIONS}if({skip})return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
     )
     .replace("__SHOWN_VALUE_FUNCTION__", SHOWN_VALUE_FUNCTION)
     .replace("__CONTROL_LABEL_FUNCTION__", dom_engine::control_label_function())
@@ -944,7 +1015,7 @@ const containerText=e=>{
     }
     return null;
 };
-const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const description=text(describedBy.join(' '))||text(e.getAttribute('aria-description'));const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description,containerDescription:description?null:containerText(e),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
+const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const description=text(describedBy.join(' '))||text(e.getAttribute('aria-description'));const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description,containerDescription:description?null:containerText(e),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,selectedValues:e.selectedOptions?[...e.selectedOptions].slice(0,512).map(option=>clip(option.value,4096)):null,framePath,shadowPath}};
 "#;
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -978,21 +1049,30 @@ if(!STAMP_CONTROLS){
 }
 const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;
 const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');
-let next=isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1;
-for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
-  const v=el.getAttribute(stampKey);
-  if(isStamp(v))next=Math.max(next,Number(v)+1);
+const firstReservedStamp=__FIRST_RESERVED_STAMP__;
+let next=firstReservedStamp;
+if(firstReservedStamp===null){
+  const cursor=docEl?.getAttribute(nextKey);
+  next=isStamp(cursor)?Number(cursor):1;
+  for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
+    const v=el.getAttribute(stampKey);
+    if(isStamp(v))next=Math.max(next,Number(v)+1);
+  }
 }
 const used=new Set();
 const controls=controlElements.map((control,index)=>{
   const e=control.element;
   const own=e.getAttribute(stampKey);
   let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;
-  if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}
+  if(!stamp){
+    while(used.has(next))next++;
+    stamp=next++;
+    e.setAttribute(stampKey,String(stamp));
+  }
   used.add(stamp);
   return{...readControl(control,index),stamp};
 });
-if(docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
+if(firstReservedStamp===null&&docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
 return{forms,groups,controls,truncated};})())"#;
 
 const _LEGACY_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -1060,6 +1140,7 @@ mod tests {
             validation_message: None,
             described_by: Vec::new(),
             options: Vec::new(),
+            selected_values: None,
             frame_path: Vec::new(),
             shadow_path: Vec::new(),
             stamp: None,

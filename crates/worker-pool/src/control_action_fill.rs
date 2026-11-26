@@ -35,7 +35,9 @@ pub trait ControlActionAdapter: Send + Sync {
     fn missing_control(&self) -> CommandError {
         CommandError {
             code: ErrorCode::TargetNotFound,
-            message: "form control target was not found".into(),
+            message:
+                "target is not a form control from form_snapshot; use click for other elements"
+                    .into(),
             layer: ErrorLayer::Driver,
             retryable: false,
         }
@@ -150,10 +152,38 @@ pub trait ControlActionAdapter: Send + Sync {
         name: &str,
     ) -> Result<(), CommandError>;
 
+    /// Copies a value the password manager put in the other password field
+    /// of the control's form into this empty one; `false` when there is none.
+    async fn take_peer_new_password(
+        &self,
+        _prepared: &Self::Prepared,
+    ) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+
     fn decorate(&self, evidence: Vec<Evidence>) -> Vec<Evidence> {
         evidence
     }
 }
+
+/// Function body, with `el` bound to an empty password field, that copies the
+/// value of the other password field of a form holding exactly two, neither
+/// marked `current-password`, through the native setter with `input` and
+/// `change` events. The value stays in the page. Returns whether it was set.
+pub(crate) const PEER_NEW_PASSWORD_SCRIPT: &str = "\
+    if (!(el instanceof HTMLInputElement) || el.type !== 'password' || el.value || \
+        !el.form || !el.isConnected || el.readOnly || el.matches(':disabled')) return false; \
+    const elements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get.call(el.form); \
+    const fields = Array.from(elements).filter((field) => \
+        field instanceof HTMLInputElement && field.type === 'password'); \
+    if (fields.length !== 2 || fields.some((field) => \
+        /\\bcurrent-password\\b/i.test(field.getAttribute('autocomplete') || ''))) return false; \
+    const peer = fields.find((field) => field !== el && field.value); \
+    if (!peer) return false; \
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, peer.value); \
+    el.dispatchEvent(new Event('input', { bubbles: true })); \
+    el.dispatchEvent(new Event('change', { bubbles: true })); \
+    return true;";
 
 /// Validate, read, dispatch one primitive, and emit control-action evidence.
 pub async fn run<A: ControlActionAdapter + ?Sized>(
@@ -243,11 +273,19 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
         ControlAction::PasswordManagerFill => {
             // Only watches: the field is never clicked, focused, or typed
             // into, which would raise the browser's own credential dialogs.
+            // A sign-up suggestion that filled only the other new-password
+            // field is copied into this one.
             let deadline = tokio::time::Instant::now() + PASSWORD_MANAGER_FILL_WAIT;
             while tokio::time::Instant::now() < deadline {
                 match adapter.describe(&prepared, &command.target).await {
                     Ok(Some(control)) if !password_manager_filled(&control.state) => {
-                        tokio::time::sleep(PASSWORD_MANAGER_FILL_POLL).await;
+                        if !adapter
+                            .take_peer_new_password(&prepared)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            tokio::time::sleep(PASSWORD_MANAGER_FILL_POLL).await;
+                        }
                     }
                     _ => break,
                 }
@@ -256,19 +294,48 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
     }
 
     let activated = matches!(command.action, ControlAction::Activate);
-    let after = match adapter.read_snapshot(page_id, true).await {
-        Ok(after) => Some(after),
-        Err(_) if activated => None,
-        Err(error) => return Err(error),
-    };
-    let after_control = match adapter.describe(&prepared, &command.target).await {
-        Ok(Some(control)) => Some(control),
-        _ => {
-            adapter
-                .recover(page_id, &command.target, require_visible, activated)
-                .await?
+    let (mut after, mut after_control) = read_after(
+        adapter,
+        page_id,
+        command,
+        &prepared,
+        require_visible,
+        activated,
+    )
+    .await?;
+    match &command.action {
+        ControlAction::SetText {
+            value,
+            clear_first: true,
+        } if !value.contains(['\n', '\r']) => {
+            // Retype once after a dropped keystroke or re-render. Line breaks
+            // can dispatch Enter and submit a form, which must not be replayed.
+            let landed = after_control.as_ref().is_some_and(|control| {
+                let matched = evidence_action(&command.action, control);
+                control_action_evidence(control, matched.as_ref(), false, None).is_ok()
+            });
+            if !landed {
+                if let Ok(prepared) = adapter
+                    .resolve(page_id, &command.target, require_visible)
+                    .await
+                {
+                    let control = adapter
+                        .describe(&prepared, &command.target)
+                        .await?
+                        .ok_or_else(|| adapter.missing_control())?;
+                    validate_control_action(&control, &command.action)?;
+                    adapter.before_primitive(&prepared).await?;
+                    adapter
+                        .type_text(page_id, &prepared, &command.target, value, true)
+                        .await?;
+                    (after, after_control) =
+                        read_after(adapter, page_id, command, &prepared, require_visible, false)
+                            .await?;
+                }
+            }
         }
-    };
+        _ => {}
+    }
     let node_replaced = after_control.is_none();
     let after_control = match after_control {
         Some(control) => control,
@@ -287,6 +354,32 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
     // selection, and redaction stay on the evidence for the caller to read.
     verify_evidence(&command.action, &action)?;
     Ok(adapter.decorate(vec![Evidence::ControlAction { action }]))
+}
+
+/// The page and the control after a primitive; the control is `None` when its
+/// node left the page and nothing else answers the target.
+async fn read_after<A: ControlActionAdapter + ?Sized>(
+    adapter: &A,
+    page_id: &PageId,
+    command: &ControlActionCommand,
+    prepared: &A::Prepared,
+    require_visible: bool,
+    activated: bool,
+) -> Result<(Option<FormSnapshot>, Option<FormControl>), CommandError> {
+    let after = match adapter.read_snapshot(page_id, true).await {
+        Ok(after) => Some(after),
+        Err(_) if activated => None,
+        Err(error) => return Err(error),
+    };
+    let after_control = match adapter.describe(prepared, &command.target).await {
+        Ok(Some(control)) => Some(control),
+        _ => {
+            adapter
+                .recover(page_id, &command.target, require_visible, activated)
+                .await?
+        }
+    };
+    Ok((after, after_control))
 }
 
 /// User-visible postconditions on the one evidence record: the value landed
@@ -483,6 +576,7 @@ mod tests {
             forms: Vec::new(),
             unowned_controls: controls,
             truncated: false,
+            page_busy: false,
         }
     }
 

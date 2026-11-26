@@ -15,7 +15,9 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type ProviderHealthStatus = "healthy" | "degraded" | "unhealthy";
 export interface ProviderHealthSnapshot { providerMode: string; status: ProviderHealthStatus; successes: number; failures: number; consecutiveFailures: number; budgetViolations: number; lastLatencyMs?: number; latencyBudgetMs?: number; failureThreshold: number; }
 export interface StorageIntegrityIssue { store: "commandIdempotency" | "lifecycleIdempotency" | "jobIdempotency" | "jobJournal"; reason: "unreadableLedger" | "duplicateLedgerKey" | "ledgerCapacityExceeded" | "unreadableJobHistory"; }
-export interface RuntimeInfo { engineScope?: "chromium" | "firefox" | "webKit"; storageIntegrity?: StorageIntegrityIssue[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
+/** A session that ended when its runtime stopped, with the pages it held. */
+export interface LostSession { sessionId: string; pageIds: string[]; }
+export interface RuntimeInfo { engineScope?: "chromium" | "firefox" | "webKit"; storageIntegrity?: StorageIntegrityIssue[]; /** Sessions the previous runtime held when it stopped. */ lostSessions?: LostSession[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; passwordManager: boolean; visionNode?: string; /** Browser engine for this session. */ engine?: "chromium" | "firefox" }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
@@ -64,7 +66,7 @@ export interface JobStatusResponse {
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
 export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "context:read" | "browser:mutate" | "network:egress" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
-export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "internal";
+export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "browserCommandFailed" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
   layer: ErrorLayer;
@@ -77,7 +79,7 @@ export interface InterfaceError {
   requiredCapability: Capability | null;
 }
 
-export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted" | "verificationCodeRequired";
+export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted" | "verificationCodeRequired" | "verificationLinkRequired" | "confirmedOutsideExpectedState";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
 
 /** Maximum UTF-8 byte length for intent `purpose` strings. */
@@ -144,7 +146,7 @@ export interface ExecutionRecord {
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
-  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; pageDerived?: true }
+  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; truncated?: true; pageDerived?: true }
   | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[]; sha256?: string[] }
@@ -246,7 +248,7 @@ export interface FormControl { id: string; formId?: string | null; groupId?: str
 export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
-export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageDerived?: true; }
+export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageBusy?: boolean; pageDerived?: true; }
 /**
  * The unified mutation vocabulary for form controls. Used both as the
  * `controlAction` primitive's payload and as {@link FillIntent} /
@@ -269,7 +271,7 @@ export interface RevealedControl { controlKind: FormControlKind; accessibleName?
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }
 export interface ViewportSize { width: number; height: number; }
 export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy?: number | null; }
-export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry";
+export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry" | "turnstile";
 /** What the page showed after a submit, as read by the vision provider. */
 export type PageOutcome = "confirmed" | "rejected" | "noMessage";
 export interface ChallengeDetectionRegion { x: number; y: number; width: number; height: number; }

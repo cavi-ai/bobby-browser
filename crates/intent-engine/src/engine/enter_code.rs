@@ -81,15 +81,35 @@ fn mask_evidence(evidence: Vec<Evidence>, code: &str) -> Vec<Evidence> {
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodeInput {
+    Single,
+    SplitField,
+    SplitFromFirst,
+}
+
 struct Run<'a> {
     page_id: &'a PageId,
     browser: &'a dyn IntentBrowser,
     code: String,
     summary: String,
     resolutions: Vec<Evidence>,
+    /// A code field left the page as the code went in: the page took the
+    /// step itself, and the page that follows decides.
+    moved_on: bool,
 }
 
 impl Run<'_> {
+    /// Whether `field` is still on the page.
+    async fn on_page(&self, field: &CodeField) -> bool {
+        let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
+            return true;
+        };
+        code_entry::find_control(&snapshot, &field.id)
+            .filter(|control| control.target == field.target)
+            .is_some()
+    }
+
     fn failed(
         &self,
         error: CommandError,
@@ -154,7 +174,7 @@ impl Run<'_> {
         &mut self,
         field: &CodeField,
         chunk: &str,
-        split: bool,
+        input: CodeInput,
     ) -> Result<(), IntentOutcome> {
         let Some(target) = &field.target else {
             return Err(self.failed(
@@ -183,13 +203,29 @@ impl Run<'_> {
         .await
         {
             Ok(evidence) => evidence,
+            Err(error)
+                if (error.code == ErrorCode::TargetDetached
+                    || post_navigation_context_loss(&error))
+                    && !self.on_page(field).await =>
+            {
+                self.moved_on = true;
+                return Ok(());
+            }
+            // The worker compares the entire input with the first box.
+            // The split step verifies the individual boxes after typing.
+            Err(error)
+                if input == CodeInput::SplitFromFirst
+                    && error.code == ErrorCode::VerificationFailed =>
+            {
+                return Ok(());
+            }
             Err(error) => {
                 // A worker message can quote what was typed; with one
                 // character per box there is nothing safe to keep of it.
-                let message = if split {
-                    "typing into a code box failed".to_owned()
-                } else {
+                let message = if input == CodeInput::Single {
                     format!("typing the code failed: {}", error.message)
+                } else {
+                    "typing into a code box failed".to_owned()
                 };
                 return Err(self.failed(
                     CommandError { message, ..error },
@@ -200,8 +236,14 @@ impl Run<'_> {
         };
         // With one character per box a typing worker's own read-back can race
         // the page moving focus on, so the boxes are checked together below.
-        if !split && verify_fill(&value, &evidence).is_err() && !self.reads_back(field, chunk).await
+        if input == CodeInput::Single
+            && verify_fill(&value, &evidence).is_err()
+            && !self.reads_back(field, chunk).await
         {
+            if !self.on_page(field).await {
+                self.moved_on = true;
+                return Ok(());
+            }
             return Err(self.failed(
                 Self::error(
                     ErrorCode::VerificationFailed,
@@ -220,10 +262,7 @@ impl Run<'_> {
         let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
             return false;
         };
-        code_entry::find_control(&snapshot, &field.id)
-            .filter(|control| control.target == field.target)
-            .and_then(|control| code_entry::holds(control, expected))
-            == Some(true)
+        field_readback(&snapshot, field, expected) == Some(true)
     }
 
     /// Reads every field back once all are filled and types again into any
@@ -232,7 +271,7 @@ impl Run<'_> {
     async fn verify_filled(
         &mut self,
         fields: &[(&CodeField, String)],
-        split: bool,
+        input: CodeInput,
     ) -> Result<(), IntentOutcome> {
         for pass in 0..=REFILL_PASSES {
             let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
@@ -246,7 +285,7 @@ impl Run<'_> {
                 break;
             }
             for (field, chunk) in wrong {
-                self.fill(field, chunk, split).await?;
+                self.fill(field, chunk, input).await?;
             }
         }
         Err(self.failed(
@@ -264,15 +303,31 @@ impl Run<'_> {
     async fn verify_typed_through(
         &mut self,
         fields: &[(&CodeField, String)],
+        can_verify_exit: bool,
     ) -> Result<(), IntentOutcome> {
         for pass in 0..=REFILL_PASSES {
             if pass > 0 {
                 tokio::time::sleep(Duration::from_millis(CODE_STEP_POLL_MS)).await;
             }
             let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
-                return Ok(());
+                continue;
             };
-            if wrong_fields(&snapshot, fields).is_empty() {
+            if fields
+                .iter()
+                .all(|(field, expected)| field_readback(&snapshot, field, expected) == Some(true))
+            {
+                return Ok(());
+            }
+            // An early exit can swallow keystrokes. Require the caller's
+            // expected state when the boxes disappeared before readback.
+            if can_verify_exit
+                && !snapshot.truncated
+                && fields.iter().all(|(field, _)| {
+                    code_entry::find_control(&snapshot, &field.id)
+                        .is_none_or(|control| control.target != field.target)
+                })
+            {
+                self.moved_on = true;
                 return Ok(());
             }
         }
@@ -292,7 +347,11 @@ impl Run<'_> {
         &mut self,
         step: &CodeStep,
         expected_state: Option<&WaitForCommand>,
+        input: CodeInput,
     ) -> Result<Vec<Evidence>, IntentOutcome> {
+        if self.moved_on {
+            return Ok(Vec::new());
+        }
         let acted = match &step.submit {
             Some(submit) => {
                 let located = self.locate(submit).await?;
@@ -312,12 +371,15 @@ impl Run<'_> {
                     .await
             }
             None => {
-                // Enter goes to the last box the page names.
+                // A typed-through step needs a named target for Enter.
                 let Some(last) = step
                     .fields
                     .iter()
                     .rev()
-                    .find_map(|field| field.target.as_ref())
+                    .filter_map(|field| field.target.as_ref())
+                    .find(|target| {
+                        input != CodeInput::SplitFromFirst || !target.accessible_name.is_empty()
+                    })
                 else {
                     return Ok(Vec::new());
                 };
@@ -358,13 +420,25 @@ fn wrong_fields<'a, 'b>(
 ) -> Vec<&'a (&'b CodeField, String)> {
     fields
         .iter()
-        .filter(|(field, expected)| {
-            code_entry::find_control(snapshot, &field.id)
-                .filter(|control| control.target == field.target)
-                .and_then(|control| code_entry::holds(control, expected))
-                == Some(false)
-        })
+        .filter(|(field, expected)| field_readback(snapshot, field, expected) == Some(false))
         .collect()
+}
+
+fn named_target(field: &CodeField) -> Option<&FormControlTarget> {
+    field
+        .target
+        .as_ref()
+        .filter(|target| !target.accessible_name.is_empty())
+}
+
+fn field_readback(
+    snapshot: &types::FormSnapshot,
+    field: &CodeField,
+    expected: &str,
+) -> Option<bool> {
+    code_entry::find_control(snapshot, &field.id)
+        .filter(|control| control.target == field.target)
+        .and_then(|control| code_entry::holds(control, expected))
 }
 
 pub(super) async fn execute_enter_code(
@@ -379,6 +453,7 @@ pub(super) async fn execute_enter_code(
         code: code.clone(),
         summary: "enterCode".into(),
         resolutions: Vec::new(),
+        moved_on: false,
     };
     let step = match read_code_step(page_id, browser, Some(request.hints)).await {
         Ok(Some(step)) => step,
@@ -442,26 +517,70 @@ pub(super) async fn execute_enter_code(
     } else {
         vec![(&step.fields[0], code.clone())]
     };
-    // Boxes with no name after a named first box cannot be targeted: the
-    // code is typed from the first box, and the page moves focus on input.
-    let typed_through = split
-        && step.fields[0].target.is_some()
-        && step.fields[1..].iter().any(|field| field.target.is_none());
-    if typed_through {
-        if let Err(outcome) = run.fill(&step.fields[0], &code, true).await {
+    // A snapshot can stamp unnamed boxes without giving them a name.
+    // Start in the named first box and let the page move focus on input.
+    let input = if !split {
+        CodeInput::Single
+    } else if named_target(&step.fields[0]).is_some()
+        && step.fields[1..]
+            .iter()
+            .any(|field| named_target(field).is_none())
+    {
+        CodeInput::SplitFromFirst
+    } else {
+        CodeInput::SplitField
+    };
+    if input == CodeInput::SplitFromFirst {
+        if let Err(outcome) = run.fill(&step.fields[0], &code, input).await {
             return outcome;
         }
-        if let Err(outcome) = run.verify_typed_through(&chunks).await {
+        let can_verify_exit = request.submit && request.expected_state.is_some();
+        if let Err(outcome) = run.verify_typed_through(&chunks, can_verify_exit).await {
             return outcome;
         }
     } else {
-        for (field, chunk) in &chunks {
-            if let Err(outcome) = run.fill(field, chunk, split).await {
+        for (index, (field, chunk)) in chunks.iter().enumerate() {
+            if let Err(outcome) = run.fill(field, chunk, input).await {
                 return outcome;
             }
+            if run.moved_on && index + 1 < chunks.len() {
+                return run.failed(
+                    Run::error(
+                        ErrorCode::VerificationFailed,
+                        "the page left the code step before every character was entered",
+                    ),
+                    Vec::new(),
+                    "verifyFailed",
+                );
+            }
         }
-        if let Err(outcome) = run.verify_filled(&chunks, split).await {
+        if let Err(outcome) = run.verify_filled(&chunks, input).await {
             return outcome;
+        }
+    }
+
+    // A submit can be verified by the page that follows. A fill-only run
+    // needs the current page to confirm every field kept its value.
+    if !request.submit {
+        let confirmed = browser
+            .form_snapshot(page_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                chunks.iter().all(|(field, expected)| {
+                    field_readback(&snapshot, field, expected) == Some(true)
+                })
+            });
+        if !confirmed {
+            return run.failed(
+                Run::error(
+                    ErrorCode::VerificationFailed,
+                    "the page did not keep the entered code in every code field",
+                ),
+                Vec::new(),
+                "verifyFailed",
+            );
         }
     }
 
@@ -480,7 +599,7 @@ pub(super) async fn execute_enter_code(
     let mut wait_elapsed_ms = None;
     if request.submit {
         let mut acted = match run
-            .press_submit(&step, request.expected_state.as_ref())
+            .press_submit(&step, request.expected_state.as_ref(), input)
             .await
         {
             Ok(acted) => acted,

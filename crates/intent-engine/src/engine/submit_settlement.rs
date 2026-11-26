@@ -281,6 +281,7 @@ mod tests {
             }],
             unowned_controls: Vec::new(),
             truncated: false,
+            page_busy: false,
         }
     }
 
