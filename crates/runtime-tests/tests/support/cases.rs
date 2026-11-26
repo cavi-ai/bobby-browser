@@ -7046,6 +7046,74 @@ pub async fn an_attach_button_uploads_into_its_slot(rig: &Rig, dir: &std::path::
     live.close().await;
 }
 
+/// An upload addressed to a button that opens the file chooser from a file
+/// input the page never inserts lands in that input.
+pub async fn a_button_that_opens_the_file_chooser_takes_the_upload(
+    rig: &Rig,
+    dir: &std::path::Path,
+) {
+    let cover = dir.join("cover.txt");
+    std::fs::write(&cover, "cover-letter-bytes").expect("write cover");
+    let body = r#"<button type="button" id="pick">Upload</button><p id="echo"></p>
+    <script>
+      document.getElementById("pick").addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.addEventListener("change", () => {
+          document.getElementById("echo").textContent = `picked=${input.files[0]?.name}`;
+        });
+        input.click();
+      });
+    </script>"#;
+    let site = FixtureSite::spawn(vec![("/pick", Route::Html(page("Pick", body)))]).await;
+    let live = Live::open(rig, &site.url("/pick")).await;
+    let uploaded = live
+        .call(
+            "upload_files",
+            json!({"target":{"role":"button","accessibleName":"Upload"},
+                   "paths":[cover.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "picked=cover.txt"), "{page}");
+    live.close().await;
+}
+
+/// The page's only file input, unlabeled, takes an upload addressed by its
+/// accessibility snapshot target, which the browser names after its button.
+pub async fn the_only_file_input_takes_its_snapshot_target(rig: &Rig, dir: &std::path::Path) {
+    let resume = dir.join("resume.txt");
+    std::fs::write(&resume, "resume-bytes").expect("write resume");
+    let body = r#"<form><input type="file" id="doc"></form><p id="echo"></p>
+    <script>
+      const input = document.getElementById("doc");
+      input.addEventListener("change", () => {
+        document.getElementById("echo").textContent = `doc=${input.files[0]?.name}`;
+      });
+    </script>"#;
+    let site = FixtureSite::spawn(vec![("/doc", Route::Html(page("Doc", body)))]).await;
+    let live = Live::open(rig, &site.url("/doc")).await;
+    let path = resume.to_str().expect("utf8 path");
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let file_targets: Vec<_> = targets
+        .iter()
+        .filter(|(role, _)| *role == "button")
+        .collect();
+    let [(_, target)] = file_targets.as_slice() else {
+        panic!("one button target for the file input: {snapshot}");
+    };
+    let by_target = live
+        .call("upload_files", json!({"target":target,"paths":[path]}))
+        .await;
+    assert_eq!(by_target["status"], "completed", "{target}: {by_target}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "doc=resume.txt"), "{page}");
+    live.close().await;
+}
+
 /// The PNG an evidence item names, read from the session's artifact store.
 fn screenshot_png(rig: &Rig, live: &Live<'_>, result: &Value) -> (Value, Vec<u8>) {
     let shot = result["evidence"]

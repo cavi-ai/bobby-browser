@@ -98,6 +98,22 @@ async fn an_attach_button_uploads_into_its_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn a_button_that_opens_the_file_chooser_takes_the_upload() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_button_that_opens_the_file_chooser_takes_the_upload(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn the_only_file_input_takes_its_snapshot_target() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::the_only_file_input_takes_its_snapshot_target(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn uploads_by_label_refuse_a_slot_that_shows_a_file() {
     let dir = tempfile::tempdir().expect("upload dir");
     let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;

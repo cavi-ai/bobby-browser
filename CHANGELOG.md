@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Chromium `upload_files` on a button that opens the file chooser, with no file input in the page, sets the files on the input the chooser opens.
+
 ### Fixed
+
+- Chromium `upload_files` resolves an unlabeled file input's accessibility snapshot target, named after the browser's own button text.
 
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
