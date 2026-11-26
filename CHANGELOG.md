@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- A listed Chromium profile with `"systemKeychain": true` launches its Chrome with the system keychain and password store instead of the mock keychain.
+- `runtime_info.lostSessions` names the sessions and pages the previous runtime held when it stopped.
+
 ### Fixed
 
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.

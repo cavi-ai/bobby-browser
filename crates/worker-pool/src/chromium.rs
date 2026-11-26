@@ -434,6 +434,9 @@ pub struct ChromiumWorkerFactory {
     /// with the session. `Some(dir)` persists it across sessions instead, the
     /// Chromium counterpart to a Firefox companion's enrolled profile.
     durable_profile_dir: Option<PathBuf>,
+    /// A durable profile's Chrome uses the system keychain and password store
+    /// instead of the mock keychain; disposable profiles always use the mock.
+    system_keychain: bool,
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
@@ -456,6 +459,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -473,6 +477,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_dir: None,
+            system_keychain: false,
             shared_browser_attach: Arc::default(),
             retained_profiles: Arc::default(),
             credentials: Vec::new(),
@@ -512,6 +517,13 @@ impl ChromiumWorkerFactory {
         self
     }
 
+    /// Whether a durable profile's Chrome launches with the system keychain
+    /// and password store. Disposable profiles keep the mock keychain.
+    pub fn with_system_keychain(mut self, system_keychain: bool) -> Self {
+        self.system_keychain = system_keychain;
+        self
+    }
+
     fn chromium_config(&self, profile_dir: &Path) -> Result<ChromiumConfig, CommandError> {
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir)
@@ -533,6 +545,9 @@ impl ChromiumWorkerFactory {
         // password manager; disposable profiles have none to run.
         if self.durable_profile_dir.is_some() {
             builder = builder.installed_extensions();
+            if self.system_keychain {
+                builder = builder.system_keychain();
+            }
         }
         // The fingerprint screen is spoofed at the JS layer, but CSS media
         // queries are evaluated natively against the real window: a default
@@ -6252,6 +6267,39 @@ mod tests {
         assert!(args(disposable.clone()).contains(&"--disable-extensions".to_string()));
         let durable = disposable.with_durable_profile("p".into());
         assert!(!args(durable).contains(&"--disable-extensions".to_string()));
+    }
+
+    #[test]
+    fn only_an_opted_out_durable_profile_launches_without_keychain_mocking() {
+        use super::ChromiumWorkerFactory;
+        let config = config::BrowserConfig {
+            executable: Some("/usr/bin/true".into()),
+            ..config::BrowserConfig::default()
+        };
+        let dir = std::path::Path::new("/profiles/p");
+        // The arguments the shared-profile launcher passes to Chrome.
+        let args = |factory: &ChromiumWorkerFactory| {
+            super::shared_chrome_launch_args(&factory.chromium_config(dir).unwrap())
+        };
+        let mocked = |args: &[String]| {
+            args.contains(&"--use-mock-keychain".to_string())
+                && args.contains(&"--password-store=basic".to_string())
+        };
+        let registry = tempfile::tempdir().unwrap();
+        let disposable =
+            ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into());
+        let durable = disposable.clone().with_durable_profile_dir(dir.into());
+        assert!(mocked(&args(&durable)), "{:?}", args(&durable));
+        let system = durable.with_system_keychain(true);
+        let system_args = args(&system);
+        assert!(
+            !system_args
+                .iter()
+                .any(|arg| arg == "--use-mock-keychain" || arg.starts_with("--password-store")),
+            "{system_args:?}"
+        );
+        let disposable = disposable.with_system_keychain(true);
+        assert!(mocked(&args(&disposable)), "{:?}", args(&disposable));
     }
 
     #[test]

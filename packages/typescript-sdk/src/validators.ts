@@ -32,6 +32,7 @@ import type {
   JobResolutionRequest,
   JobResolutionReceipt,
   StorageIntegrityIssue,
+  LostSession,
   JobResult,
   JobStatusResponse,
   JobSubmitResponse,
@@ -285,10 +286,17 @@ export function isStorageIntegrityIssue(value: unknown): value is StorageIntegri
     && oneOf(value.reason, ["unreadableLedger", "duplicateLedgerKey", "ledgerCapacityExceeded", "unreadableJobHistory"]);
 }
 
+export function isLostSession(value: unknown): value is LostSession {
+  return hasExactKeys(value, ["sessionId", "pageIds"])
+    && isString(value.sessionId)
+    && isStringArray(value.pageIds);
+}
+
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["engineScope", "visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity"])
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["engineScope", "visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity", "lostSessions"])
     && optional(value, "engineScope", (engine): engine is "chromium" | "firefox" | "webKit" => oneOf(engine, ["chromium", "firefox", "webKit"]))
     && optional(value, "storageIntegrity", (issues): issues is StorageIntegrityIssue[] => Array.isArray(issues) && issues.length <= 4 && issues.every(isStorageIntegrityIssue))
+    && optional(value, "lostSessions", (sessions): sessions is LostSession[] => Array.isArray(sessions) && sessions.every(isLostSession))
     && isString(value.version)
     && isStringArray(value.capabilities)
     && isSafeUnsigned(value.active_sessions)
