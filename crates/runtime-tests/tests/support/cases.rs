@@ -6798,79 +6798,125 @@ pub async fn a_combobox_without_the_value_lists_its_options(rig: &Rig) {
     live.close().await;
 }
 
-/// A multiselect search box that searches on Enter takes selectOne: the value
-/// is typed, Enter runs the search without submitting the form, and the
-/// checkbox option reading the value is chosen.
-pub async fn a_search_on_enter_multiselect_takes_select_one(rig: &Rig) {
-    let body = r#"<form action="/submitted"><label id="topics-label" for="topics">Topics</label>
-        <span id="chips"></span>
-        <input id="topics" type="text" role="combobox" aria-labelledby="topics-label" aria-autocomplete="list"
-          aria-controls="topic-results" aria-expanded="false" autocomplete="off" placeholder="Search">
-        <div id="topic-results" role="listbox" aria-multiselectable="true"></div>
-        <button type="submit">Save</button></form><p id="picked"></p>
+/// Fill does not invoke a page's Enter handler, even for a multiline label.
+pub async fn select_one_does_not_submit_a_search_field(rig: &Rig) {
+    let body = r#"<form action="/submitted"><label for="topics">Topics</label>
+        <input id="topics" name="topics" role="combobox" aria-controls="results" autocomplete="off">
+        <div id="results" role="listbox"></div>
+        <button type="submit">Save</button></form>
         <script>
           const input = document.getElementById("topics");
-          const results = document.getElementById("topic-results");
-          const chips = document.getElementById("chips");
-          const topics = ["Art history", "History", "Geography", "Mathematics"];
-          const chosen = new Set();
-          let typedAt = 0;
-          const show = () => {
-            chips.textContent = [...chosen].join(", ");
-            document.getElementById("picked").textContent = `Topics: ${[...chosen].join(", ")}`;
-          };
-          input.addEventListener("input", () => {
-            typedAt = Date.now();
-            results.innerHTML = "";
-            input.setAttribute("aria-expanded", "false");
-          });
           input.addEventListener("keydown", (event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            if (Date.now() - typedAt < 300) return;
-            const query = input.value.toLowerCase();
-            results.innerHTML = "";
-            for (const name of topics.filter((topic) => topic.toLowerCase().includes(query))) {
-              const option = document.createElement("div");
-              option.setAttribute("role", "option");
-              option.setAttribute("aria-selected", String(chosen.has(name)));
-              const box = document.createElement("input");
-              box.type = "checkbox";
-              box.tabIndex = -1;
-              box.checked = chosen.has(name);
-              const text = document.createElement("span");
-              text.textContent = name;
-              option.append(box, text);
-              option.addEventListener("click", () => {
-                chosen.has(name) ? chosen.delete(name) : chosen.add(name);
-                option.setAttribute("aria-selected", String(chosen.has(name)));
-                box.checked = chosen.has(name);
-                show();
-              });
-              results.append(option);
-            }
-            input.setAttribute("aria-expanded", "true");
+            if (event.key === "Enter") input.form.requestSubmit();
           });
-          show();
         </script>"#;
     let site = FixtureSite::spawn(vec![
         ("/topics", Route::Html(page("Topics", body))),
-        ("/submitted", Route::Html(page("Submitted", "<p>Saved</p>"))),
+        (
+            "/submitted",
+            Route::Html(page("Submitted", "<p>Search form saved</p>")),
+        ),
     ])
     .await;
+    for value in ["History", "Art\nHistory"] {
+        let live = Live::open(rig, &site.url("/topics")).await;
+        let picked = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"choose a topic",
+                       "hints":{"role":"combobox","accessibleName":"Topics"},
+                       "value":{"kind":"selectOne","value":value}}),
+            )
+            .await;
+        assert_ne!(picked["status"], "completed", "{picked}");
+        let page = live.snapshot(json!({})).await;
+        assert_eq!(site.hits("/submitted"), 0, "selectOne submitted {value:?}");
+        assert!(page_text_contains(&page, "Topics"), "{page}");
+        live.close().await;
+    }
+}
+
+const TOPIC_SEARCH: &str = r#"<label for="topics">Topics</label>
+    <input id="topics" role="combobox" aria-controls="topic-results" autocomplete="off">
+    <button type="button" id="search">Search topics</button>
+    <div id="topic-results" role="listbox" aria-multiselectable="true"></div>
+    <div role="listbox"><div id="other" role="option" aria-selected="true">History</div></div>
+    <p id="picked"></p>
+    <script>
+      const input = document.getElementById("topics");
+      const results = document.getElementById("topic-results");
+      const picked = document.getElementById("picked");
+      const render = (name) => {
+        const option = document.createElement("div");
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", "false");
+        option.textContent = name;
+        option.addEventListener("click", () => {
+          if (name === "History") option.setAttribute("aria-selected", "true");
+          picked.textContent = `Topic clicked: ${name}`;
+        });
+        results.replaceChildren(option);
+      };
+      input.addEventListener("input", () => {
+        results.textContent = "";
+        if (input.value === "Geography") render(input.value);
+      });
+      document.getElementById("other").addEventListener("click", () => {
+        picked.textContent = "Unrelated History clicked";
+      });
+      document.getElementById("search").addEventListener("click", () => render(input.value));
+    </script>"#;
+
+pub async fn select_one_uses_its_own_open_search_results(rig: &Rig) {
+    let site =
+        FixtureSite::spawn(vec![("/topics", Route::Html(page("Topics", TOPIC_SEARCH)))]).await;
+    let live = Live::open(rig, &site.url("/topics")).await;
+    let select = json!({"target":{"role":"combobox","accessibleName":"Topics"},"action":{"kind":"selectOne","value":"History"}});
+    let unopened = live.call("control_action", select.clone()).await;
+    assert_eq!(unopened["error"]["code"], "targetNotFound", "{unopened}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        !page_text_contains(&page, "Unrelated History clicked"),
+        "{page}"
+    );
+
+    let query = live
+        .call(
+            "type_text",
+            json!({"target":{"css":"#topics"},"value":"History"}),
+        )
+        .await;
+    assert_eq!(query["status"], "completed", "{query}");
+    let search = live
+        .call("click", json!({"target":{"css":"#search"}}))
+        .await;
+    assert_eq!(search["status"], "completed", "{search}");
+    let picked = live.call("control_action", select).await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "Topic clicked: History"),
+        "{page}"
+    );
+    live.close().await;
+}
+
+pub async fn select_one_does_not_verify_an_uncommitted_search_result(rig: &Rig) {
+    let site =
+        FixtureSite::spawn(vec![("/topics", Route::Html(page("Topics", TOPIC_SEARCH)))]).await;
     let live = Live::open(rig, &site.url("/topics")).await;
     let picked = live
         .call(
-            "intent_fill",
-            json!({"purpose":"choose a topic",
-                   "hints":{"role":"combobox","accessibleName":"Topics"},
-                   "value":{"kind":"selectOne","value":"History"}}),
+            "control_action",
+            json!({"target":{"role":"combobox","accessibleName":"Topics"},"action":{"kind":"selectOne","value":"Geography"}}),
         )
         .await;
-    assert_eq!(picked["status"], "completed", "{picked}");
     let page = live.snapshot(json!({})).await;
-    assert!(page_text_contains(&page, "Topics: History"), "{page}");
-    assert!(!page_text_contains(&page, "Saved"), "{page}");
+    assert!(
+        page_text_contains(&page, "Topic clicked: Geography"),
+        "{page}"
+    );
+    assert_eq!(picked["error"]["code"], "verificationFailed", "{picked}");
     live.close().await;
 }
 

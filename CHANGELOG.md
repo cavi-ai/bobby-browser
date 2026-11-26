@@ -5,7 +5,7 @@
 ### Fixed
 
 - Chromium `selectOne` on a framed button listbox commits the named option, not the highlighted one, and no longer reports a choice the control does not show beside hidden option text.
-- Chromium `selectOne` on a search box that lists nothing for the typed text presses Enter once to search, without submitting the form.
+- Chromium `selectOne` can pick a result from a search field’s open popup and verifies that the choice was committed.
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
