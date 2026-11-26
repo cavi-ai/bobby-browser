@@ -5342,6 +5342,59 @@ pub async fn password_manager_fill_clicks_the_managers_prompt(rig: &Rig) {
     live.close().await;
 }
 
+/// A login form the password manager filled as the page loaded, with no
+/// prompt left to press.
+fn password_manager_filled_page() -> String {
+    page(
+        "Sign in",
+        r#"<form id="login">
+            <label>Email <input id="user" type="email" autocomplete="username"></label>
+            <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+            <button>Sign in</button>
+        </form>
+        <script>
+            user.value = "agent@example.test";
+            pass.value = "fixture-secret";
+        </script>"#,
+    )
+}
+
+/// Without a prompt or vision, a field the manager already filled still
+/// completes the fill.
+pub async fn password_manager_fill_completes_on_a_field_the_manager_filled(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/login",
+        Route::Html(password_manager_filled_page()),
+    )])
+    .await;
+    let started =
+        start_password_manager_session(rig, &site.url("/login"), json!({"passwordManager":true}))
+            .await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Sign in with the saved login",
+                   "hints":{"role":"textbox","accessibleName":"Email"},
+                   "value":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "passwordManagerFill on a filled field: {filled}"
+    );
+    assert!(
+        !filled.to_string().contains("fixture-secret"),
+        "the filled password reached the caller: {filled}"
+    );
+    live.close().await;
+}
+
 pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
     let started =

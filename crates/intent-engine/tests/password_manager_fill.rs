@@ -18,11 +18,13 @@ const PROMPT: (f64, f64) = (612.0, 40.0);
 /// A login page with a password-manager extension: its prompt sits in the
 /// extension's own frame, and only a click on it fills the password field.
 /// With `submits`, the manager also submits the form, and the page opens a
-/// code dialog over it while the password field stays.
+/// code dialog over it while the password field stays. With `read_fails`, the
+/// field can no longer be read once the manager filled it.
 struct ExtensionPage {
     prompt: Option<(f64, f64)>,
     filled: Mutex<bool>,
     submits: bool,
+    read_fails: bool,
 }
 
 fn control(name: &str, control_kind: FormControlKind) -> FormControl {
@@ -147,6 +149,14 @@ impl IntentBrowser for ExtensionPage {
         command: &ControlActionCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let present = *self.filled.lock().expect("fill state");
+        if present && self.read_fails {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "target detached".into(),
+                layer: types::ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         Ok(vec![Evidence::ControlAction {
             action: ControlActionEvidence {
                 operation: FormControlOperation::PasswordManagerFill,
@@ -224,6 +234,7 @@ async fn fill_only_with_a_new_show_password_button_is_reported_as_filled() {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
         submits: false,
+        read_fails: false,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),
@@ -248,6 +259,7 @@ async fn a_manager_submit_that_opens_a_dialog_with_a_new_field_reports_both() {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
         submits: true,
+        read_fails: false,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),
@@ -277,11 +289,37 @@ async fn a_manager_submit_that_opens_a_dialog_with_a_new_field_reports_both() {
 }
 
 #[tokio::test]
+async fn a_manager_submit_that_fails_the_field_read_reports_the_submit() {
+    let page = ExtensionPage {
+        prompt: Some(PROMPT),
+        filled: Mutex::new(false),
+        submits: true,
+        read_fails: true,
+    };
+    let outcome = IntentEngine::execute(
+        &password_manager_fill(),
+        &PageId::new(),
+        &page,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the manager's submit was reported as a failure: {outcome:?}");
+    };
+    assert_eq!(
+        execution_record(&evidence).verification,
+        "passwordManagerSubmitted",
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test]
 async fn without_a_located_prompt_the_fill_still_asks_for_vision() {
     let page = ExtensionPage {
         prompt: None,
         filled: Mutex::new(false),
         submits: false,
+        read_fails: false,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),

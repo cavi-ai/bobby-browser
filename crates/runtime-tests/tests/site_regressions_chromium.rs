@@ -28,6 +28,7 @@ cases::every_case!(
     scoped_iframe_descent_respects_the_node_budget,
     password_manager_fill_never_touches_the_field,
     password_manager_fill_requires_the_session_opt_in,
+    password_manager_fill_completes_on_a_field_the_manager_filled,
     a_split_code_with_one_named_box_takes_the_code,
     select_one_picks_the_exact_option_of_an_aria_combobox,
     a_submit_without_expected_state_is_verified_by_the_page,
