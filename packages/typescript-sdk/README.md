@@ -10,6 +10,7 @@ npm install @cavi-ai/bobby-browser
 ```
 
 Requires Node 24+ and a running runtime (`bobby serve`).
+Upgrade the runtime and SDK together so the SDK can validate the runtime's response shapes.
 
 ## Quick start
 
@@ -77,7 +78,7 @@ await client.submit(
   fillEnvelope(
     meta,
     "enter the applicant email",
-    { kind: "text", text: "a@example.com", clearFirst: true },
+    { kind: "setText", value: "a@example.com", clearFirst: true },
     { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
   ),
   { idempotencyKey: randomUUID() },

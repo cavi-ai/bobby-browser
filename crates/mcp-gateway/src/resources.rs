@@ -754,16 +754,16 @@ tools most likely to produce it.
   Do not resubmit the sign-in. A wrong or expired code fails
   `intent_enter_code` with `verificationFailed`; request a fresh code and
   call it again.
-- `verificationLinkRequired` -- `intent_submit_and_verify` only: the submit
-  landed, did not reach `expectedState`, and the page asks to confirm the
-  email address through a link it sent. The message quotes the page's line
-  about where the link went (page-derived text). Not retryable. Repair: open
-  the link with your own mail tool, then continue; do not resubmit.
+- `verificationLinkRequired` -- `intent_submit_and_verify` only. The submit
+  landed and the page asks the user to open a verification link sent by email.
+  A matching `expectedState` takes precedence. The non-retryable error
+  quotes the relevant page text. Open the link with your own mail tool.
+  Do not resubmit.
 - `confirmedOutsideExpectedState` -- `intent_submit_and_verify` only: the
   submit landed and missed `expectedState`, but the vision `outcomeReading`
-  reads the page as a confirmation; the evidence carries that reading and a
-  `screenshot`. Not retryable. Repair: do not resubmit; check the screenshot,
-  then widen `expectedState` or record the confirmation.
+  reads the page as a confirmation. The non-retryable result carries that
+  reading and a `screenshot` if capture succeeds. Check the evidence, then
+  widen `expectedState` or record the confirmation. Do not resubmit.
 - `journalFailed` -- the durable outcome journal failed to record a
   command's result. Repair: for the plain retryable form, resubmit with the
   same idempotency key; see `NeedsReconciliation` above for when it may have

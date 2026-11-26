@@ -22,6 +22,9 @@
 
 ### Fixed
 
+- The TypeScript SDK accepts candidate ordinals in locate and fill evidence so clients can use the retry target.
+- The Python SDK requests lost session IDs in both runtime info methods.
+- MCP advertises `screenshot` as write-capable because `saveAs` can write to disk.
 - Chromium `selectOne` on a framed button listbox commits the named option, not the highlighted one, and no longer reports a choice the control does not show beside hidden option text.
 - Chromium `selectOne` can pick a result from a search field’s open popup and verifies that the choice was committed.
 - Chromium `upload_files` resolves an unlabeled file input's accessibility snapshot target, named after the browser's own button text.

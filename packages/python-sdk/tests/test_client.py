@@ -117,6 +117,23 @@ class ClientUnitTests(unittest.TestCase):
         with self.assertRaises(RuntimeClientError):
             client.runtime_info_for_engine("webkit")
 
+    def test_runtime_info_requests_lost_sessions_on_both_scopes(self) -> None:
+        lost_sessions = [{
+            "sessionId": "00000000-0000-4000-8000-000000000005",
+            "pageIds": ["00000000-0000-4000-8000-000000000009"],
+        }]
+
+        def handler(req: _Handler) -> None:
+            payload = {"version": "test", "capabilities": []}
+            if req.headers.get("x-bobby-include-lost-sessions") == "true":
+                payload["lostSessions"] = lost_sessions
+            req.reply_json(200, payload)
+
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(server.base_url, "test-token")
+        self.assertEqual(client.runtime_info().get("lostSessions"), lost_sessions)
+        self.assertEqual(client.runtime_info_for_engine("firefox").get("lostSessions"), lost_sessions)
+
     def test_context_neighbors_encodes_the_same_query_as_ask(self) -> None:
         def handler(req: _Handler) -> None:
             self.assertEqual(

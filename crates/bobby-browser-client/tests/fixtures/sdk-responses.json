@@ -1,5 +1,36 @@
 {
   "command": {"status":"needsReconciliation","commandId":"00000000-0000-4000-8000-000000000001","error":{"code":"verificationFailed","message":"page state diverged","layer":"page","retryable":false},"evidence":[{"kind":"popupClosed","popupPageId":"00000000-0000-4000-8000-000000000009","openerPageId":"00000000-0000-4000-8000-000000000005"}]},
   "recovery": {"status":"needsReconciliation","checkpointId":"00000000-0000-4000-8000-000000000007","attemptId":"00000000-0000-4000-8000-000000000003","reason":"page state diverged","evidence":[{"kind":"popupClosed","popupPageId":"00000000-0000-4000-8000-000000000009","openerPageId":"00000000-0000-4000-8000-000000000005"}]},
-  "eventGap": {"error":{"code":"invalidRequest","layer":"interface","message":"event history has a cursor gap","correlationId":"00000000-0000-4000-8000-000000000008","commandId":null,"retryable":false,"retryAfterMs":null,"reconciliationRequired":false,"requiredCapability":null},"gap":{"reason":"historyLost","earliestAvailable":9}}
+  "eventGap": {"error":{"code":"invalidRequest","layer":"interface","message":"event history has a cursor gap","correlationId":"00000000-0000-4000-8000-000000000008","commandId":null,"retryable":false,"retryAfterMs":null,"reconciliationRequired":false,"requiredCapability":null},"gap":{"reason":"historyLost","earliestAvailable":9}},
+  "locateMissWithOrdinal": {
+    "status": "failed",
+    "commandId": "00000000-0000-4000-8000-000000000001",
+    "error": {"code": "intentCompileFailed", "message": "no matching control", "layer": "page", "retryable": false},
+    "evidence": [{
+      "kind": "intentExecution",
+      "record": {
+        "intentKind": "locate",
+        "purpose": "Send message",
+        "resolutionPath": "deterministic",
+        "planSummary": "miss",
+        "candidates": [{"role": "button", "name": "Send", "ordinal": 0, "score": 1, "reasons": ["purposeOverlap"]}],
+        "waitElapsedMs": null,
+        "verification": "failed",
+        "artifactIds": [],
+        "visionProposalSha256": null
+      }
+    }]
+  },
+  "legacyInspection": {
+    "status": "completed",
+    "commandId": "00000000-0000-4000-8000-000000000001",
+    "evidence": [{
+      "kind": "inspection",
+      "selector": null,
+      "url": "https://example.test/",
+      "title": "Example",
+      "text": "Example page",
+      "html": null
+    }]
+  }
 }

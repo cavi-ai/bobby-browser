@@ -350,7 +350,6 @@ const READ_ONLY: &[&str] = &[
     "inspect",
     "a11y_snapshot",
     "form_snapshot",
-    "screenshot",
     "events_read",
     "recovery_status",
     "cookie_get",

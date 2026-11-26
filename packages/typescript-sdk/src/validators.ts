@@ -407,9 +407,10 @@ function isTargetFingerprint(value: unknown): value is TargetFingerprint {
 }
 
 function isCandidateEvidence(value: unknown): value is CandidateEvidence {
-  return hasExactKeys(value, ["role", "name", "score", "reasons"])
+  return hasExactKeys(value, ["role", "name", "score", "reasons"], ["ordinal"])
     && isNullableString(value.role)
     && isNullableString(value.name)
+    && optional(value, "ordinal", isSafeUnsigned)
     && isSafeSigned(value.score, -2_147_483_648, 2_147_483_647)
     && isStringArray(value.reasons);
 }

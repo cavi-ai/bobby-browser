@@ -159,9 +159,9 @@ A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless
 
 ## Email links and confirmations elsewhere
 
-A submit that lands on a page asking to confirm an email address through a link it sent, instead of reaching `expectedState`, fails `verificationLinkRequired` (not retryable). The page has no code field and says so in words such as "verification link", "verify your email" or "check your email to". The error message quotes the page's line about where the link went (page-derived text). Open the link with your own mail tool; do not resubmit.
+A submit can return `verificationLinkRequired` when the resulting page says it sent a verification link by email or tells the user to find that link in the inbox. A matching `expectedState` takes precedence. The error is non-retryable and quotes the relevant page text. Open the link with your own mail tool. Do not resubmit.
 
-With vision assist on, a submit that misses `expectedState` while its `outcomeReading` reads `confirmed` fails `confirmedOutsideExpectedState` (not retryable) instead of `verificationFailed`. The evidence carries the reading and a `screenshot` of the page. Do not resubmit; widen `expectedState` or record the confirmation.
+With vision assist on, a submit that misses `expectedState` while its `outcomeReading` reads `confirmed` returns the non-retryable `confirmedOutsideExpectedState`. The result includes the reading and a `screenshot` if capture succeeds. Do not resubmit. Widen `expectedState` or record the confirmation.
 
 ## One-time codes
 

@@ -199,7 +199,7 @@ fn generated_openapi_response_schemas_match_rust_wire_types() {
 }
 
 #[test]
-fn response_schemas_accept_shared_sdk_reconciliation_fixtures() {
+fn response_schemas_accept_shared_sdk_fixtures() {
     let fixture: Value = serde_json::from_str(
         &fs::read_to_string(
             repo_root().join("crates/bobby-browser-client/tests/fixtures/sdk-responses.json"),
@@ -207,28 +207,30 @@ fn response_schemas_accept_shared_sdk_reconciliation_fixtures() {
         .unwrap(),
     )
     .unwrap();
-    for (name, schema) in [
+    for (names, schema) in [
         (
-            "command",
+            &["command", "locateMissWithOrdinal", "legacyInspection"][..],
             serde_json::to_value(schemars::schema_for!(types::CommandOutcome)).unwrap(),
         ),
         (
-            "recovery",
+            &["recovery"][..],
             serde_json::to_value(schemars::schema_for!(types::RecoveryDecision)).unwrap(),
         ),
     ] {
         let validator = jsonschema::validator_for(&schema).unwrap();
-        assert!(
-            validator.is_valid(&fixture[name]),
-            "{name} fixture must match generated schema"
-        );
+        for name in names {
+            assert!(
+                validator.is_valid(&fixture[*name]),
+                "{name} fixture must match generated schema"
+            );
+        }
         assert!(
             !validator.is_valid(&serde_json::json!({"error": fixture["eventGap"]["error"]})),
-            "HTTP error must not match {name}"
+            "HTTP error must not match {names:?}"
         );
         assert!(
             !validator.is_valid(&fixture["eventGap"]),
-            "HTTP error must not match {name}"
+            "HTTP error must not match {names:?}"
         );
     }
 }

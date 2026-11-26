@@ -20,8 +20,9 @@ calls. Rules that govern every call:
 
 1. **Always read `structuredContent` before the next mutating call.** A
    `status` that is not `completed` is a failure even when prose looks
-   optimistic (`isError: true` marks it too). Repair from `error.repair`
-   (`{action, doc}`); the doc points into `bobby://failure-taxonomy`.
+   optimistic (`isError: true` marks it too). Read `error.repair` on a failed
+   outcome and `error.data.repair` on an RPC error. Each repair contains
+   `action` and a `doc` link into `bobby://failure-taxonomy`.
 2. **Pull references on demand, not upfront.** All match the build:
    `bobby://intents` (the ten intent tools and what each verifies),
    `bobby://primitives`, `bobby://failure-taxonomy`, `bobby://capabilities`,
@@ -47,9 +48,9 @@ calls. Rules that govern every call:
   `page_open`. When you need the initial page, pass `includePostState: true`
   and reuse the returned `postState` when `postStateStatus.status` is `available`.
   If unavailable, inspect its code before another read. Omit the flag when setup alone is enough.
-  Prefer `workflow_observe` for context: it answers from
-  retained page memory first and only pays for a live snapshot when nothing
-  is remembered.
+  Pass a `goal` to `workflow_observe` to check retained page memory when the
+  credential has `page:read`. A call without a retained answer reads a live
+  accessibility snapshot.
 - On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
   and, by default, a Boundary `click` return `postState` — the same compact
   observation `workflow_observe` would. When `postStateStatus.status` is
@@ -240,8 +241,8 @@ calls. Rules that govern every call:
 | `targetNotFound` / `targetAmbiguous` | Stale or guessed target | Fresh `a11y_snapshot`; pass the new target verbatim |
 | `verificationFailed` | Action ran; expected state not proven | Re-inspect; adjust expectation or fill; do not blind-retry |
 | `verificationCodeRequired` | Submit landed; page asks for a one-time code | Get the code from the inbox or phone the page names, call `intent_enter_code`; do not resubmit |
-| `verificationLinkRequired` | Submit landed; page asks to confirm the email through a link | Open the link from the inbox the message names with your own mail tool; do not resubmit |
-| `confirmedOutsideExpectedState` | Submit landed; page reads as a confirmation but `expectedState` missed | Check the screenshot; widen `expectedState` or record the confirmation; do not resubmit |
+| `verificationLinkRequired` | Submit landed and the page asks for an emailed verification link | Read the page excerpt for delivery details. Open the link with your own mail tool. Do not resubmit |
+| `confirmedOutsideExpectedState` | Submit landed and the page reads as a confirmation outside `expectedState` | Check any returned screenshot. Widen `expectedState` or record the confirmation. Do not resubmit |
 | `boundaryAlreadyExecuted` | A prior submit for this workflow + control completed | Inspect the named prior outcome; pass `reSubmit: true` only for a genuinely intended second effect on the same control |
 | `needsReconciliation` | Side effect may already have landed | Call `recovery_status`; never retry the Boundary command |
 | `targetDetached` / page-level `notFound` | Transport reset or stale page | Reattach/relaunch already handled; re-observe, continue with current ids |
