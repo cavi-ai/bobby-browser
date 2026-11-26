@@ -1500,6 +1500,10 @@ components:
     FormSnapshot:
       type: object
       additionalProperties: true
+      properties:
+        pageBusy:
+          type: boolean
+          description: Present and true when Chromium still reports visible busy content after the settle deadline.
     CommandEnvelope:
       type: object
       required:

@@ -122,6 +122,13 @@ pub trait IntentBrowser: Send + Sync {
         None
     }
 
+    /// Closes a frame from another origin that holds focus or covers the
+    /// page's controls, such as an inline menu. `Ok(false)` when there is
+    /// none, an error when it stays open. Defaults to none.
+    async fn close_frame_overlay(&self, _page_id: &PageId) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+
     /// The viewport's width and height in CSS pixels, the units clicks take.
     /// Defaults to none, which leaves screenshot points unscaled.
     async fn viewport_size(&self, _page_id: &PageId) -> Option<(f64, f64)> {
@@ -1821,7 +1828,8 @@ struct PasswordManagerFill<'a> {
 /// Vision finds the manager's prompt, one trusted click accepts it, and the
 /// field is watched until it holds a value or the manager's submit replaces it.
 /// A filled field that stays is still a submit when the page then moves on:
-/// a new URL, other form fields, or a dialog that was not open before.
+/// a new URL, other form fields, or a dialog that was not open before. A
+/// prompt that cannot be pressed fails only when the field is also empty.
 async fn fill_with_password_manager(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -1880,173 +1888,46 @@ async fn fill_with_password_manager(
         };
     let mut evidence = vec![resolution];
     let before = page_change::baseline(page_id, browser).await;
-
-    // A worker that sees the manager's own prompt frame presses it directly;
-    // vision is the fallback for prompts it cannot locate.
-    let details = if let Some((x, y)) = browser.password_manager_prompt(page_id).await {
-        match browser.click_xy(page_id, x, y).await {
-            Ok(mut clicked) => evidence.append(&mut clicked),
+    let watch = ControlActionCommand {
+        target: match form_control_target(candidate, target) {
+            Ok(target) => target,
             Err(error) => {
                 return failed(
                     error.code,
                     error.message,
                     evidence,
-                    record("passwordManagerPromptClickFailed".into(), None),
+                    record("passwordManagerFieldUntargetable".into(), None),
                 );
             }
-        }
-        None
-    } else {
-        let assist = match vision.assist.as_ref() {
-            Some(assist) if vision.session_ok && vision.capability_ok => assist,
-            _ => {
-                return failed(
-                    ErrorCode::VisionAssistDenied,
-                    "passwordManagerFill finds the password manager's prompt with vision; start the \
-                     session with executionPolicy.visionAssist and a vision node"
-                        .into(),
-                    evidence,
-                    record("visionUnavailable".into(), None),
-                );
-            }
-        };
-
-        let (png, mut screenshot_evidence) = match browser
-            .capture_screenshot(
-                page_id,
-                &CaptureScreenshotCommand {
-                    mode: ScreenshotMode::Viewport,
-                    max_edge: None,
-                },
-            )
-            .await
-        {
-            Ok(captured) => captured,
-            Err(error) => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    format!("vision screenshot failed: {}", error.message),
-                    evidence,
-                    record("visionScreenshotFailed".into(), None),
-                );
-            }
-        };
-        evidence.append(&mut screenshot_evidence);
-        let artifact_ids = artifact_ids_from(&evidence);
-        let frame_width = frame_width(Some(&png));
-        let proposal = match assist
-            .propose(VisionProposeRequest {
-                purpose: PASSWORD_MANAGER_PROMPT.into(),
-                intent_kind: "fill".into(),
-                screenshot_png: Some(png),
-                corpus_screenshot_png: None,
-                stuck: StuckKind::TargetMissing,
-                context: None,
-            })
-            .await
-        {
-            Ok(proposal) => proposal,
-            Err(error) => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    format!("vision propose failed: {}", error.message),
-                    evidence,
-                    record("visionProposeFailed".into(), None),
-                );
-            }
-        };
-        let details = ResolutionDetails {
-            path: IntentResolutionPath::VisionFallback,
-            vision_proposal_sha256: Some(proposal_sha256(&proposal)),
-            artifact_ids,
-        };
-        if proposal.confidence < PASSWORD_MANAGER_CONFIDENCE_FLOOR {
-            return failed(
-                ErrorCode::VisionAssistFailed,
-                format!(
-                    "vision proposal confidence {:.2} below floor {PASSWORD_MANAGER_CONFIDENCE_FLOOR}",
-                    proposal.confidence
-                ),
-                evidence,
-                record("visionConfidenceBelowFloor".into(), Some(details)),
-            );
-        }
-        let (x, y) = match vision_click::place_click(
-            page_id,
-            browser,
-            frame_width,
-            &proposal.action,
-            vision_click::PlacePolicy::ClearOfPageControls,
-        )
-        .await
-        {
-            vision_click::PlacedClick::Click { x, y } => (x, y),
-            vision_click::PlacedClick::Other(_) => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    "vision did not point at the password manager's prompt".into(),
-                    evidence,
-                    record("visionNotAClick".into(), Some(details)),
-                );
-            }
-            vision_click::PlacedClick::OnPageControl { role } => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    format!("vision pointed at a page {role}, not the password manager's prompt"),
-                    evidence,
-                    record("visionPointedAtPageControl".into(), Some(details)),
-                );
-            }
-            vision_click::PlacedClick::Unchecked { message } => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    message,
-                    evidence,
-                    record("visionPointUnchecked".into(), Some(details)),
-                );
-            }
-            vision_click::PlacedClick::Ambiguous => {
-                return failed(
-                    ErrorCode::VisionAssistFailed,
-                    "vision pointed between controls".into(),
-                    evidence,
-                    record("visionPointedAtPageControl".into(), Some(details)),
-                );
-            }
-        };
-        match browser.click_xy(page_id, x, y).await {
-            Ok(mut clicked) => evidence.append(&mut clicked),
-            Err(error) => {
-                return failed(
-                    error.code,
-                    error.message,
-                    evidence,
-                    record("passwordManagerPromptClickFailed".into(), Some(details)),
-                );
-            }
-        }
-        Some(details)
+        },
+        action: ControlAction::PasswordManagerFill,
     };
 
-    let watched = browser
-        .control_action(
-            page_id,
-            &ControlActionCommand {
-                target: match form_control_target(candidate, target) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        return failed(
-                            error.code,
-                            error.message,
-                            evidence,
-                            record("passwordManagerFieldUntargetable".into(), details),
-                        );
-                    }
-                },
-                action: ControlAction::PasswordManagerFill,
-            },
-        )
-        .await;
+    let details = match press_password_manager_prompt(page_id, browser, vision, &mut evidence).await
+    {
+        Ok(details) => details,
+        // The manager may have filled the field without its prompt, on load or
+        // on an earlier step: the field is read back before the miss is reported.
+        Err(miss) => {
+            return match browser.control_action(page_id, &watch).await {
+                Ok(mut watched)
+                    if verify_fill(&ControlAction::PasswordManagerFill, &watched).is_ok() =>
+                {
+                    evidence.append(&mut watched);
+                    evidence.push(record("passwordManagerFilled".into(), miss.details));
+                    IntentOutcome::Completed { evidence }
+                }
+                _ => failed(
+                    miss.code,
+                    miss.message,
+                    evidence,
+                    record(miss.verification.into(), miss.details),
+                ),
+            };
+        }
+    };
+
+    let watched = browser.control_action(page_id, &watch).await;
     match watched {
         Ok(mut watched) => {
             if let Err(message) = verify_fill(&ControlAction::PasswordManagerFill, &watched) {
@@ -2058,9 +1939,15 @@ async fn fill_with_password_manager(
                 );
             }
             evidence.append(&mut watched);
-            let Some((mut moved, opened)) =
-                page_change::submitted_after_fill(page_id, browser, target, &before, &open_dialogs)
-                    .await
+            let Some((mut moved, opened)) = page_change::submitted_after_fill(
+                page_id,
+                browser,
+                target,
+                &before,
+                &open_dialogs,
+                true,
+            )
+            .await
             else {
                 evidence.push(record("passwordManagerFilled".into(), details));
                 return IntentOutcome::Completed { evidence };
@@ -2090,13 +1977,197 @@ async fn fill_with_password_manager(
             evidence.push(record("passwordManagerSubmitted".into(), details));
             IntentOutcome::Completed { evidence }
         }
-        Err(error) => failed(
-            error.code,
-            error.message,
-            evidence,
-            record("passwordManagerUnfilled".into(), details),
-        ),
+        // A submit can interrupt the browser's read. Recover only when there
+        // is independent evidence of progress, and preserve validation errors.
+        Err(error) => {
+            let submitted = if error.code == ErrorCode::BrowserCommandFailed {
+                page_change::submitted_after_fill(
+                    page_id,
+                    browser,
+                    target,
+                    &before,
+                    &open_dialogs,
+                    false,
+                )
+                .await
+            } else {
+                None
+            };
+            if let Some((mut moved, opened)) = submitted {
+                evidence.append(&mut moved);
+                if let Ok(mut settled) = browser.inspect_settled_page(page_id).await {
+                    evidence.append(&mut settled);
+                }
+                evidence.push(record_with(
+                    "passwordManagerSubmitted".into(),
+                    details,
+                    opened,
+                ));
+                return IntentOutcome::Completed { evidence };
+            }
+            failed(
+                error.code,
+                error.message,
+                evidence,
+                record("passwordManagerUnfilled".into(), details),
+            )
+        }
     }
+}
+
+/// Why the manager's prompt was not pressed, reported when the field also
+/// stays empty.
+struct PromptMiss {
+    code: ErrorCode,
+    message: String,
+    verification: &'static str,
+    details: Option<ResolutionDetails>,
+}
+
+fn prompt_miss(
+    code: ErrorCode,
+    message: String,
+    verification: &'static str,
+    details: Option<ResolutionDetails>,
+) -> PromptMiss {
+    PromptMiss {
+        code,
+        message,
+        verification,
+        details,
+    }
+}
+
+/// Presses the password manager's prompt: the frame the worker located
+/// directly, otherwise the point vision finds clear of page controls.
+async fn press_password_manager_prompt(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    evidence: &mut Vec<Evidence>,
+) -> Result<Option<ResolutionDetails>, PromptMiss> {
+    if let Some((x, y)) = browser.password_manager_prompt(page_id).await {
+        let mut clicked = browser.click_xy(page_id, x, y).await.map_err(|error| {
+            prompt_miss(
+                error.code,
+                error.message,
+                "passwordManagerPromptClickFailed",
+                None,
+            )
+        })?;
+        evidence.append(&mut clicked);
+        return Ok(None);
+    }
+    let assist = match vision.assist.as_ref() {
+        Some(assist) if vision.session_ok && vision.capability_ok => assist,
+        _ => {
+            return Err(prompt_miss(
+                ErrorCode::VisionAssistDenied,
+                "passwordManagerFill finds the password manager's prompt with vision; start the \
+                 session with executionPolicy.visionAssist and a vision node"
+                    .into(),
+                "visionUnavailable",
+                None,
+            ));
+        }
+    };
+    let (png, mut screenshot_evidence) = browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+                max_edge: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            prompt_miss(
+                ErrorCode::VisionAssistFailed,
+                format!("vision screenshot failed: {}", error.message),
+                "visionScreenshotFailed",
+                None,
+            )
+        })?;
+    evidence.append(&mut screenshot_evidence);
+    let artifact_ids = artifact_ids_from(&*evidence);
+    let frame_width = frame_width(Some(&png));
+    let proposal = assist
+        .propose(VisionProposeRequest {
+            purpose: PASSWORD_MANAGER_PROMPT.into(),
+            intent_kind: "fill".into(),
+            screenshot_png: Some(png),
+            corpus_screenshot_png: None,
+            stuck: StuckKind::TargetMissing,
+            context: None,
+        })
+        .await
+        .map_err(|error| {
+            prompt_miss(
+                ErrorCode::VisionAssistFailed,
+                format!("vision propose failed: {}", error.message),
+                "visionProposeFailed",
+                None,
+            )
+        })?;
+    let details = ResolutionDetails {
+        path: IntentResolutionPath::VisionFallback,
+        vision_proposal_sha256: Some(proposal_sha256(&proposal)),
+        artifact_ids,
+    };
+    if proposal.confidence < PASSWORD_MANAGER_CONFIDENCE_FLOOR {
+        return Err(prompt_miss(
+            ErrorCode::VisionAssistFailed,
+            format!(
+                "vision proposal confidence {:.2} below floor {PASSWORD_MANAGER_CONFIDENCE_FLOOR}",
+                proposal.confidence
+            ),
+            "visionConfidenceBelowFloor",
+            Some(details),
+        ));
+    }
+    let (message, verification) = match vision_click::place_click(
+        page_id,
+        browser,
+        frame_width,
+        &proposal.action,
+        vision_click::PlacePolicy::ClearOfPageControls,
+    )
+    .await
+    {
+        vision_click::PlacedClick::Click { x, y } => {
+            return match browser.click_xy(page_id, x, y).await {
+                Ok(mut clicked) => {
+                    evidence.append(&mut clicked);
+                    Ok(Some(details))
+                }
+                Err(error) => Err(prompt_miss(
+                    error.code,
+                    error.message,
+                    "passwordManagerPromptClickFailed",
+                    Some(details),
+                )),
+            };
+        }
+        vision_click::PlacedClick::Other(_) => (
+            "vision did not point at the password manager's prompt".to_owned(),
+            "visionNotAClick",
+        ),
+        vision_click::PlacedClick::OnPageControl { role } => (
+            format!("vision pointed at a page {role}, not the password manager's prompt"),
+            "visionPointedAtPageControl",
+        ),
+        vision_click::PlacedClick::Unchecked { message } => (message, "visionPointUnchecked"),
+        vision_click::PlacedClick::Ambiguous => (
+            "vision pointed between controls".to_owned(),
+            "visionPointedAtPageControl",
+        ),
+    };
+    Err(prompt_miss(
+        ErrorCode::VisionAssistFailed,
+        message,
+        verification,
+        Some(details),
+    ))
 }
 
 async fn act_fill(
@@ -3271,12 +3342,47 @@ async fn execute_dismiss_obstruction(
         }
         _ => true,
     };
+    let record_frame_overlay = |verification: &str| {
+        intent_evidence(execution_record(
+            "dismissObstruction",
+            match intent {
+                IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
+                _ => None,
+            },
+            "frameOverlay",
+            Vec::new(),
+            None,
+            verification,
+        ))
+    };
+    // Without hints, try Escape first. Some frame overlays have a Close
+    // control and ignore Escape, so let semantic dismissal try them too.
+    let frame_error = if hinted {
+        None
+    } else {
+        match browser.close_frame_overlay(page_id).await {
+            Ok(true) => {
+                return IntentOutcome::Completed {
+                    evidence: vec![record_frame_overlay("frameOverlayClosed")],
+                };
+            }
+            Ok(false) => None,
+            Err(error) => Some(error),
+        }
+    };
     let mode = if hinted {
         DismissalMode::Hinted
     } else {
         DismissalMode::Unhinted
     };
-    dismiss_target(intent, page_id, browser, vision, target, timeout_ms, mode).await
+    let outcome = dismiss_target(intent, page_id, browser, vision, target, timeout_ms, mode).await;
+    match (outcome, frame_error) {
+        (IntentOutcome::Failed { mut evidence, .. }, Some(error)) => {
+            evidence.push(record_frame_overlay("obstructionPersisted"));
+            IntentOutcome::Failed { error, evidence }
+        }
+        (outcome, _) => outcome,
+    }
 }
 
 /// Whether an accessible name reads as a control that closes what it sits

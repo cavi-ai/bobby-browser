@@ -89,7 +89,7 @@ to retry its wait.
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |
 
-Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete.
+Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete. On Chromium, a `dismissObstruction` with no hints first closes a frame from another origin that holds focus or covers the page's controls, such as an inline menu, with Escape and no vision; it completes `frameOverlayClosed`, or fails `obstructionSuspected` when the frame stays.
 
 ## Fill values
 

@@ -2677,6 +2677,69 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
     worker.close().await.unwrap();
 }
 
+/// A text wait that times out names the text it last read, so the caller sees
+/// the state the page reached instead of only the deadline.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn wait_for_text_timeout_reports_the_last_observed_text() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<p id=\"status\">report.pdf attached</p>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    css: Some("#status".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Upload complete".into()),
+            },
+            timeout_ms: 500,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut, "{error:?}");
+    assert!(
+        error.message.contains("report.pdf attached"),
+        "timeout must name the last observed text: {}",
+        error.message
+    );
+
+    worker.close().await.unwrap();
+}
+
 // Keep the first collection ambiguous, then remove marked candidates after
 // the second collection returns and before their live text is read. Target
 // stamps persist across collections, so attribute mutations cannot trigger
@@ -3088,6 +3151,201 @@ async fn a_covered_click_names_the_covering_element() {
     );
 
     worker.close().await.unwrap();
+}
+
+/// Whole-page text past the page-text bound is cut in the page and flagged.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn page_inspect_cuts_text_past_the_bound_and_flags_it() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    // About 1 MB of rendered text, far over the bound.
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,<main id=feed></main><script>",
+                    "document.getElementById('feed').textContent=",
+                    "'Row of listing text. '.repeat(50000);</script>"
+                )
+                .into(),
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let observation = worker_pool::observation_or_default(worker.observation());
+    let evidence = observation
+        .inspect(&page_id, &InspectCommand::default())
+        .await
+        .unwrap();
+    let Some(Evidence::Inspection {
+        text, truncated, ..
+    }) = evidence.first()
+    else {
+        panic!("inspect returned no inspection: {evidence:?}");
+    };
+    assert!(text.starts_with("Row of listing text."), "{}", &text[..64]);
+    assert!(*truncated, "text past the bound must be flagged");
+    assert!(
+        text.chars().count() <= worker_pool::MAX_INSPECT_TEXT_CHARS,
+        "returned {} chars",
+        text.chars().count()
+    );
+
+    let evidence = observation
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            evidence.first(),
+            Some(Evidence::Inspection {
+                truncated: true,
+                ..
+            })
+        ),
+        "a body selector is the whole page too"
+    );
+
+    worker.close().await.unwrap();
+}
+
+/// A read taken while the page marks its content as loading (`aria-busy`)
+/// waits for the mark to clear and returns the content that replaced it.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn inspect_and_form_snapshot_wait_for_a_busy_step_to_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    // Each read starts while the step is busy; the next step replaces it 800ms later.
+    let busy_step = concat!(
+        "data:text/html,<main><p>Step 1 of 2</p><label>Name <input name=first></label></main>",
+        "<script>window.advance=(step,field)=>{const main=document.querySelector('main');",
+        "main.setAttribute('aria-busy','true');setTimeout(()=>{",
+        "main.innerHTML='<p>'+step+'</p><label>'+field+' <input name=next></label>';",
+        "main.removeAttribute('aria-busy')},800)};advance('Step 2 of 2','City');</script>"
+    );
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: busy_step.into(),
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let observation = worker_pool::observation_or_default(worker.observation());
+    let evidence = observation
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("main".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Evidence::Inspection { text, .. }) = evidence.first() else {
+        panic!("inspect returned no inspection: {evidence:?}");
+    };
+    assert!(text.contains("Step 2 of 2"), "read the busy step: {text}");
+
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "(() => {advance('Review','Country'); return true})()".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = observation.form_snapshot(&page_id, None).await.unwrap();
+    let Some(Evidence::FormSnapshot { snapshot }) = evidence.first() else {
+        panic!("form_snapshot returned no snapshot: {evidence:?}");
+    };
+    let labels: Vec<_> = snapshot
+        .unowned_controls
+        .iter()
+        .chain(snapshot.forms.iter().flat_map(|form| form.controls.iter()))
+        .filter_map(|control| control.accessible_name.clone().or(control.label.clone()))
+        .collect();
+    assert!(
+        labels.iter().any(|label| label.contains("Country")),
+        "read the busy step's controls: {labels:?}"
+    );
+
+    assert!(serde_json::to_value(snapshot)
+        .unwrap()
+        .get("pageBusy")
+        .is_none());
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "(() => {document.querySelector('main').setAttribute('aria-busy','true'); return true})()".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = observation.form_snapshot(&page_id, None).await.unwrap();
+    worker.close().await.unwrap();
+    let Some(Evidence::FormSnapshot { snapshot }) = evidence.first() else {
+        panic!("form_snapshot returned no snapshot: {evidence:?}");
+    };
+    assert_eq!(serde_json::to_value(snapshot).unwrap()["pageBusy"], true);
 }
 
 /// Page text lists the values of filled form fields under a marked section,

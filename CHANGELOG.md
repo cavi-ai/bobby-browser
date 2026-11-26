@@ -9,10 +9,22 @@
 
 ### Fixed
 
+- Chromium `selectOne` on a framed button listbox commits the named option, not the highlighted one, and no longer reports a choice the control does not show beside hidden option text.
+- Chromium `selectOne` can pick a result from a search field’s open popup and verifies that the choice was committed.
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
+- `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays or can no longer be read: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
+- A `passwordManagerFill` intent whose manager prompt cannot be pressed completes when the field already holds the manager's value.
+- On Chromium, `setText` and non-humanized `type_text` press Escape on a frame from another origin that takes focus from the field, then focus the field again and type.
+- On Chromium, `intent_dismiss_obstruction` with no hints closes a frame from another origin that holds focus or covers the page's controls with Escape, without vision.
+- On Chromium, `passwordManagerFill` on a form with exactly two password fields, neither marked `current-password`, fills the targeted field with the value the manager put in the other.
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
+- `page_open` keeps the new page open when its first load runs out of time, so it can be read or navigated again.
+- A wait that times out, including an `expectedState` wait, names the text, value, URL or ready state it last read.
+- Chromium `inspect` and `form_snapshot` wait for `aria-busy` content to finish loading and flag a read that is still busy with `pageBusy`.
+- A failed `form_snapshot` or page open returns the browser's error code and `retryable` flag (`browserCommandFailed`, HTTP 502) instead of `internal`.
+- Chromium whole-page `inspect` cuts page text at 65,536 characters in the page and marks the inspection `truncated: true`.
 - A replacing `setText` with single-line text can retry once after a mismatched read-back if the resolved control still supports the action and is editable.
 - Chromium `setText` can close a popup held open by another focused control outside dialogs before typing into a reachable field.
 - `intent_complete_form` scales its deadline with the text it types. If a fill or reveal step reaches the deadline, it returns `deadlineExceeded` with the current field name and evidence from earlier fills and completed reveal clicks.

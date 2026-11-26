@@ -1990,20 +1990,12 @@ fn is_page_not_open_failure(value: &Value) -> bool {
         })
 }
 
-/// `form_snapshot`, `context_ask`, and `context_neighbors` bypass
-/// `submit_envelope` -- they call `RuntimeInterface` directly, so a closed
-/// page never reaches the executor's `is_page_not_open_failure` shape.
-/// `PageRuntime::form_snapshot` leases the worker directly and folds any
-/// worker `CommandError` into `RuntimeError::Internal(error.message)`,
-/// which `map_runtime_error` then turns into
-/// `InterfaceErrorCode::Internal` with a `"runtime operation failed: "`
-/// prefix -- the `NotFound` code chromium's `page_missing()` raised does
-/// not survive that fold. Gated on both fields, like
-/// `is_page_not_open_failure`, so an unrelated internal failure worded
-/// differently is never mistaken for this one.
+/// Direct form reads bypass `submit_envelope`. Match the worker's closed-page
+/// error after interface mapping, since other resources can also be missing.
 fn is_interface_page_not_open_failure(error: &types::InterfaceError) -> bool {
-    error.code == types::InterfaceErrorCode::Internal
-        && error.message.contains("browser page is not open")
+    error.code == types::InterfaceErrorCode::NotFound
+        && error.layer == types::ErrorLayer::Driver
+        && error.message == "browser command failed: browser page is not open"
 }
 
 /// `CommandOutcome::Failed`-shaped, for a prerequisite call (`upload_files`'

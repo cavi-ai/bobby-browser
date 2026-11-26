@@ -115,6 +115,14 @@ impl worker_pool::NavigationEngine for ScreenshotWorker {
         if command.url.ends_with("/fail") {
             return Err(fixture_error("fixture navigation failed"));
         }
+        if command.url.ends_with("/slow") {
+            return Err(CommandError {
+                code: types::ErrorCode::DeadlineExceeded,
+                message: "navigation exceeded 30000ms during interactive readiness".to_owned(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         Ok(vec![Evidence::Navigation {
             url: command.url.clone(),
             title: "Fixture page".to_owned(),
@@ -487,6 +495,55 @@ async fn page_open_closes_the_new_page_when_initial_navigation_fails() {
         response["result"]["structuredContent"]["pageClosed"],
         json!(true)
     );
+}
+
+#[tokio::test]
+async fn page_open_keeps_the_new_page_when_initial_navigation_runs_out_of_time() {
+    let (server, _root) = fixture().await;
+    let session_id = create_session(&server).await;
+
+    let response = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"page_open","arguments":{
+                    "sessionId":session_id,
+                    "url":"https://example.test/slow"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.get("error").is_none(), "{response}");
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(
+        content["navigationOutcome"]["status"],
+        json!("retryableFailure")
+    );
+    assert_eq!(
+        content["navigationOutcome"]["error"]["code"],
+        json!("deadlineExceeded")
+    );
+    assert!(content.get("cleanupOutcome").is_none(), "{response}");
+    assert!(content.get("pageClosed").is_none(), "{response}");
+
+    let captured = server
+        .handle_message(request(
+            4,
+            "tools/call",
+            json!({
+                "name":"screenshot","arguments":{
+                    "sessionId":session_id,
+                    "pageId":content["id"].clone()
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(captured.get("error").is_none(), "{captured}");
+    assert_ne!(captured["result"]["isError"], json!(true), "{captured}");
 }
 
 #[tokio::test]

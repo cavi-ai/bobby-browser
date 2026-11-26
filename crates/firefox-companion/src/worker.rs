@@ -4773,6 +4773,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                         title: String::new(),
                         text: text.to_owned(),
                         html: None,
+                        truncated: false,
                     },
                     self.evidence(InteractionPath::EngineNative),
                 ]);
@@ -4831,6 +4832,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     title: String::new(),
                     text: text.to_owned(),
                     html: None,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::EngineNative),
             ]);
@@ -4871,6 +4873,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     title: observation.title,
                     text: observation.visible_text,
                     html: observation.html,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::ExtensionApi),
             ]));
@@ -4935,6 +4938,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 title: observation.title,
                 text,
                 html: observation.html,
+                truncated: false,
             },
             self.evidence(InteractionPath::ExtensionApi),
         ]))
@@ -5198,6 +5202,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     title: String::new(),
                     text: "[redacted]".into(),
                     html: None,
+                    truncated: false,
                 },
                 self.evidence(InteractionPath::EngineNative),
             ])),

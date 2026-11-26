@@ -1028,6 +1028,23 @@ fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceErro
         RuntimeError::EngineUnreachable(detail) => {
             (InterfaceErrorCode::EngineUnreachable, detail.clone())
         }
+        RuntimeError::Command(command) => {
+            let code = match command.code {
+                types::ErrorCode::DeadlineExceeded => InterfaceErrorCode::DeadlineExceeded,
+                types::ErrorCode::InvalidRequest => InterfaceErrorCode::InvalidRequest,
+                types::ErrorCode::NotFound => InterfaceErrorCode::NotFound,
+                types::ErrorCode::ResourceExhausted => InterfaceErrorCode::ResourceExhausted,
+                _ => InterfaceErrorCode::BrowserCommandFailed,
+            };
+            let mut mapped = error_with(
+                ctx,
+                code,
+                &format!("browser command failed: {}", command.message),
+            );
+            mapped.layer = command.layer;
+            mapped.retryable = command.retryable;
+            return mapped;
+        }
         RuntimeError::Internal(detail) => (
             InterfaceErrorCode::Internal,
             format!("runtime operation failed: {detail}"),
