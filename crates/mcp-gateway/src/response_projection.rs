@@ -9,7 +9,7 @@ pub(crate) fn compact_tool_response(response: &mut Value) {
     let Some(outcome) = result.get_mut("structuredContent") else {
         return;
     };
-    if compact_outcome(outcome) {
+    if compact_outcome(outcome, false) {
         // MCP clients may consume either representation. Keep the fallback
         // text and structured result identical; resource/image blocks stay.
         let text = outcome.to_string();
@@ -21,7 +21,9 @@ pub(crate) fn compact_tool_response(response: &mut Value) {
     }
 }
 
-fn compact_outcome(outcome: &mut Value) -> bool {
+/// `nested` marks a runtime-owned page-state wrapper; a direct snapshot result
+/// keeps every option.
+fn compact_outcome(outcome: &mut Value, nested: bool) -> bool {
     // Failures and uncertain side effects need their complete repair evidence.
     if outcome.get("status").and_then(Value::as_str) != Some("completed") {
         return false;
@@ -47,6 +49,16 @@ fn compact_outcome(outcome: &mut Value) -> bool {
                             changed |= omit_candidate_details(item);
                         }
                     }
+                    Some("accessibilitySnapshot") if nested => {
+                        for node in item
+                            .get_mut("nodes")
+                            .and_then(Value::as_array_mut)
+                            .into_iter()
+                            .flatten()
+                        {
+                            changed |= collapse_combobox_options(node, false);
+                        }
+                    }
                     Some("intentExecution") => {
                         if let Some(record) = item.get_mut("record").and_then(Value::as_object_mut)
                         {
@@ -66,10 +78,40 @@ fn compact_outcome(outcome: &mut Value) -> bool {
     // checkpoints, or events. Unknown evidence and nested payloads stay intact.
     for field in ["postState", "observationOutcome", "navigationOutcome"] {
         if let Some(child) = outcome.get_mut(field) {
-            changed |= compact_outcome(child);
+            changed |= compact_outcome(child, true);
         }
     }
     changed
+}
+
+/// Option children kept per list inside a combobox; `selectOne` matches any
+/// option by value or label, so the rest is counted in `optionsOmitted`.
+const MAX_COMBOBOX_OPTIONS: usize = 10;
+
+fn collapse_combobox_options(node: &mut Value, in_combobox: bool) -> bool {
+    let Some(node) = node.as_object_mut() else {
+        return false;
+    };
+    let in_combobox = in_combobox || node.get("role").and_then(Value::as_str) == Some("combobox");
+    let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    let mut kept = 0;
+    let mut omitted = 0usize;
+    children.retain_mut(|child| {
+        if !in_combobox || child.get("role").and_then(Value::as_str) != Some("option") {
+            changed |= collapse_combobox_options(child, in_combobox);
+            return true;
+        }
+        kept += 1;
+        omitted += usize::from(kept > MAX_COMBOBOX_OPTIONS);
+        kept <= MAX_COMBOBOX_OPTIONS
+    });
+    if omitted > 0 {
+        node.insert("optionsOmitted".into(), Value::from(omitted));
+    }
+    changed || omitted > 0
 }
 
 fn omit_candidate_details(record: &mut serde_json::Map<String, Value>) -> bool {
@@ -161,6 +203,46 @@ mod tests {
         );
         assert_eq!(wire["result"]["content"][1]["uri"], "artifact://proof");
         eprintln!("response bytes: {before} -> {}", wire.to_string().len());
+    }
+
+    #[test]
+    fn compact_success_collapses_long_option_lists_inside_a_combobox() {
+        let options = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    let label = format!("{}", 1900 + index);
+                    json!({"role":"option","target":{"role":"option","accessibleName":label}})
+                })
+                .collect::<Vec<_>>()
+        };
+        let snapshot = json!({"kind":"accessibilitySnapshot","pageId":"page-1","truncated":false,"nodes":[
+            {"role":"combobox","target":{"role":"combobox","accessibleName":"Year"},"value":"1950",
+             "children":[{"role":"MenuListPopup","children":options(120)}]},
+            {"role":"listbox","target":{"role":"listbox","accessibleName":"Pick one"},"children":options(20)}
+        ]});
+        let post_state =
+            json!({"status":"completed","commandId":"command-2","evidence":[snapshot.clone()]});
+        let raw = json!({"status":"completed","commandId":"command-1",
+            "evidence":[snapshot],"postState":post_state});
+        let mut wire = response(raw.clone());
+        compact_tool_response(&mut wire);
+        let compact = &wire["result"]["structuredContent"];
+        assert_eq!(compact["evidence"], raw["evidence"]);
+        let nodes = &compact["postState"]["evidence"][0]["nodes"];
+        let popup = &nodes[0]["children"][0];
+        assert_eq!(popup["children"].as_array().unwrap().len(), 10);
+        assert_eq!(popup["optionsOmitted"], 110);
+        assert_eq!(
+            popup["children"][0],
+            raw["evidence"][0]["nodes"][0]["children"][0]["children"][0]
+        );
+        assert_eq!(nodes[0]["value"], "1950");
+        assert_eq!(nodes[1], raw["evidence"][0]["nodes"][1]);
+        assert_eq!(
+            serde_json::from_str::<Value>(wire["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap(),
+            wire["result"]["structuredContent"]
+        );
     }
 
     #[test]

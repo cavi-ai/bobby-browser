@@ -5,6 +5,7 @@
 ### Added
 
 - A `schemaViolation` repair carries `example`, a complete argument object the tool's advertised schema accepts.
+- Snapshots nested in compact MCP results keep the first 10 options of each list inside a combobox and count the rest in `optionsOmitted`.
 
 ### Fixed
 

@@ -5464,7 +5464,8 @@ fn accessibility_node() -> Value {
             "autocomplete":string(0, 256),
             "url":string(1, 4096),
             "valueMin":string(0, 256),
-            "valueMax":string(0, 256)
+            "valueMax":string(0, 256),
+            "optionsOmitted":{"type":"integer","minimum":1,"maximum":1048576}
         }),
         &[],
     );
