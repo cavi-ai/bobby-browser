@@ -273,7 +273,7 @@ tools! {
             types::Capability::VisionAssist,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SolveChallenge", "Reconciliable"), hints: (false, false, false, false) }
-    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once via workflowHandle. Without expectedState, verify URL, submit control or field changes. Vision can add outcomeReading. On failure fix formValidation for validationRejected or call recovery_status for needsReconciliation. Requires browser:mutate and intent:execute.",
+    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once via workflowHandle. Without expectedState, URL, submit control or field changes verify. Read outcomeReading and submitSettlement=settled|validationRejected. Fix formValidation on rejection and do not inspect or blindly resubmit. On failure with needsReconciliation call recovery_status. Requires browser:mutate and intent:execute.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
