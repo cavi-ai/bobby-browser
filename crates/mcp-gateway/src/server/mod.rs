@@ -2129,6 +2129,9 @@ fn invalid_params(
                 if let Some(union) = &union {
                     repair["allowedKinds"] = json!(union.allowed_kinds);
                 }
+                if let Some(example) = crate::schema::tool_example_arguments(tool) {
+                    repair["example"] = example;
+                }
                 if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments)
                 {
                     if let Some(action) = repair["action"].as_str() {
@@ -3005,6 +3008,34 @@ mod tests {
                 "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
             )
         );
+    }
+
+    #[test]
+    fn invalid_params_repair_carries_an_example_every_advertised_schema_accepts() {
+        let missing = crate::catalog::DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .filter(|tool| {
+                let response = invalid_params(
+                    json!(4),
+                    tool,
+                    &json!({}),
+                    Some(crate::schema::SchemaViolation {
+                        pointer: "/".to_owned(),
+                        constraint: "required",
+                    }),
+                    0,
+                );
+                let example = &response["error"]["data"]["repair"]["example"];
+                !example.is_object()
+                    || crate::schema::validate_document(
+                        &crate::schema::advertised_tool_schema(tool),
+                        example,
+                    )
+                    .is_err()
+            })
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "no valid repair example: {missing:?}");
     }
 
     #[test]
