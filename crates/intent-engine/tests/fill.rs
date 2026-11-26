@@ -175,6 +175,149 @@ async fn a_complete_form_failure_names_the_field_and_how_far_the_form_got() {
 }
 
 #[tokio::test]
+async fn a_complete_form_at_its_deadline_reports_the_fields_it_filled() {
+    let browser = SlowTypingBrowser(FakeBrowser {
+        candidates: Arc::new(vec![
+            textbox("Full name"),
+            textbox("Essay"),
+            textbox("Email"),
+        ]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada".into()),
+        }],
+        upload_evidence: vec![],
+    });
+    let field = |name: &str, label: &str, value: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {label}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            accessible_name: Some(label.into()),
+            ..Default::default()
+        },
+        value: ControlAction::SetText {
+            value: value.into(),
+            clear_first: true,
+        },
+        revealed_by: None,
+    };
+    let now = tokio::time::Instant::now();
+    let deadline = now + std::time::Duration::from_millis(500);
+    let outcome = IntentEngine::execute_with_deadlines(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete application".into(),
+            fields: vec![
+                field("name", "Full name", "Ada"),
+                field("essay", "Essay", &"An answer. ".repeat(30)),
+                field("email", "Email", "Ada"),
+            ],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+        now,
+        deadline,
+    )
+    .await;
+    assert!(tokio::time::Instant::now() <= deadline);
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    assert!(
+        error
+            .message
+            .ends_with(r#"(completeForm field "essay", 2 of 3; the fields before it are filled)"#),
+        "{}",
+        error.message
+    );
+    let filled = evidence
+        .iter()
+        .filter_map(|item| match item {
+            Evidence::ControlAction { action } => Some(action.target.accessible_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(filled, ["Full name"]);
+}
+
+/// Types at 10 ms a character, so a long answer outlasts a short deadline.
+struct SlowTypingBrowser(FakeBrowser);
+
+#[async_trait]
+impl IntentBrowser for SlowTypingBrowser {
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        self.0.collect_candidates(page_id, target).await
+    }
+
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.0.click(page_id, command).await
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.0.click_xy(page_id, x, y).await
+    }
+
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.0.type_text(page_id, command).await
+    }
+
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.0.upload_files(page_id, command).await
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if let ControlAction::SetText { value, .. } = &command.action {
+            tokio::time::sleep(std::time::Duration::from_millis(10 * value.len() as u64)).await;
+        }
+        self.0.control_action(page_id, command).await
+    }
+
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.0.wait_for(page_id, command).await
+    }
+
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        self.0.capture_screenshot(page_id, command).await
+    }
+}
+
+#[tokio::test]
 async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {
@@ -1370,6 +1513,7 @@ async fn fill_rejects_activate_and_names_control_action_as_the_right_tool() {
 /// (email + password submitted, then an MFA code field appears).
 struct SubmitRevealingFormBrowser {
     submitted: AtomicBool,
+    reveals_field: bool,
     calls: Arc<Mutex<CallLog>>,
 }
 
@@ -1384,7 +1528,7 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
             textbox("Work email"),
             candidate("continue", Some("button"), "Continue", BTreeMap::new()),
         ];
-        if self.submitted.load(Ordering::SeqCst) {
+        if self.reveals_field && self.submitted.load(Ordering::SeqCst) {
             candidates.push(textbox("Authentication code"));
         }
         Ok(candidates)
@@ -1402,7 +1546,10 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
             == Some("Continue");
         assert!(is_continue, "expected a click on Continue, got {command:?}");
         self.submitted.store(true, Ordering::SeqCst);
-        Ok(Vec::new())
+        Ok(vec![Evidence::Element {
+            selector: "#continue".into(),
+            text: Some("Continue".into()),
+        }])
     }
 
     async fn click_xy(
@@ -1499,50 +1646,55 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
     }
 }
 
+fn revealed_form() -> IntentCommand {
+    IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "sign in".into(),
+        fields: vec![
+            CompleteFormField {
+                name: "email".into(),
+                purpose: "work email".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Work email".into()),
+                    ..IntentHints::default()
+                },
+                value: ControlAction::SetText {
+                    value: "maya@northstar.example".into(),
+                    clear_first: true,
+                },
+                revealed_by: None,
+            },
+            CompleteFormField {
+                name: "code".into(),
+                purpose: "authentication code".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Authentication code".into()),
+                    ..IntentHints::default()
+                },
+                value: ControlAction::SetText {
+                    value: "246813".into(),
+                    clear_first: true,
+                },
+                revealed_by: Some(IntentHints {
+                    accessible_name: Some("Continue".into()),
+                    ..IntentHints::default()
+                }),
+            },
+        ],
+    })
+}
+
 #[tokio::test]
 async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = SubmitRevealingFormBrowser {
         submitted: AtomicBool::new(false),
+        reveals_field: true,
         calls: Arc::clone(&calls),
     };
     let outcome = IntentEngine::execute(
-        &IntentCommand::CompleteForm(CompleteFormIntent {
-            purpose: "sign in".into(),
-            fields: vec![
-                CompleteFormField {
-                    name: "email".into(),
-                    purpose: "work email".into(),
-                    hints: IntentHints {
-                        role: Some("textbox".into()),
-                        accessible_name: Some("Work email".into()),
-                        ..IntentHints::default()
-                    },
-                    value: ControlAction::SetText {
-                        value: "maya@northstar.example".into(),
-                        clear_first: true,
-                    },
-                    revealed_by: None,
-                },
-                CompleteFormField {
-                    name: "code".into(),
-                    purpose: "authentication code".into(),
-                    hints: IntentHints {
-                        role: Some("textbox".into()),
-                        accessible_name: Some("Authentication code".into()),
-                        ..IntentHints::default()
-                    },
-                    value: ControlAction::SetText {
-                        value: "246813".into(),
-                        clear_first: true,
-                    },
-                    revealed_by: Some(IntentHints {
-                        accessible_name: Some("Continue".into()),
-                        ..IntentHints::default()
-                    }),
-                },
-            ],
-        }),
+        &revealed_form(),
         &PageId::new(),
         &browser,
         &VisionContext::default(),
@@ -1555,4 +1707,49 @@ async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
     );
     let log = calls.lock().expect("call log");
     assert_eq!(log.control_action.len(), 2, "{:?}", log.control_action);
+}
+
+#[tokio::test]
+async fn complete_form_deadline_keeps_completed_reveal_click_and_fill_evidence() {
+    let browser = SubmitRevealingFormBrowser {
+        submitted: AtomicBool::new(false),
+        reveals_field: false,
+        calls: Arc::new(Mutex::new(CallLog::default())),
+    };
+    let now = tokio::time::Instant::now();
+    let deadline = now + std::time::Duration::from_millis(500);
+    let outcome = tokio::time::timeout_at(
+        deadline,
+        IntentEngine::execute_with_deadlines(
+            &revealed_form(),
+            &PageId::new(),
+            &browser,
+            &VisionContext::default(),
+            now,
+            deadline,
+        ),
+    )
+    .await
+    .expect("form should return before the envelope drops its evidence");
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected a deadline failure, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    assert!(
+        !error.retryable,
+        "the reveal click could have submitted the form"
+    );
+    assert!(error
+        .message
+        .contains(r#"completeForm field "code", 2 of 2"#));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action } if action.target.accessible_name == "Work email"
+    )));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Element { selector, .. } if selector == "#continue"
+    )));
+    assert_eq!(browser.calls.lock().unwrap().control_action.len(), 1);
 }

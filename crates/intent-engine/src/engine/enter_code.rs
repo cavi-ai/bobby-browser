@@ -87,9 +87,22 @@ struct Run<'a> {
     code: String,
     summary: String,
     resolutions: Vec<Evidence>,
+    /// A code field left the page as the code went in: the page took the
+    /// step itself, and the page that follows decides.
+    moved_on: bool,
 }
 
 impl Run<'_> {
+    /// Whether `field` is still on the page.
+    async fn on_page(&self, field: &CodeField) -> bool {
+        let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
+            return true;
+        };
+        code_entry::find_control(&snapshot, &field.id)
+            .filter(|control| control.target == field.target)
+            .is_some()
+    }
+
     fn failed(
         &self,
         error: CommandError,
@@ -183,6 +196,14 @@ impl Run<'_> {
         .await
         {
             Ok(evidence) => evidence,
+            Err(error)
+                if (error.code == ErrorCode::TargetDetached
+                    || post_navigation_context_loss(&error))
+                    && !self.on_page(field).await =>
+            {
+                self.moved_on = true;
+                return Ok(());
+            }
             Err(error) => {
                 // A worker message can quote what was typed; with one
                 // character per box there is nothing safe to keep of it.
@@ -202,6 +223,10 @@ impl Run<'_> {
         // the page moving focus on, so the boxes are checked together below.
         if !split && verify_fill(&value, &evidence).is_err() && !self.reads_back(field, chunk).await
         {
+            if !self.on_page(field).await {
+                self.moved_on = true;
+                return Ok(());
+            }
             return Err(self.failed(
                 Self::error(
                     ErrorCode::VerificationFailed,
@@ -220,10 +245,7 @@ impl Run<'_> {
         let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
             return false;
         };
-        code_entry::find_control(&snapshot, &field.id)
-            .filter(|control| control.target == field.target)
-            .and_then(|control| code_entry::holds(control, expected))
-            == Some(true)
+        field_readback(&snapshot, field, expected) == Some(true)
     }
 
     /// Reads every field back once all are filled and types again into any
@@ -293,6 +315,9 @@ impl Run<'_> {
         step: &CodeStep,
         expected_state: Option<&WaitForCommand>,
     ) -> Result<Vec<Evidence>, IntentOutcome> {
+        if self.moved_on {
+            return Ok(Vec::new());
+        }
         let acted = match &step.submit {
             Some(submit) => {
                 let located = self.locate(submit).await?;
@@ -358,13 +383,18 @@ fn wrong_fields<'a, 'b>(
 ) -> Vec<&'a (&'b CodeField, String)> {
     fields
         .iter()
-        .filter(|(field, expected)| {
-            code_entry::find_control(snapshot, &field.id)
-                .filter(|control| control.target == field.target)
-                .and_then(|control| code_entry::holds(control, expected))
-                == Some(false)
-        })
+        .filter(|(field, expected)| field_readback(snapshot, field, expected) == Some(false))
         .collect()
+}
+
+fn field_readback(
+    snapshot: &types::FormSnapshot,
+    field: &CodeField,
+    expected: &str,
+) -> Option<bool> {
+    code_entry::find_control(snapshot, &field.id)
+        .filter(|control| control.target == field.target)
+        .and_then(|control| code_entry::holds(control, expected))
 }
 
 pub(super) async fn execute_enter_code(
@@ -379,6 +409,7 @@ pub(super) async fn execute_enter_code(
         code: code.clone(),
         summary: "enterCode".into(),
         resolutions: Vec::new(),
+        moved_on: false,
     };
     let step = match read_code_step(page_id, browser, Some(request.hints)).await {
         Ok(Some(step)) => step,
@@ -456,12 +487,40 @@ pub(super) async fn execute_enter_code(
         }
     } else {
         for (field, chunk) in &chunks {
+            if run.moved_on {
+                break;
+            }
             if let Err(outcome) = run.fill(field, chunk, split).await {
                 return outcome;
             }
         }
         if let Err(outcome) = run.verify_filled(&chunks, split).await {
             return outcome;
+        }
+    }
+
+    // A submit can be verified by the page that follows. A fill-only run
+    // needs the current page to confirm every field kept its value.
+    if !request.submit {
+        let confirmed = browser
+            .form_snapshot(page_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                chunks.iter().all(|(field, expected)| {
+                    field_readback(&snapshot, field, expected) == Some(true)
+                })
+            });
+        if !confirmed {
+            return run.failed(
+                Run::error(
+                    ErrorCode::VerificationFailed,
+                    "the page did not keep the entered code in every code field",
+                ),
+                Vec::new(),
+                "verifyFailed",
+            );
         }
     }
 

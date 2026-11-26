@@ -11,6 +11,9 @@ use crate::{
 /// Value of the `x-interface-version` header for this release.
 pub const CURRENT_INTERFACE_VERSION: &str = "2026-08-19";
 
+/// Send this header with value `true` to include lost sessions in runtime info.
+pub const INCLUDE_LOST_SESSIONS_HEADER: &str = "x-bobby-include-lost-sessions";
+
 /// Marker for the sole supported interface version ([`CURRENT_INTERFACE_VERSION`]).
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
