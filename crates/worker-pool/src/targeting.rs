@@ -19,8 +19,8 @@ use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, GetLayoutMetricsParams, Viewport,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
-    RemoteObjectId,
+    CallFunctionOnParams, EvaluateParams, ExecutionContextId, GetPropertiesParams,
+    ReleaseObjectGroupParams, RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
@@ -499,6 +499,38 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Presses Escape on another focused, expanded control outside a dialog.
+    /// Returns whether Escape was sent so the caller can check the new state.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<bool, CommandError> {
+        let open = self
+            .eval::<bool>(
+                page,
+                r#"
+                const doc = el.ownerDocument;
+                if (!doc.hasFocus()) return false;
+                let active = doc.activeElement;
+                while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+                if (!active || active === el || el.contains(active) || active.contains(el) ||
+                    active.getAttribute('aria-expanded') !== 'true') return false;
+
+                // A trusted Escape can cancel the dialog even if it targets a child.
+                const dialog = 'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]';
+                for (let node = active; node; node = node.parentNode || node.host) {
+                    if (node.matches?.(dialog)) return false;
+                }
+                return !doc.querySelector('dialog:modal');
+                "#,
+            )
+            .await?;
+        if open {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+        }
+        Ok(open)
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {
@@ -613,7 +645,22 @@ impl ResolvedTarget {
                 self.eval::<bool>(page, "el.focus(); return true").await?;
             }
         }
-        let replaced = self.settle_focus(page).await?;
+        let mut replaced = self.settle_focus(page).await?;
+        // A frame from another origin that took focus with the field, such as
+        // an inline menu, gets Escape; the field is then focused again.
+        if self
+            .eval::<bool>(page, crate::typed_focus::FOREIGN_FRAME_FOCUS_SCRIPT)
+            .await
+            .unwrap_or(false)
+        {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+            tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+            self.eval::<bool>(page, "el.focus(); return true").await?;
+            replaced = self.settle_focus(page).await?;
+        }
         if clear_first && replaced {
             self.clear_focused(page).await?;
         } else if clear_first {
@@ -717,26 +764,42 @@ impl ResolvedTarget {
     }
 
     /// Chooses the option of an ARIA combobox, menu button or text box whose
-    /// text is `value` (ignoring case and spacing): types `value` to filter it
-    /// when it takes text, else opens it, waits for that option (or, with no
-    /// option roles, a newly shown element reading `value`), presses it, and
-    /// returns the option text once the control or its menu shows it. With no
-    /// such option the error lists every option the control offers.
+    /// text is `value` (ignoring case and spacing). Uses matching results
+    /// already open in the text field's popup or types to filter them. For
+    /// a button, opens its menu. Verifies the choice after pressing the option.
     pub async fn select_combobox_option(
         &self,
         page: &Page,
         value: &str,
     ) -> Result<String, CommandError> {
         let takes_text = self.eval::<bool>(page, COMBOBOX_TAKES_TEXT_SCRIPT).await?;
-        self.eval::<bool>(page, COMBOBOX_MARK_SCRIPT).await?;
+        let wanted = option_json(value)?;
+        self.eval::<bool>(page, &format!("{COMBOBOX_OPTIONS} {COMBOBOX_MARK_SCRIPT}"))
+            .await?;
+        let already_open = takes_text
+            && self
+                .eval::<bool>(
+                    page,
+                    &format!(
+                        "const wanted={wanted}; {COMBOBOX_OPTIONS}
+                         if (!ids.length || el.getAttribute('aria-expanded') === 'false') return false;
+                         {COMBOBOX_ROLELESS} rolelessOptions(true); {COMBOBOX_PICK}
+                         return Boolean(match);"
+                    ),
+                )
+                .await?;
         if takes_text {
-            self.type_text(page, value, true).await?;
+            if !already_open {
+                // Typing a newline emits Enter. Option labels use normalized spaces.
+                self.type_text(page, &value.replace(['\r', '\n'], " "), true)
+                    .await?;
+            }
         } else {
             self.click(page).await?;
         }
-        let wanted = option_json(value)?;
+        let roleless = format!("{COMBOBOX_ROLELESS} rolelessOptions({already_open});");
         let find = format!(
-            "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
+            "const wanted={wanted}; {COMBOBOX_OPTIONS} {roleless} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
         );
         let started = Instant::now();
         let option = loop {
@@ -769,12 +832,27 @@ impl ResolvedTarget {
                 ),
             ));
         };
-        self.press_option(page, option.x.zip(option.y), &wanted, COMBOBOX_ROLELESS)
-            .await?;
-        let shows = format!(
-            "const chosen={}; {} {COMBOBOX_SHOWS_SCRIPT}",
+        let readback = format!(
+            "const chosen={}; {COMBOBOX_OPTIONS} {roleless} {} {COMBOBOX_CHOICE_STATE}",
             option_json(&text)?,
             crate::form_snapshot::SHOWN_VALUE_FUNCTION
+        );
+        let before = if takes_text {
+            self.eval::<serde_json::Value>(
+                page,
+                &format!("{readback} return {{own, shown, selected}};"),
+            )
+            .await?
+        } else {
+            serde_json::Value::Null
+        };
+        self.press_option(page, option.x.zip(option.y), &wanted, &roleless)
+            .await?;
+        // Older text suggestions without a selection state signal selection
+        // by dismissing the results while retaining the chosen text.
+        let allow_dismissal = !already_open && !option.tracks_selection;
+        let shows = format!(
+            "{readback} const before={before}; const allowDismissal={allow_dismissal}; {COMBOBOX_SHOWS_SCRIPT}"
         );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT;
         loop {
@@ -928,8 +1006,9 @@ impl ResolvedTarget {
     /// control then offers.
     async fn offered_options(&self, page: &Page) -> Result<Vec<String>, CommandError> {
         self.clear_editable(page).await?;
-        let read =
-            format!("const wanted=''; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_OFFERED}");
+        let read = format!(
+            "{COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} rolelessOptions(false); {COMBOBOX_OFFERED}"
+        );
         let deadline = Instant::now() + COMBOBOX_OPTION_WAIT / 2;
         loop {
             let offered: Vec<String> = self.eval(page, &read).await?;
@@ -1113,6 +1192,8 @@ struct ComboboxOption {
     shown: Vec<String>,
     #[serde(default)]
     loading: bool,
+    #[serde(default)]
+    tracks_selection: bool,
 }
 
 #[derive(Deserialize)]
@@ -1150,19 +1231,69 @@ fn option_json(value: &str) -> Result<String, CommandError> {
 /// Function body with `el` bound: whether the combobox is a text field.
 const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
 
-/// Function body with `el` bound: records the elements shown before the
-/// control is typed into or opened, so suggestions without option roles can
-/// be told apart from the page around them.
-const COMBOBOX_MARK_SCRIPT: &str = "const shown=new WeakSet(); for(const node of el.ownerDocument.body?.querySelectorAll('*')||[]) if(node.getClientRects().length) shown.add(node); el[Symbol.for('bobby.shownBeforeOptions')]=shown; return true;";
+/// Records rendered elements in the document and the field's shadow root so
+/// the roleless fallback can recognize suggestions that appear after typing.
+const COMBOBOX_MARK_SCRIPT: &str = r#"
+    const shown = new WeakSet();
+    for (const root of pageRoots) {
+        for (const node of root.querySelectorAll('*')) {
+            if (node.getClientRects().length) shown.add(node);
+        }
+    }
+    el[Symbol.for('bobby.shownBeforeOptions')] = shown;
+    return true;
+"#;
 
 /// Shared by the option scripts, with `el` bound: the visible, enabled
 /// options and menu items of the control's own popup (`aria-controls` or
 /// `aria-owns`), else of its document.
-const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const doc=el.ownerDocument; const visible=o=>{const r=o.getBoundingClientRect(); const s=getComputedStyle(o); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}; const enabled=o=>o.getAttribute('aria-disabled')!=='true'; const ids=['aria-controls','aria-owns'].flatMap(a=>(el.getAttribute(a)||'').split(/\\s+/)).filter(Boolean); const of=roots=>roots.flatMap(r=>[...r.querySelectorAll('[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]')]).filter(o=>visible(o)&&enabled(o)); const home=el.getRootNode(); const owner=home.getElementById?home:doc; let options=of(ids.map(id=>owner.getElementById(id)).filter(Boolean)); if(!options.length) options=of(home===doc?[doc]:[home,doc]);";
+const COMBOBOX_OPTIONS: &str = r#"
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
+    const key = s => norm(s).toLowerCase();
+    const doc = el.ownerDocument;
+    const home = el.getRootNode();
+    const pageRoots = home === doc ? [doc] : [home, doc];
+    const visible = o => {
+        const r = o.getBoundingClientRect();
+        const s = getComputedStyle(o);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    };
+    const ids = ['aria-controls', 'aria-owns']
+        .flatMap(a => (el.getAttribute(a) || '').split(/\s+/)).filter(Boolean);
+    const roots = ids.length
+        ? [...new Set(ids.map(id => home.getElementById?.(id) || doc.getElementById(id)).filter(Boolean))]
+        : pageRoots;
+    const listed = roots.flatMap(r => [...r.querySelectorAll(
+        '[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]'
+    )]);
+    let options = listed.filter(o => visible(o) && o.getAttribute('aria-disabled') !== 'true');
+"#;
 
-/// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
-/// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
-const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&row(n)); }";
+/// After COMBOBOX_OPTIONS, detects roleless rows. Only a popup associated with
+/// the field can supply rows that were visible before the operation.
+/// Live regions and visually hidden text are announcements, not rows.
+const COMBOBOX_ROLELESS: &str = r#"
+    const rolelessOptions = includeExisting => {
+        if (options.length) return;
+        const useExisting = includeExisting && ids.length > 0 && el.getAttribute('aria-expanded') !== 'false';
+        const before = el[Symbol.for('bobby.shownBeforeOptions')];
+        if (!before && !useExisting) return;
+        const row = n => {
+            const own = norm(n.textContent);
+            if (!own || own.length > 200) return false;
+            const kids = [...n.children].filter(c => norm(c.textContent));
+            return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
+        };
+        const spoken = n => {
+            const r = n.getBoundingClientRect();
+            const live = n.closest('[aria-live]')?.getAttribute('aria-live').trim().toLowerCase();
+            return r.width <= 1 || r.height <= 1 || live === 'polite' || live === 'assertive'
+                || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
+        };
+        options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>
+            (useExisting || !before.has(n)) && n !== el && !n.contains(el) && visible(n) && !spoken(n) && row(n));
+    };
+"#;
 
 /// With `wanted` bound, after the option lists: the option whose text is
 /// `wanted`, exactly, else ignoring case.
@@ -1170,7 +1301,20 @@ const COMBOBOX_PICK: &str = "const exact=options.filter(o=>norm(o.textContent)==
 
 /// After [`COMBOBOX_PICK`]: the matching option's text and viewport center,
 /// or the texts of the options shown.
-const COMBOBOX_OPTION_FOUND: &str = "if(!match){ const busy=n=>n?.getAttribute('aria-busy')==='true'; const loading=busy(el)||ids.some(id=>busy(owner.getElementById(id)))||(options.length>0&&options.every(o=>/^(loading|searching|please wait)\\b/i.test(norm(o.textContent)))); return {shown: options.slice(0,10).map(o=>norm(o.textContent).slice(0,80)), loading}; } match.scrollIntoView({block:'nearest'}); const r=match.getBoundingClientRect(); return {text: norm(match.textContent), x: r.left+r.width/2, y: r.top+r.height/2};";
+const COMBOBOX_OPTION_FOUND: &str = r#"
+    if (!match) {
+        const busy = n => n.getAttribute?.('aria-busy') === 'true';
+        const loading = busy(el) || roots.some(busy) ||
+            (options.length > 0 && options.every(o => /^(loading|searching|please wait)\b/i.test(norm(o.textContent))));
+        return {shown: options.slice(0, 10).map(o => norm(o.textContent).slice(0, 80)), loading};
+    }
+    match.scrollIntoView({block: 'nearest'});
+    const r = match.getBoundingClientRect();
+    return {
+        text: norm(match.textContent), x: r.left + r.width / 2, y: r.top + r.height / 2,
+        tracks_selection: match.hasAttribute('aria-selected') || match.hasAttribute('aria-checked')
+    };
+"#;
 
 /// After [`COMBOBOX_PICK`]: the matching option's viewport center and whether
 /// that point hits the option.
@@ -1180,9 +1324,10 @@ const COMBOBOX_OPTION_POINT: &str = "if(!match) return {x:0,y:0,hit:false}; cons
 /// option per line so adjacent options never run together.
 const LISTED_TEXT_SCRIPT: &str = "const items=el.matches('[role=\"listbox\"],[role=\"menu\"]')?[...el.querySelectorAll('[role=\"option\"],[role=\"menuitem\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"]')]:[]; return items.length?items.map(o=>String(o.innerText||o.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).join('\\n'):(el.innerText||'');";
 
-/// After [`COMBOBOX_PICK`]: presses the matching option with the pointer
-/// and mouse events a person's click fires.
-const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); for(const type of ['pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{bubbles:true,cancelable:true,composed:true,view:doc.defaultView}))} return true;";
+/// After [`COMBOBOX_PICK`]: hovers, then presses the matching option with the
+/// pointer and mouse events a person's click fires, so a list that commits
+/// its highlighted option commits this one.
+const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); const r=match.getBoundingClientRect(); const at={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; for(const type of ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove','pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{...at,bubbles:!type.endsWith('enter'),cancelable:true,composed:true,view:doc.defaultView}))} return true;";
 
 /// After the option lists: the texts of every option offered.
 const COMBOBOX_OFFERED: &str =
@@ -1191,15 +1336,46 @@ const COMBOBOX_OFFERED: &str =
 /// With `chosen` bound, after [`COMBOBOX_OPTIONS`]: the menu's items, the
 /// chosen values no item reads, the checked items, and the first item whose
 /// checked state differs from `chosen`, with its viewport center.
-const COMBOBOX_ITEMS_STATE: &str = "const key=s=>norm(s).toLowerCase(); const want=new Set(chosen.map(key)); const on=o=>o.getAttribute('aria-checked')==='true'||o.getAttribute('aria-selected')==='true'; const items=options.map(o=>({o,text:norm(o.textContent),on:on(o)})); const missing=items.length?chosen.filter(v=>!items.some(i=>key(i.text)===key(v))):[]; const next=items.find(i=>want.has(key(i.text))!==i.on); let x=null,y=null; if(next){next.o.scrollIntoView({block:'nearest'}); const r=next.o.getBoundingClientRect(); x=r.left+r.width/2; y=r.top+r.height/2;} return {items:items.slice(0,50).map(i=>i.text.slice(0,120)), missing, checked:items.filter(i=>i.on).map(i=>i.text), next:next?next.text:null, x, y};";
+const COMBOBOX_ITEMS_STATE: &str = "const want=new Set(chosen.map(key)); const on=o=>o.getAttribute('aria-checked')==='true'||o.getAttribute('aria-selected')==='true'; const items=options.map(o=>({o,text:norm(o.textContent),on:on(o)})); const missing=items.length?chosen.filter(v=>!items.some(i=>key(i.text)===key(v))):[]; const next=items.find(i=>want.has(key(i.text))!==i.on); let x=null,y=null; if(next){next.o.scrollIntoView({block:'nearest'}); const r=next.o.getBoundingClientRect(); x=r.left+r.width/2; y=r.top+r.height/2;} return {items:items.slice(0,50).map(i=>i.text.slice(0,120)), missing, checked:items.filter(i=>i.on).map(i=>i.text), next:next?next.text:null, x, y};";
 
 /// Function body with `el` bound: whether the control's menu is still open.
 const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='false') return false; const visible=o=>{const r=o.getBoundingClientRect(); return r.width>0&&r.height>0&&getComputedStyle(o).visibility!=='hidden'}; return [...el.ownerDocument.querySelectorAll('[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"],[role=\"option\"]')].some(visible);";
 
-/// Function body with `el` and `chosen` bound: whether the control, a menu
-/// item checked for the chosen text, or the nearest ancestor of the control
-/// that holds no option shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); const compact=s=>s.replace(/\\s/g,''); if(!norm(own)&&shown&&(words(shown).every(w=>words(norm(chosen)).includes(w))||compact(norm(chosen)).includes(compact(shown)))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+/// Reads a choice's text, adjacent visible value, and selection state within its popup.
+const COMBOBOX_CHOICE_STATE: &str = r#"
+    const own = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+        ? el.value : el.innerText ?? el.textContent;
+    const label = key(chosen);
+    const readsChoice = o => key(o.textContent) === label;
+    // In a single-select popup aria-selected can follow the highlighted row.
+    const selected = listed.some(o => readsChoice(o) &&
+        (o.getAttribute('aria-checked') === 'true' || (o.getAttribute('aria-selected') === 'true' &&
+            o.closest('[role="listbox"]')?.getAttribute('aria-multiselectable') === 'true')));
+    const shown = key(shownValue(el));
+"#;
+
+/// A text field must show evidence beyond the query typed before the press.
+/// A button may display the choice in its own text or adjacent visible text.
+const COMBOBOX_SHOWS_SCRIPT: &str = r#"
+    const value = key(own);
+    if (selected && (!before || !before.selected)) return {chosen: true, value: label};
+    if (value === label && (!before || own !== before.own ||
+        (allowDismissal && !options.some(readsChoice)))) return {chosen: true, value};
+    const words = s => s.split(' ').filter(Boolean);
+    const compact = s => s.replace(/\s/g, '');
+    const showsLabel = shown && (shown === label || (!value &&
+        (words(shown).every(w => words(label).includes(w)) || compact(label).includes(compact(shown)))));
+    if (showsLabel && (!before || shown !== before.shown)) return {chosen: true, value: shown};
+    if (before) return {chosen: false, value};
+
+    let node = el.parentElement;
+    for (let hop = 0; node && hop < 3; hop++, node = node.parentElement) {
+        if (node.querySelector('[role="option"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="menuitem"]')) break;
+        const text = key(node.innerText);
+        if (text.length <= label.length + 200 && text.includes(label)) return {chosen: true, value: text};
+    }
+    return {chosen: false, value};
+"#;
 
 /// Function body with `el` bound: the page rectangle to capture for `el`,
 /// scrolled into view. An element under 4 px a side (a hidden file input)
@@ -1721,6 +1897,54 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     }
 }
 
+/// The CSS selector of a target that carries `css` and nothing else.
+pub(crate) fn css_only_selector(target: &TargetSpec) -> Option<&str> {
+    target.css.as_deref().filter(|_| {
+        target.test_id.is_none()
+            && target.role.is_none()
+            && target.accessible_name.is_none()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.attributes.is_empty()
+            && target.frame_path.is_empty()
+            && target.shadow_path.is_empty()
+            && target.ordinal.is_none()
+    })
+}
+
+fn selector_target(
+    page_id: &PageId,
+    element: Element,
+    target: TargetSpec,
+    best_match_authorized: bool,
+) -> ResolvedTarget {
+    ResolvedTarget {
+        native: Some(element),
+        locator: JsLocator {
+            scope: LocatorScope::Context(None),
+            shadow_hosts: Vec::new(),
+            id: String::new(),
+        },
+        execution_page: None,
+        frame_id: None,
+        iframe_hop: None,
+        frame_path: Vec::new(),
+        frame_owners: Vec::new(),
+        evidence: Evidence::Resolution {
+            target: Box::new(target),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: page_id.clone(),
+                frame: None,
+                role: None,
+                name: None,
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized,
+        },
+    }
+}
+
 pub async fn resolve_target_with_visibility(
     page_id: &PageId,
     page: &Page,
@@ -1736,20 +1960,11 @@ pub async fn resolve_target_with_visibility(
                 format!("no element matches selector `{selector}`"),
             )
         })?;
-        return Ok(ResolvedTarget {
-            native: Some(element),
-            locator: JsLocator {
-                scope: LocatorScope::Context(None),
-                shadow_hosts: Vec::new(),
-                id: String::new(),
-            },
-            execution_page: None,
-            frame_id: None,
-            iframe_hop: None,
-            frame_path: Vec::new(),
-            frame_owners: Vec::new(),
-            evidence: selector_evidence(page_id, selector),
-        });
+        let target = TargetSpec {
+            css: Some(selector.into()),
+            ..TargetSpec::default()
+        };
+        return Ok(selector_target(page_id, element, target, false));
     };
     validate_target_spec(target)?;
 
@@ -1767,7 +1982,28 @@ pub async fn resolve_target_with_visibility(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) = match choose(target, &raw, require_visible) {
+        Ok(chosen) => chosen,
+        // A css-only target on an element no candidate covers (a container,
+        // a landmark, a class or combinator selector) resolves as a selector.
+        Err(error) if error.code == ErrorCode::TargetNotFound => {
+            let Some(css) = css_only_selector(target) else {
+                return Err(error);
+            };
+            return match query_css_target(page, css, require_visible, target.allow_best_match).await
+            {
+                Ok(Some((element, best_match_authorized))) => Ok(selector_target(
+                    page_id,
+                    element,
+                    target.clone(),
+                    best_match_authorized,
+                )),
+                Err(ambiguous) if ambiguous.code == ErrorCode::TargetAmbiguous => Err(ambiguous),
+                _ => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let iframe_hop = (candidate.role.as_deref() == Some("iframe"))
         .then(|| semantic_iframe_hop(&candidate, &raw));
     let owner = owners.get(&candidate.id).cloned();
@@ -2294,6 +2530,64 @@ async fn element_from_remote_object(
         .map_err(cdp_error)
 }
 
+/// Resolve CSS matches outside the action candidate census, keeping the
+/// selected node and its uniqueness check in the same DOM read.
+async fn query_css_target(
+    page: &Page,
+    selector: &str,
+    require_visible: bool,
+    allow_best_match: bool,
+) -> Result<Option<(Element, bool)>, CommandError> {
+    let css = serde_json::to_string(selector)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let visibility = dom_engine::ELEMENT_VISIBILITY_SCRIPT;
+    let group = format!(
+        "bobby-css-resolve-{}",
+        TARGET_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut params = EvaluateParams::new(format!(
+        r#"(() => {{
+            const matches = [];
+            for (const el of document.querySelectorAll({css})) {{
+                if ({require_visible} && !(() => {{ {visibility} }})()) continue;
+                matches.push(el);
+                if (matches.length === 2) break;
+            }}
+            return matches;
+        }})()"#
+    ));
+    params.return_by_value = Some(false);
+    params.object_group = Some(group.clone());
+    let matched = async {
+        let result = page.evaluate(params).await.map_err(cdp_error)?;
+        let Some(array_id) = result.object().object_id.clone() else {
+            return Ok(None);
+        };
+        let mut params = GetPropertiesParams::new(array_id);
+        params.own_properties = Some(true);
+        let properties = page.execute(params).await.map_err(cdp_error)?.result.result;
+        let multiple = properties.iter().any(|property| property.name == "1");
+        if multiple && !allow_best_match {
+            return Err(target_error(
+                ErrorCode::TargetAmbiguous,
+                "CSS selector matched multiple eligible elements. Narrow the selector or set allowBestMatch",
+            ));
+        }
+        let first = properties
+            .into_iter()
+            .find(|property| property.name == "0")
+            .and_then(|property| property.value)
+            .and_then(|object| object.object_id);
+        match first {
+            Some(id) => Ok(Some((element_from_remote_object(page, id).await?, multiple))),
+            None => Ok(None),
+        }
+    }
+    .await;
+    let _ = page.execute(ReleaseObjectGroupParams::new(group)).await;
+    matched
+}
+
 /// The first element `selector` matches under `owner`, or in the page's
 /// document without one.
 async fn query_element(
@@ -2545,6 +2839,36 @@ pub(crate) async fn page_frames(
             }
         }
     }
+}
+
+/// How long a frame overlay gets to close after Escape.
+const FRAME_OVERLAY_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Closes a frame from another origin that holds focus or covers the page's
+/// controls with Escape. `Ok(false)` when there is none; an error when it stays.
+pub(crate) async fn close_frame_overlay(page: &Page) -> Result<bool, CommandError> {
+    let found = |focus: bool| async move {
+        page.evaluate(format!(
+            "({})({focus})",
+            crate::obstruction::FRAME_OVERLAY_SCRIPT
+        ))
+        .await
+        .map_err(cdp_error)?
+        .into_value::<bool>()
+        .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
+    };
+    if !found(true).await? {
+        return Ok(false);
+    }
+    page.press_key("Escape").await.map_err(cdp_error)?;
+    tokio::time::sleep(FRAME_OVERLAY_CLOSE_WAIT).await;
+    if found(false).await? {
+        return Err(target_error(
+            ErrorCode::ObstructionSuspected,
+            crate::obstruction::FRAME_OVERLAY_PERSISTED,
+        ));
+    }
+    Ok(true)
 }
 
 /// Extension frames that hold a password manager's own sign-in prompt. Only
@@ -2832,29 +3156,10 @@ async fn evaluate_in_context<T: DeserializeOwned>(
     let mut params = EvaluateParams::new(expression);
     params.context_id = context_id;
     params.return_by_value = Some(true);
-    page.evaluate(params)
-        .await
-        .map_err(cdp_error)?
-        .into_value()
+    let result = page.evaluate(params).await.map_err(cdp_error)?;
+    // A script that returns `null` or `undefined` decodes as JSON null.
+    serde_json::from_value(result.value().cloned().unwrap_or(serde_json::Value::Null))
         .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
-}
-
-fn selector_evidence(page_id: &PageId, selector: &str) -> Evidence {
-    Evidence::Resolution {
-        target: Box::new(TargetSpec {
-            css: Some(selector.into()),
-            ..TargetSpec::default()
-        }),
-        fingerprint: Box::new(TargetFingerprint {
-            page_id: page_id.clone(),
-            frame: None,
-            role: None,
-            name: None,
-            stable_attributes: BTreeMap::new(),
-        }),
-        candidates: Vec::new(),
-        best_match_authorized: false,
-    }
 }
 
 /// A dead browser target rewritten to this message must still be recognized

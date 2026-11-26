@@ -309,6 +309,7 @@ export class BrowserRuntimeClient {
           "x-interface-version": INTERFACE_VERSION,
           "x-correlation-id": options?.correlationId ?? crypto.randomUUID(),
           "x-deadline": scope.deadline.toISOString(),
+          ...(method === "GET" && path.split("?", 1)[0] === "/v1/runtime" ? { "x-bobby-include-lost-sessions": "true" } : {}),
           ...(options?.idempotencyKey ? { "idempotency-key": options.idempotencyKey } : {}),
           ...(body === undefined ? {} : { "content-type": "application/json" }),
         },
@@ -400,6 +401,7 @@ function interfaceErrorStatus(code: InterfaceError["code"]): number {
   if (code === "deadlineExceeded") return 408;
   if (code === "idempotencyConflict") return 409;
   if (code === "resourceExhausted") return 429;
+  if (code === "browserCommandFailed") return 502;
   if (code === "engineUnreachable") return 503;
   if (code === "internal") return 500;
   return 422;

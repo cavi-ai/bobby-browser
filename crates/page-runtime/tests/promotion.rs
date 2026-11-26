@@ -333,6 +333,7 @@ async fn typed_values_never_reach_the_store() {
             title: "Sign in".to_string(),
             text: canary.to_string(),
             html: Some(format!("<input value='{canary}'>")),
+            truncated: false,
         },
         Evidence::IntentExecution {
             record: record("fill", IntentResolutionPath::Deterministic),
@@ -817,6 +818,7 @@ async fn navigating_intent_promotes_under_pre_url_not_post_navigation_url() {
                 title: "Page".into(),
                 text: "Dashboard".into(),
                 html: None,
+                truncated: false,
             }])
         }
 
@@ -1094,6 +1096,7 @@ async fn failed_navigating_intent_records_failure_under_source_url() {
                 title: "Login".into(),
                 text: "Open dashboard".into(),
                 html: None,
+                truncated: false,
             }])
         }
 

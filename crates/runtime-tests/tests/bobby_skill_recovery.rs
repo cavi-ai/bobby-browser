@@ -243,6 +243,7 @@ impl worker_pool::ObservationEngine for ReplacementWorker {
             title: "Recovered".into(),
             text: "ready".into(),
             html: None,
+            truncated: false,
         }])
     }
 }

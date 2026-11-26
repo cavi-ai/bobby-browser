@@ -1991,20 +1991,12 @@ fn is_page_not_open_failure(value: &Value) -> bool {
         })
 }
 
-/// `form_snapshot`, `context_ask`, and `context_neighbors` bypass
-/// `submit_envelope` -- they call `RuntimeInterface` directly, so a closed
-/// page never reaches the executor's `is_page_not_open_failure` shape.
-/// `PageRuntime::form_snapshot` leases the worker directly and folds any
-/// worker `CommandError` into `RuntimeError::Internal(error.message)`,
-/// which `map_runtime_error` then turns into
-/// `InterfaceErrorCode::Internal` with a `"runtime operation failed: "`
-/// prefix -- the `NotFound` code chromium's `page_missing()` raised does
-/// not survive that fold. Gated on both fields, like
-/// `is_page_not_open_failure`, so an unrelated internal failure worded
-/// differently is never mistaken for this one.
+/// Direct form reads bypass `submit_envelope`. Match the worker's closed-page
+/// error after interface mapping, since other resources can also be missing.
 fn is_interface_page_not_open_failure(error: &types::InterfaceError) -> bool {
-    error.code == types::InterfaceErrorCode::Internal
-        && error.message.contains("browser page is not open")
+    error.code == types::InterfaceErrorCode::NotFound
+        && error.layer == types::ErrorLayer::Driver
+        && error.message == "browser command failed: browser page is not open"
 }
 
 /// `CommandOutcome::Failed`-shaped, for a prerequisite call (`upload_files`'
@@ -2386,6 +2378,8 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const MAX_COMMAND_DEADLINE_MS: i64 = 300_000;
+/// Command time a form adds for each character it types.
+const TYPED_CHAR_BUDGET_MS: u64 = 150;
 
 /// Builds the envelope a flat tool submits.
 ///
@@ -2440,6 +2434,18 @@ fn requested_wait_ms(command: &types::RuntimeCommand) -> Option<u64> {
             .expected_state
             .as_ref()
             .map(|expected| expected.timeout_ms),
+        // Typing time: every character at the slowest humanized keystroke.
+        RuntimeCommand::Intent(Intent::CompleteForm(intent)) => {
+            let chars = intent
+                .fields
+                .iter()
+                .map(|field| match &field.value {
+                    types::ControlAction::SetText { value, .. } => value.chars().count() as u64,
+                    _ => 0,
+                })
+                .sum::<u64>();
+            (chars > 0).then(|| chars.saturating_mul(TYPED_CHAR_BUDGET_MS))
+        }
         RuntimeCommand::Primitive(Primitive::WaitFor(command)) => Some(command.timeout_ms),
         RuntimeCommand::Primitive(Primitive::Navigate(command)) => Some(command.timeout_ms),
         _ => None,
@@ -2714,6 +2720,48 @@ mod tests {
             types::PageId::new(),
             None,
             wait(300_000),
+        );
+        assert!(
+            envelope.deadline
+                <= types::WireTimestamp::now() + Duration::from_millis(MAX_COMMAND_DEADLINE_MS)
+        );
+    }
+
+    #[test]
+    fn a_form_envelope_grows_with_the_text_it_types() {
+        let short = types::WireTimestamp::now() + Duration::from_secs(30);
+        let context = || {
+            types::RequestContext::new_for_test(
+                types::PrincipalId::from_uuid(uuid::Uuid::from_u128(705)),
+                [],
+                short,
+            )
+        };
+        let form = |answer: &str| -> types::IntentCommand {
+            serde_json::from_value(json!({"kind":"completeForm","input":{
+                "purpose":"application",
+                "fields":[
+                    {"name":"name","purpose":"name","value":{"kind":"setText","value":"Ada"}},
+                    {"name":"essay","purpose":"essay","value":{"kind":"setText","value":answer}}
+                ]
+            }}))
+            .expect("complete form intent")
+        };
+        let before = types::WireTimestamp::now();
+        let (_, envelope) = intent_envelope(
+            context(),
+            types::SessionId::new(),
+            types::PageId::new(),
+            None,
+            form(&"a".repeat(700)),
+        );
+        assert!(envelope.deadline >= before + Duration::from_millis(30_000 + 703 * 150));
+        let (_, envelope) = intent_envelope(
+            context(),
+            types::SessionId::new(),
+            types::PageId::new(),
+            None,
+            form(&"a".repeat(4_000)),
         );
         assert!(
             envelope.deadline

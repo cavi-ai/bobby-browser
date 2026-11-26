@@ -7,6 +7,10 @@
 /// at most), to whether focus is on another editable control than `el`.
 pub const FOCUS_SETTLE_SCRIPT: &str = "const focused=()=>{let a=doc.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return a};const editable=a=>a.isContentEditable||a.tagName==='INPUT'||a.tagName==='TEXTAREA';const swapped=a=>Boolean(a&&editable(a)&&(!el||!el.isConnected||(a!==el&&!el.contains(a))));return new Promise(resolve=>{const start=performance.now();let last=focused(),since=start;const poll=()=>{const now=focused(),at=performance.now();if(now!==last){last=now;since=at}if(at-since>=50||at-start>=500){resolve(swapped(now));return}setTimeout(poll,10)};setTimeout(poll,10)});";
 
+/// Function body with `el` bound: whether focus left `el` for a frame from
+/// another origin, such as an inline menu opened as the field took focus.
+pub const FOREIGN_FRAME_FOCUS_SCRIPT: &str = "const a=el.ownerDocument.activeElement;if(!a||a===el||a.tagName!=='IFRAME')return false;try{return a.contentDocument===null}catch(e){return true}";
+
 /// Expression that resolves once the page has run its pending work, at most
 /// 100 ms later.
 pub const PAGE_IDLE_SCRIPT: &str =

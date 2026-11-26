@@ -103,6 +103,7 @@ impl worker_pool::ObservationEngine for SnapshottingWorker {
             title: "Fixture".into(),
             text: "page".into(),
             html: None,
+            truncated: false,
         }])
     }
 

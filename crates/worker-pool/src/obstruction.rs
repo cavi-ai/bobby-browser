@@ -9,6 +9,16 @@ pub const FIREFOX_POINTER_OBSCURED: &str =
 pub const FIREFOX_POINTER_OUT_OF_BOUNDS: &str =
     "Firefox native click target has no clickable point in the viewport";
 
+/// A frame from another origin that keeps the page's controls covered after
+/// Escape.
+pub const FRAME_OVERLAY_PERSISTED: &str =
+    "a frame from another origin still covers the page's controls after Escape";
+
+/// Function taking `focus`: whether a frame from another origin holds focus or
+/// covers the center of a page control. With `focus`, an unfocused one is
+/// focused so a key reaches it.
+pub const FRAME_OVERLAY_SCRIPT: &str = "(focus)=>{const foreign=f=>{try{return f.contentDocument===null}catch(e){return true}};const covers=f=>Array.from(document.querySelectorAll('input,textarea,select,button')).some(c=>{const r=c.getBoundingClientRect();return r.width>0&&r.height>0&&document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===f});const overlay=Array.from(document.querySelectorAll('iframe')).find(f=>foreign(f)&&(document.activeElement===f||covers(f)));if(!overlay)return false;if(focus&&document.activeElement!==overlay)overlay.focus();return true}";
+
 /// [`COVERED_CLICK`], naming the covering element as `role "name" (descriptor)`
 /// when it is known. A part that discloses a credential is left out.
 pub fn covered_click(cover: Option<&crate::CoveringElement>) -> String {
