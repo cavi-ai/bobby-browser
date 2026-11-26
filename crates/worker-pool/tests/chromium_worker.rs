@@ -2048,6 +2048,70 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_select_one_verifies_an_option_past_the_snapshot_option_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    let options: String = (0..2000)
+        .map(|index| format!("<option>University {index}</option>"))
+        .collect();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("data:text/html,<label>School <select>{options}</select></label>"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let evidence = worker_pool::input_or_default(worker.input())
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target: types::FormControlTarget {
+                    attributes: Default::default(),
+                    role: "combobox".into(),
+                    accessible_name: "School".into(),
+                    ordinal: None,
+                    frame_path: Vec::new(),
+                    shadow_path: Vec::new(),
+                },
+                action: ControlAction::SelectOne {
+                    value: "University 1500".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        format!("{evidence:?}").contains("University 1500"),
+        "{evidence:?}"
+    );
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_on_an_element_that_is_not_a_form_control_names_the_reason() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

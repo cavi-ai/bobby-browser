@@ -11,6 +11,7 @@
 - A `schemaViolation` inside a nullable argument points at the broken field, so a `text` target or `nearText` hint without a matcher `kind` gets `allowedKinds` `exact`, `contains` and `regex`.
 - Chromium resolves a `css`-only target that matches no action candidate as a CSS selector, so `inspect`, `a11y_snapshot` and element `screenshot` reach landmarks, containers, class and combinator selectors.
 - Chromium element scripts that return `null` decode as null and script exceptions surface as JavaScript errors, so `control_action` on a tab, option or other element outside `form_snapshot` says it is not a form control instead of `call_js_fn_by_value returned no value`.
+- `form_snapshot` and `control_action` read a native select's selected options past the 512-option cap, so `selectOne` on a long select verifies the chosen option.
 
 ## 0.28.0 - 2026-11-23
 
