@@ -319,6 +319,8 @@ pub struct FormSnapshot {
     pub forms: Vec<FormDescriptor>,
     pub unowned_controls: Vec<FormControl>,
     pub truncated: bool,
+    /// Visible page content was still marked busy at the read deadline.
+    pub page_busy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +334,8 @@ struct FormSnapshotWire {
     #[cfg_attr(feature = "schema", schemars(length(max = 512)))]
     unowned_controls: Vec<FormControl>,
     truncated: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    page_busy: bool,
     #[serde(default = "page_derived_true")]
     page_derived: bool,
 }
@@ -353,6 +357,7 @@ impl TryFrom<FormSnapshotWire> for FormSnapshot {
             forms: wire.forms,
             unowned_controls: wire.unowned_controls,
             truncated: wire.truncated,
+            page_busy: wire.page_busy,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -371,6 +376,7 @@ impl Serialize for FormSnapshot {
             forms: self.forms.clone(),
             unowned_controls: self.unowned_controls.clone(),
             truncated: self.truncated,
+            page_busy: self.page_busy,
             page_derived: true,
         }
         .serialize(serializer)

@@ -418,6 +418,9 @@ pub enum InterfaceErrorCode {
     NotFound,
     ResourceExhausted,
     EngineUnreachable,
+    /// A browser command on a page failed; `retryable` says whether the same
+    /// call can succeed when resent.
+    BrowserCommandFailed,
     Internal,
 }
 

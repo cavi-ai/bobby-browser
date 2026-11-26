@@ -175,7 +175,7 @@ function isFormDescriptor(value: unknown, globalIds: Set<string>): value is Form
   return hasExactKeys(value.validity, ["valid", "invalidControlIds"]) && typeof value.validity.valid === "boolean" && Array.isArray(value.validity.invalidControlIds) && value.validity.invalidControlIds.length <= 512 && unique(value.validity.invalidControlIds) && value.validity.invalidControlIds.every((id) => controls.has(id));
 }
 export function isFormSnapshot(value: unknown): value is FormSnapshot {
-  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"], ["pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
+  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"], ["pageDerived", "pageBusy"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || (value.pageBusy !== undefined && typeof value.pageBusy !== "boolean") || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
   const ids = new Set<string>(); const formIds = new Set<string>();
   for (const form of value.forms) { if (!isRecord(form) || typeof form.id !== "string" || formIds.has(form.id) || !isFormDescriptor(form, ids)) return false; formIds.add(form.id); }
   if (value.unownedControls.length + [...value.forms].reduce((n, form) => n + (isRecord(form) && Array.isArray(form.controls) ? form.controls.length : 0), 0) > 512) return false;
@@ -468,7 +468,7 @@ export function isEvidence(value: unknown): value is Evidence {
         && ((value.bytes === null) === (value.sha256 === null))
         && validExecutionPathOptionalFields(value);
     case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
-    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["truncated", "pageDerived"]) && (value.truncated === undefined || value.truncated === true) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
     case "submitSettlement": return hasExactKeys(value, ["kind", "outcome"]) && (value.outcome === "settled" || value.outcome === "validationRejected");
     case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
     case "upload": return hasExactKeys(value, ["kind", "selector", "paths"], ["sha256"]) && isString(value.selector) && isStringArray(value.paths) && optional(value, "sha256", (digests): digests is string[] => Array.isArray(digests) && digests.every(isLowerSha256));

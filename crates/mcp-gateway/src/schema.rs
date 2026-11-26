@@ -1364,8 +1364,9 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["closed"],
         ),
         // `PageState`'s own fields plus `navigationOutcome` (present whenever `url`
-        // was given) and, only if that navigation did not complete, `cleanupOutcome`
-        // and `pageClosed`. Those three are declared but not required.
+        // was given) and, only if that navigation failed for a reason other than
+        // running out of time, `cleanupOutcome` and `pageClosed`. Those three are
+        // declared but not required.
         //
         // Must be inlined into `page_state()`'s `properties`, not `allOf`-ed as a
         // `$ref`: JSON Schema 2020-12 `additionalProperties` is not annotation-aware
@@ -2955,7 +2956,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "inspection",
-            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES))}),
+            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES)),"truncated":{"type":"boolean"}}),
             &["selector", "url", "title", "text", "html"],
         ),
         tagged_fields(

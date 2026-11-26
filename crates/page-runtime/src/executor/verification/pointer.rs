@@ -109,6 +109,7 @@ mod tests {
             title: "Final".into(),
             text: "".into(),
             html: None,
+            truncated: false,
         };
         *fixture.worker.inspection.lock().unwrap() = vec![inspection.clone()];
         let original = Evidence::Element {

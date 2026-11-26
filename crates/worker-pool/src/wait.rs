@@ -353,14 +353,18 @@ pub async fn poll_until(
         })?;
     let mut window = crate::policy::QuietWindow::default();
     let mut observations = 0;
-    let timed_out = || {
-        error(
-            ErrorCode::WaitConditionTimedOut,
-            format!(
-                "wait condition was not satisfied within {}ms",
-                command.timeout_ms
-            ),
-        )
+    // A timeout names the value the last poll read, so the caller sees the
+    // state the page reached.
+    let mut last_observed: Option<String> = None;
+    let timed_out = |last_observed: &Option<String>| {
+        let mut message = format!(
+            "wait condition was not satisfied within {}ms",
+            command.timeout_ms
+        );
+        if let Some(value) = last_observed {
+            message.push_str(&format!("; last observed: {:?}", bound_observed(value)));
+        }
+        error(ErrorCode::WaitConditionTimedOut, message)
     };
     loop {
         observations += 1;
@@ -369,8 +373,11 @@ pub async fn poll_until(
             observer.observe(&command.condition),
         )
         .await
-        .map_err(|_| timed_out())??;
+        .map_err(|_| timed_out(&last_observed))??;
         let poll = match_observation(&command.condition, observation, &mut window)?;
+        if poll.observed.is_some() {
+            last_observed.clone_from(&poll.observed);
+        }
         if poll.satisfied {
             return Ok(vec![Evidence::Wait {
                 condition: command.condition.clone(),
@@ -382,13 +389,7 @@ pub async fn poll_until(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(error(
-                ErrorCode::WaitConditionTimedOut,
-                format!(
-                    "wait condition was not satisfied within {}ms",
-                    command.timeout_ms
-                ),
-            ));
+            return Err(timed_out(&last_observed));
         }
         tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
     }
