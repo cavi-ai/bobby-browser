@@ -292,7 +292,15 @@ impl IntentEngine {
                 execute_fill(intent, page_id, browser, vision, target, value).await
             }
             IntentPlan::CompleteForm { fields } => {
-                execute_complete_form(page_id, browser, vision, fields, prefill_deadline).await
+                execute_complete_form(
+                    page_id,
+                    browser,
+                    vision,
+                    fields,
+                    prefill_deadline,
+                    command_deadline,
+                )
+                .await
             }
             IntentPlan::SubmitAndVerify {
                 target,
@@ -367,13 +375,24 @@ impl IntentEngine {
 /// to become visible after its reveal control is clicked.
 const REVEAL_WAIT_TIMEOUT_MS: u64 = 10_000;
 
+/// The most of the command time a form keeps back so its partial result
+/// returns before the command deadline.
+const COMPLETE_FORM_RETURN_RESERVE: std::time::Duration = std::time::Duration::from_secs(2);
+
 async fn execute_complete_form(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     fields: Vec<CompleteFormFieldPlan>,
     prefill_deadline: Option<tokio::time::Instant>,
+    command_deadline: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
+    // A field still running at the stop time ends the form with the fields
+    // filled so far, instead of the command deadline dropping them all.
+    let stop_at = command_deadline.map(|deadline| {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        deadline - COMPLETE_FORM_RETURN_RESERVE.min(remaining / 10)
+    });
     let mut evidence = Vec::new();
     proactive_prefill(page_id, browser, vision, &fields, prefill_deadline).await;
     for (index, field) in fields.iter().enumerate() {
@@ -424,16 +443,32 @@ async fn execute_complete_form(
             hints: types::IntentHints::default(),
             value: field.value.clone(),
         });
-        match execute_fill(
+        let fill = execute_fill(
             &intent,
             page_id,
             browser,
             vision,
             field.target.clone(),
             field.value.clone(),
-        )
-        .await
-        {
+        );
+        let outcome = match stop_at {
+            Some(stop_at) => match tokio::time::timeout_at(stop_at, fill).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    return IntentOutcome::Failed {
+                        error: failed(CommandError {
+                            code: ErrorCode::DeadlineExceeded,
+                            message: "completeForm reached its deadline".into(),
+                            layer: ErrorLayer::Workflow,
+                            retryable: true,
+                        }),
+                        evidence,
+                    };
+                }
+            },
+            None => fill.await,
+        };
+        match outcome {
             IntentOutcome::Completed {
                 evidence: mut field_evidence,
             } => evidence.append(&mut field_evidence),

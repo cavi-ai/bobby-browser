@@ -8,6 +8,7 @@
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
+- `intent_complete_form` scales its deadline with the text it types and, at the deadline, fails `deadlineExceeded` naming the field it reached with the filled fields' evidence.
 
 ## 0.28.0 - 2026-11-23
 
