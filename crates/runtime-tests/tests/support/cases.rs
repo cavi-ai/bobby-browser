@@ -6577,6 +6577,98 @@ pub async fn button_menus_take_select_one_and_select_many(rig: &Rig) {
     live.close().await;
 }
 
+/// In a frame, a button listbox that commits its highlighted option takes the
+/// exact option named, and a press the listbox ignores is not reported as a
+/// choice, even beside a hidden list of every option.
+pub async fn button_listboxes_commit_the_named_option_and_read_it_back(rig: &Rig) {
+    let form = r#"<div class="field"><div id="degree-label">Degree</div>
+        <button type="button" id="degree" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="degree-label">Select...</button>
+        <select hidden aria-hidden="true"><option>First</option><option>Second</option><option>Third</option><option>Fourth</option></select></div>
+        <div class="field"><div id="level-label">Level</div>
+        <button type="button" id="level" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="level-label">Select...</button>
+        <select hidden aria-hidden="true"><option>Low</option><option>Medium</option><option>High</option></select></div>
+        <ul id="popup" role="listbox" hidden></ul>
+        <script>
+          const popup = document.getElementById("popup");
+          const fields = {
+            degree: ["First", "Second", "Third", "Fourth"],
+            level: ["Low", "Medium", "High"],
+          };
+          const shown = () => {
+            parent.document.getElementById("picked").textContent = Object.keys(fields)
+              .map((id) => `${id}: ${document.getElementById(id).textContent}`).join("; ");
+          };
+          let open = null;
+          let active = 0;
+          const highlight = (index) => {
+            active = index;
+            [...popup.children].forEach((option, at) => option.setAttribute("aria-selected", String(at === index)));
+          };
+          const close = () => {
+            popup.hidden = true;
+            open?.setAttribute("aria-expanded", "false");
+            open = null;
+          };
+          const commit = () => {
+            open.textContent = fields[open.id][active];
+            close();
+            shown();
+          };
+          for (const id of Object.keys(fields)) {
+            const button = document.getElementById(id);
+            button.addEventListener("click", () => {
+              if (open) { close(); return; }
+              open = button;
+              popup.innerHTML = "";
+              fields[id].forEach((name, index) => {
+                const option = document.createElement("li");
+                option.setAttribute("role", "option");
+                option.textContent = name;
+                if (id === "degree") option.addEventListener("mousemove", () => highlight(index));
+                popup.append(option);
+              });
+              highlight(0);
+              popup.hidden = false;
+              button.setAttribute("aria-expanded", "true");
+            });
+          }
+          popup.addEventListener("click", () => { if (open?.id === "degree") commit(); });
+          popup.addEventListener("keydown", (event) => { if (event.key === "Enter") commit(); });
+          shown();
+        </script>"#;
+    let body = r#"<iframe title="Profile" src="/listbox-form" style="width:400px;height:300px"></iframe><p id="picked"></p>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/listbox", Route::Html(page("Listbox", body))),
+        ("/listbox-form", Route::Html(page("Listbox form", form))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/listbox")).await;
+    let picked = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the degree",
+                   "hints":{"role":"button","accessibleName":"Degree"},
+                   "value":{"kind":"selectOne","value":"Third"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let ignored = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose the level",
+                   "hints":{"role":"button","accessibleName":"Level"},
+                   "value":{"kind":"selectOne","value":"High"}}),
+        )
+        .await;
+    assert_ne!(ignored["status"], "completed", "{ignored}");
+    let page = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&page, "degree: Third; level: Select..."),
+        "{page}"
+    );
+    live.close().await;
+}
+
 /// A text box whose suggestions carry no role takes selectOne: the suggestion
 /// reading the value is pressed, so the field keeps it after it loses focus.
 pub async fn text_boxes_pick_a_suggestion_without_a_role(rig: &Rig) {
@@ -6703,6 +6795,82 @@ pub async fn a_combobox_without_the_value_lists_its_options(rig: &Rig) {
         page_text_contains(&page, "Area: Another region in the country"),
         "{page}"
     );
+    live.close().await;
+}
+
+/// A multiselect search box that searches on Enter takes selectOne: the value
+/// is typed, Enter runs the search without submitting the form, and the
+/// checkbox option reading the value is chosen.
+pub async fn a_search_on_enter_multiselect_takes_select_one(rig: &Rig) {
+    let body = r#"<form action="/submitted"><label id="topics-label" for="topics">Topics</label>
+        <span id="chips"></span>
+        <input id="topics" type="text" role="combobox" aria-labelledby="topics-label" aria-autocomplete="list"
+          aria-controls="topic-results" aria-expanded="false" autocomplete="off" placeholder="Search">
+        <div id="topic-results" role="listbox" aria-multiselectable="true"></div>
+        <button type="submit">Save</button></form><p id="picked"></p>
+        <script>
+          const input = document.getElementById("topics");
+          const results = document.getElementById("topic-results");
+          const chips = document.getElementById("chips");
+          const topics = ["Art history", "History", "Geography", "Mathematics"];
+          const chosen = new Set();
+          let typedAt = 0;
+          const show = () => {
+            chips.textContent = [...chosen].join(", ");
+            document.getElementById("picked").textContent = `Topics: ${[...chosen].join(", ")}`;
+          };
+          input.addEventListener("input", () => {
+            typedAt = Date.now();
+            results.innerHTML = "";
+            input.setAttribute("aria-expanded", "false");
+          });
+          input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            if (Date.now() - typedAt < 300) return;
+            const query = input.value.toLowerCase();
+            results.innerHTML = "";
+            for (const name of topics.filter((topic) => topic.toLowerCase().includes(query))) {
+              const option = document.createElement("div");
+              option.setAttribute("role", "option");
+              option.setAttribute("aria-selected", String(chosen.has(name)));
+              const box = document.createElement("input");
+              box.type = "checkbox";
+              box.tabIndex = -1;
+              box.checked = chosen.has(name);
+              const text = document.createElement("span");
+              text.textContent = name;
+              option.append(box, text);
+              option.addEventListener("click", () => {
+                chosen.has(name) ? chosen.delete(name) : chosen.add(name);
+                option.setAttribute("aria-selected", String(chosen.has(name)));
+                box.checked = chosen.has(name);
+                show();
+              });
+              results.append(option);
+            }
+            input.setAttribute("aria-expanded", "true");
+          });
+          show();
+        </script>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/topics", Route::Html(page("Topics", body))),
+        ("/submitted", Route::Html(page("Submitted", "<p>Saved</p>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/topics")).await;
+    let picked = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"choose a topic",
+                   "hints":{"role":"combobox","accessibleName":"Topics"},
+                   "value":{"kind":"selectOne","value":"History"}}),
+        )
+        .await;
+    assert_eq!(picked["status"], "completed", "{picked}");
+    let page = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Topics: History"), "{page}");
+    assert!(!page_text_contains(&page, "Saved"), "{page}");
     live.close().await;
 }
 

@@ -718,7 +718,8 @@ impl ResolvedTarget {
 
     /// Chooses the option of an ARIA combobox, menu button or text box whose
     /// text is `value` (ignoring case and spacing): types `value` to filter it
-    /// when it takes text, else opens it, waits for that option (or, with no
+    /// when it takes text, pressing Enter once when that lists nothing, else
+    /// opens it, waits for that option (or, with no
     /// option roles, a newly shown element reading `value`), presses it, and
     /// returns the option text once the control or its menu shows it. With no
     /// such option the error lists every option the control offers.
@@ -738,7 +739,8 @@ impl ResolvedTarget {
         let find = format!(
             "const wanted={wanted}; {COMBOBOX_OPTIONS} {COMBOBOX_ROLELESS} {COMBOBOX_PICK} {COMBOBOX_OPTION_FOUND}"
         );
-        let started = Instant::now();
+        let mut started = Instant::now();
+        let mut searched = false;
         let option = loop {
             let found: ComboboxOption = self.eval(page, &find).await?;
             let wait = if found.loading {
@@ -748,6 +750,17 @@ impl ResolvedTarget {
             };
             if found.text.is_some() || started.elapsed() >= wait {
                 break found;
+            }
+            // A search box that lists nothing for the typed text may search on Enter.
+            if takes_text
+                && !searched
+                && !found.loading
+                && found.shown.is_empty()
+                && started.elapsed() >= COMBOBOX_SEARCH_WAIT
+            {
+                self.eval::<bool>(page, COMBOBOX_SEARCH_SCRIPT).await?;
+                searched = true;
+                started = Instant::now();
             }
             tokio::time::sleep(COMBOBOX_POLL).await;
         };
@@ -1101,6 +1114,8 @@ const COMBOBOX_OPTION_WAIT: Duration = Duration::from_secs(3);
 /// How long a combobox that shows only a loading state may take to list options.
 const COMBOBOX_LOADING_WAIT: Duration = Duration::from_secs(15);
 const COMBOBOX_POLL: Duration = Duration::from_millis(100);
+/// How long typed text may list nothing before Enter is pressed to search.
+const COMBOBOX_SEARCH_WAIT: Duration = Duration::from_secs(1);
 const COMBOBOX_SETTLE_READS: usize = 10;
 const COMBOBOX_SETTLE_POLL: Duration = Duration::from_millis(50);
 
@@ -1150,6 +1165,10 @@ fn option_json(value: &str) -> Result<String, CommandError> {
 /// Function body with `el` bound: whether the combobox is a text field.
 const COMBOBOX_TAKES_TEXT_SCRIPT: &str = "return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable;";
 
+/// Function body with `el` bound: the Enter key events a search field runs
+/// its search on; untrusted, so they never submit the field's form.
+const COMBOBOX_SEARCH_SCRIPT: &str = "const view=el.ownerDocument.defaultView; for(const type of ['keydown','keypress','keyup']) el.dispatchEvent(new KeyboardEvent(type,{key:'Enter',code:'Enter',keyCode:13,which:13,charCode:type==='keypress'?13:0,bubbles:true,cancelable:true,composed:true,view})); return true;";
+
 /// Function body with `el` bound: records the elements shown before the
 /// control is typed into or opened, so suggestions without option roles can
 /// be told apart from the page around them.
@@ -1180,9 +1199,10 @@ const COMBOBOX_OPTION_POINT: &str = "if(!match) return {x:0,y:0,hit:false}; cons
 /// option per line so adjacent options never run together.
 const LISTED_TEXT_SCRIPT: &str = "const items=el.matches('[role=\"listbox\"],[role=\"menu\"]')?[...el.querySelectorAll('[role=\"option\"],[role=\"menuitem\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"]')]:[]; return items.length?items.map(o=>String(o.innerText||o.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).join('\\n'):(el.innerText||'');";
 
-/// After [`COMBOBOX_PICK`]: presses the matching option with the pointer
-/// and mouse events a person's click fires.
-const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); for(const type of ['pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{bubbles:true,cancelable:true,composed:true,view:doc.defaultView}))} return true;";
+/// After [`COMBOBOX_PICK`]: hovers, then presses the matching option with the
+/// pointer and mouse events a person's click fires, so a list that commits
+/// its highlighted option commits this one.
+const COMBOBOX_OPTION_PRESS: &str = "if(!match) throw new Error('the combobox option is gone'); const r=match.getBoundingClientRect(); const at={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; for(const type of ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove','pointerdown','mousedown','pointerup','mouseup','click']){const E=type.startsWith('pointer')?PointerEvent:MouseEvent; match.dispatchEvent(new E(type,{...at,bubbles:!type.endsWith('enter'),cancelable:true,composed:true,view:doc.defaultView}))} return true;";
 
 /// After the option lists: the texts of every option offered.
 const COMBOBOX_OFFERED: &str =
@@ -1197,9 +1217,9 @@ const COMBOBOX_ITEMS_STATE: &str = "const key=s=>norm(s).toLowerCase(); const wa
 const COMBOBOX_MENU_OPEN_SCRIPT: &str = "if(el.getAttribute('aria-expanded')==='false') return false; const visible=o=>{const r=o.getBoundingClientRect(); return r.width>0&&r.height>0&&getComputedStyle(o).visibility!=='hidden'}; return [...el.ownerDocument.querySelectorAll('[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"],[role=\"option\"]')].some(visible);";
 
 /// Function body with `el` and `chosen` bound: whether the control, a menu
-/// item checked for the chosen text, or the nearest ancestor of the control
-/// that holds no option shows the chosen text.
-const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); const compact=s=>s.replace(/\\s/g,''); if(!norm(own)&&shown&&(words(shown).every(w=>words(norm(chosen)).includes(w))||compact(norm(chosen)).includes(compact(shown)))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.textContent); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
+/// item checked for the chosen text, or the rendered text of the nearest
+/// ancestor of the control that holds no option shows the chosen text.
+const COMBOBOX_SHOWS_SCRIPT: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ').trim().toLowerCase(); const items='[role=\"option\"],[role=\"menuitemradio\"],[role=\"menuitemcheckbox\"],[role=\"menuitem\"]'; const own=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)?el.value:el.textContent; if(norm(own)===norm(chosen)) return {chosen:true,value:norm(own)}; if([...el.ownerDocument.querySelectorAll(items)].some(o=>o.getAttribute('aria-checked')==='true'&&norm(o.textContent)===norm(chosen))) return {chosen:true,value:norm(chosen)}; const shown=norm(shownValue(el)); const words=s=>s.split(' ').filter(Boolean); const compact=s=>s.replace(/\\s/g,''); if(!norm(own)&&shown&&(words(shown).every(w=>words(norm(chosen)).includes(w))||compact(norm(chosen)).includes(compact(shown)))) return {chosen:true,value:shown}; let node=el.parentElement; for(let hop=0; node&&hop<3; hop++, node=node.parentElement){ if(node.querySelector(items)) break; const text=norm(node.innerText); if(text.length<=norm(chosen).length+200 && text.includes(norm(chosen))) return {chosen:true,value:text}; } return {chosen:false,value:norm(own)};";
 
 /// Function body with `el` bound: the page rectangle to capture for `el`,
 /// scrolled into view. An element under 4 px a side (a hidden file input)
