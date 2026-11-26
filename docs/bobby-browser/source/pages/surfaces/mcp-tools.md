@@ -123,6 +123,8 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `wait_for` | `condition` and `timeoutMs` (both required). A `waitConditionTimedOut` message ends with the text, value, URL or ready state the last poll read, as does an `upload_files` or intent `expectedState` wait that times out |
 | `extract_structured` | `schema` (required), `purpose`. Needs `executionPolicy.visionAssist` |
 
+On Chromium, `inspect` and `form_snapshot` wait up to 2 seconds while a rendered element is marked `aria-busy="true"`. A read the page still marks as loading adds `pageBusy` configuration evidence; read again.
+
 `wait_for` conditions are objects with a `kind`:
 
 | `kind` | Fields |

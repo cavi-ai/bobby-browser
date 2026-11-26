@@ -2842,6 +2842,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let url = page
             .url()
             .await
@@ -2914,6 +2915,9 @@ impl crate::ObservationEngine for ChromiumWorker {
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
+        }
+        if !settled {
+            evidence.push(page_busy_evidence());
         }
         Ok(evidence)
     }
@@ -3103,6 +3107,7 @@ impl crate::ObservationEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let max_controls = max_controls.unwrap_or(512) as usize;
         let page = self.page_handle(page_id).await?;
+        let settled = settle_busy_content(&page).await;
         let value: serde_json::Value = page
             .evaluate(crate::form_snapshot_expression_with_limit(
                 page_id,
@@ -3119,7 +3124,11 @@ impl crate::ObservationEngine for ChromiumWorker {
             )
         })?;
         let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
-        Ok(vec![Evidence::FormSnapshot { snapshot }])
+        let mut evidence = vec![Evidence::FormSnapshot { snapshot }];
+        if !settled {
+            evidence.push(page_busy_evidence());
+        }
+        Ok(evidence)
     }
 
     async fn collect_candidates(
@@ -4957,6 +4966,39 @@ async fn current_page(page: &Page) -> Option<(String, String)> {
     let url = page.url().await.ok()??;
     let title = page.get_title().await.ok()?.unwrap_or_default();
     Some((url, title))
+}
+
+/// Longest a page read waits for content the page marks as loading.
+const READ_BUSY_CAP: Duration = Duration::from_secs(2);
+
+/// Waits until no rendered element carries `aria-busy="true"`, up to
+/// [`READ_BUSY_CAP`]. `false` when the page was still busy at the cap.
+async fn settle_busy_content(page: &Page) -> bool {
+    let expression = format!(
+        "new Promise(resolve=>{{const end=Date.now()+{};\
+const busy=()=>[...document.querySelectorAll('[aria-busy=\"true\"]')]\
+.some(el=>el.checkVisibility?el.checkVisibility():true);\
+const tick=()=>{{if(!busy())return resolve(true);\
+if(Date.now()>=end)return resolve(false);setTimeout(tick,50)}};tick()}})",
+        READ_BUSY_CAP.as_millis()
+    );
+    match tokio::time::timeout(
+        READ_BUSY_CAP + Duration::from_secs(1),
+        page.evaluate(expression),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.into_value::<bool>().unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Evidence that a read returned content the page still marked as loading.
+fn page_busy_evidence() -> Evidence {
+    Evidence::Configuration {
+        name: "pageBusy".into(),
+        value: "true: the page still marked content as loading (aria-busy) when it was read; read again".into(),
+    }
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {

@@ -2715,6 +2715,96 @@ async fn a_covered_click_names_the_covering_element() {
     worker.close().await.unwrap();
 }
 
+/// A read taken while the page marks its content as loading (`aria-busy`)
+/// waits for the mark to clear and returns the content that replaced it.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn inspect_and_form_snapshot_wait_for_a_busy_step_to_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    // Each read starts while the step is busy; the next step replaces it 800ms later.
+    let busy_step = concat!(
+        "data:text/html,<main><p>Step 1 of 2</p><label>Name <input name=first></label></main>",
+        "<script>window.advance=(step,field)=>{const main=document.querySelector('main');",
+        "main.setAttribute('aria-busy','true');setTimeout(()=>{",
+        "main.innerHTML='<p>'+step+'</p><label>'+field+' <input name=next></label>';",
+        "main.removeAttribute('aria-busy')},800)};advance('Step 2 of 2','City');</script>"
+    );
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: busy_step.into(),
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let observation = worker_pool::observation_or_default(worker.observation());
+    let evidence = observation
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("main".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Evidence::Inspection { text, .. }) = evidence.first() else {
+        panic!("inspect returned no inspection: {evidence:?}");
+    };
+    assert!(text.contains("Step 2 of 2"), "read the busy step: {text}");
+
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "(() => {advance('Review','Country'); return true})()".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = observation.form_snapshot(&page_id, None).await.unwrap();
+    let Some(Evidence::FormSnapshot { snapshot }) = evidence.first() else {
+        panic!("form_snapshot returned no snapshot: {evidence:?}");
+    };
+    let labels: Vec<_> = snapshot
+        .unowned_controls
+        .iter()
+        .chain(snapshot.forms.iter().flat_map(|form| form.controls.iter()))
+        .filter_map(|control| control.accessible_name.clone().or(control.label.clone()))
+        .collect();
+    assert!(
+        labels.iter().any(|label| label.contains("Country")),
+        "read the busy step's controls: {labels:?}"
+    );
+
+    worker.close().await.unwrap();
+}
+
 /// Page text lists the values of filled form fields under a marked section,
 /// and leaves out passwords, one-time codes, saved-password fields and any
 /// field named as a secret.
