@@ -1162,7 +1162,8 @@ const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ')
 
 /// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
 /// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
-const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&row(n)); }";
+/// Live regions and visually hidden text are announcements, not rows.
+const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; const spoken=n=>{const r=n.getBoundingClientRect(); return r.width<=1||r.height<=1||Boolean(n.closest('[aria-live],[role=\"status\"],[role=\"alert\"],[role=\"log\"]'))}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&!spoken(n)&&row(n)); }";
 
 /// With `wanted` bound, after the option lists: the option whose text is
 /// `wanted`, exactly, else ignoring case.
