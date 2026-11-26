@@ -499,6 +499,38 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Presses Escape on another focused, expanded control outside a dialog.
+    /// Returns whether Escape was sent so the caller can check the new state.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<bool, CommandError> {
+        let open = self
+            .eval::<bool>(
+                page,
+                r#"
+                const doc = el.ownerDocument;
+                if (!doc.hasFocus()) return false;
+                let active = doc.activeElement;
+                while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+                if (!active || active === el || el.contains(active) || active.contains(el) ||
+                    active.getAttribute('aria-expanded') !== 'true') return false;
+
+                // A trusted Escape can cancel the dialog even if it targets a child.
+                const dialog = 'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]';
+                for (let node = active; node; node = node.parentNode || node.host) {
+                    if (node.matches?.(dialog)) return false;
+                }
+                return !doc.querySelector('dialog:modal');
+                "#,
+            )
+            .await?;
+        if open {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+        }
+        Ok(open)
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {

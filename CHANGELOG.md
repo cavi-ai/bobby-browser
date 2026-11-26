@@ -8,6 +8,9 @@
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
+- A replacing `setText` with single-line text can retry once after a mismatched read-back if the resolved control still supports the action and is editable.
+- Chromium `setText` can close a popup held open by another focused control outside dialogs before typing into a reachable field.
+- `intent_complete_form` scales its deadline with the text it types. If a fill or reveal step reaches the deadline, it returns `deadlineExceeded` with the current field name and evidence from earlier fills and completed reveal clicks.
 - A `schemaViolation` inside a nullable argument points at the broken field, so a `text` target or `nearText` hint without a matcher `kind` gets `allowedKinds` `exact`, `contains` and `regex`.
 - Chromium resolves a `css`-only target that matches no action candidate as a CSS selector, so `inspect`, `a11y_snapshot` and element `screenshot` reach landmarks, containers, class and combinator selectors.
 - Chromium element scripts that return `null` decode as null and script exceptions surface as JavaScript errors, so `control_action` on a tab, option or other element outside `form_snapshot` says it is not a form control instead of `call_js_fn_by_value returned no value`.
