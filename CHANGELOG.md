@@ -13,6 +13,7 @@
 - Chromium element scripts that return `null` decode as null and script exceptions surface as JavaScript errors, so `control_action` on a tab, option or other element outside `form_snapshot` says it is not a form control instead of `call_js_fn_by_value returned no value`.
 - `form_snapshot` and `control_action` read a native select's selected options past the 512-option cap, so `selectOne` on a long select verifies the chosen option.
 - The `recovery_status` output schema accepts the session listing `{sessionId, workflows}` with workflow ids, so MCP clients that validate output no longer reject it.
+- The MCP tools reference names the Rust `regex` syntax of `regex` matchers and states that `download_url` `saveAs` names a file directly in the downloads directory.
 
 ## 0.28.0 - 2026-11-23
 
