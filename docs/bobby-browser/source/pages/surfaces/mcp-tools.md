@@ -82,7 +82,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `pdf` | `browser:mutate` | Print a page to a PDF artifact |
 | `recovery_status` | `recovery:read` | Read a workflow's checkpoint and receipts |
 | `runtime_info` | `session:read` | Runtime version, active sessions, sessions lost when the previous runtime stopped (`lostSessions`), credential expiry |
-| `screenshot` | `browser:mutate` | Screenshot artifact |
+| `screenshot` | `browser:mutate` (+ `file:download` with `saveAs`) | Screenshot artifact |
 | `session_capabilities` | `session:read` | Observe an owned session's engine-option support, grants, policy, and connection state |
 | `session_close` | `session:write` | Close a session and release its browser |
 | `session_create` | `session:write` | Create a session |
@@ -102,7 +102,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 
 | Tool | Parameters |
 |---|---|
-| `session_create`, `workflow_start` | `profile` (required), `proxy`, `executionPolicy`, `zigzagzig`; `workflow_start` also takes `url` |
+| `session_create`, `workflow_start` | `profile` (required), `proxy`, `executionPolicy`, `zigzagzig`; `workflow_start` also takes `url` and `callerKey` (1 to 128 characters) |
 | `page_open` | `sessionId` (required), `url`. With `url` the result includes `navigationOutcome`. A load that runs out of time keeps the page open; any other failed load closes it and sets `pageClosed` |
 | `page_list`, `page_close`, `page_activate` | `sessionId`, `pageId` or `workflowHandle` |
 | `toolset_select` | `toolset`: `explore`, `act`, `intent`, `verify` or `full` |
@@ -116,7 +116,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `a11y_snapshot` | `maxNodes` 1 to 2048 (default 256), `target` to scope. See [Accessibility snapshot](../guides/accessibility-snapshot.md) |
 | `form_snapshot` | `maxControls` 1 to 512. Passwords are redacted |
 | `inspect` | `selector` or `target`, `includeHtml`. On Chromium, whole-page text is cut at 65,536 characters and the inspection is marked `truncated: true`; scope the read with `selector` or `target` for the rest. Page text ends with a `Form field values:` section listing filled fields as `Name: "value"`; passwords, one-time codes, card data and fields named as secrets are left out |
-| `screenshot` | `mode`: viewport, full page or element. `maxEdge` shrinks the stored image to that many pixels on its longest side |
+| `screenshot` | `mode`: viewport, full page or element. `maxEdge` shrinks the stored image to that many pixels on its longest side. `saveAs` also saves the image, with `download_url`'s `saveAs` rules |
 | `pdf` | `landscape`, `printBackground`, `scale` 0.1 to 2.0, `pageRanges` |
 | `network_log` | `clear`. Recording starts at the first call; `clear: false` keeps the buffer |
 | `context_ask`, `context_neighbors` | `description` (required, up to 256 bytes) |
@@ -157,7 +157,11 @@ On Chromium, `inspect` and `form_snapshot` wait up to 2 seconds while a rendered
 
 `click`, `type_text` and `upload_files` take either a CSS `selector` or a `target` of the form `{role, accessibleName, ordinal}`. Pass snapshot targets unchanged.
 
+`navigate`, `page_open` and `workflow_start` open `http`, `https` and `data` URLs, and `file` URLs only when [`[http].allow_file_urls`](../guides/configuration.md#http) is `true`. Any other scheme fails with "navigation URL scheme is not supported".
+
 On Chromium, `navigate` with `waitUntil: "commit"` returns the committed URL with an empty title. Use `domContentLoaded` when the title matters. `interactive` adds a document settling check after `DOMContentLoaded`, and `networkIdle` waits for network idle before settling. See [Firefox navigation](../guides/firefox-companion.md#navigation) for its readiness behavior.
+
+A `callerKey` passed to `workflow_start` ties later results on that session to your job. Each `screenshot`, `checkpoint_save` and `intent_submit_and_verify` result then carries `evidenceKey` with the `callerKey`, the page `url` when observed, and the `sha256` of the result's screenshot (`null` when it has none). A `screenshot` with `saveAs` requires `file:download` and returns `savedTo`. A refused path, such as an existing file, fails the call with `policyDenied`.
 
 `download_url` saves under the configured downloads directory, which the advertised `saveAs` description names. `saveAs` must be a filename or an absolute path directly in that directory. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. The transfer requires equivalent HTTP cookie state and enforces destination policy on every redirect. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
 

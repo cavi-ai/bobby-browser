@@ -4,6 +4,11 @@
 
 ### Added
 
+- `intent_detect_challenge` classifies a Turnstile widget as its own `turnstile` challenge type.
+- `[http].allow_file_urls` lets `navigate` and `workflow_start` open `file://` URLs for local previews; it is off by default.
+- `intent_submit_and_verify` fails `verificationLinkRequired` on a page that asks to confirm an email address through a link, and `confirmedOutsideExpectedState` when the page reads as a confirmation but `expectedState` missed.
+- `workflow_start` takes `callerKey`; later `screenshot`, `checkpoint_save` and `intent_submit_and_verify` results on its session carry `evidenceKey` with the key, page URL and screenshot `sha256`, and `screenshot` takes `saveAs`.
+- The TypeScript SDK accepts the `turnstile` challenge type and the `verificationLinkRequired` and `confirmedOutsideExpectedState` error codes.
 - A listed Chromium profile with `"systemKeychain": true` launches its Chrome with the system keychain and password store instead of the mock keychain.
 - `runtime_info.lostSessions` names the sessions and pages the previous runtime held when it stopped.
 - `download_url` advertises the downloads root that `saveAs` resolves against in its `saveAs` description.

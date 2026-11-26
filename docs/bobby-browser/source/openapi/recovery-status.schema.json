@@ -2538,13 +2538,22 @@
       ]
     },
     "ChallengeType": {
-      "type": "string",
-      "enum": [
-        "recaptchaV2Checkbox",
-        "recaptchaV3",
-        "textCaptcha",
-        "imageGridCaptcha",
-        "mfaCodeEntry"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "recaptchaV2Checkbox",
+            "recaptchaV3",
+            "textCaptcha",
+            "imageGridCaptcha",
+            "mfaCodeEntry"
+          ]
+        },
+        {
+          "description": "A Turnstile \"verify you are human\" widget.",
+          "type": "string",
+          "const": "turnstile"
+        }
       ]
     },
     "ChallengeRegion": {
@@ -2815,7 +2824,9 @@
         "visionAssistFailed",
         "expectedStatePreSatisfied",
         "boundaryAlreadyExecuted",
-        "verificationCodeRequired"
+        "verificationCodeRequired",
+        "verificationLinkRequired",
+        "confirmedOutsideExpectedState"
       ]
     },
     "RecoveryRecord": {

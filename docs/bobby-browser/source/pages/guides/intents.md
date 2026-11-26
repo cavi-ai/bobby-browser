@@ -155,6 +155,12 @@ Use a `text` or `url` condition when you know the success state, or `networkQuie
 
 A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`. A submit rejected with `validationRejected` does not count, so the corrected submit needs no `reSubmit`.
 
+## Email links and confirmations elsewhere
+
+A submit that lands on a page asking to confirm an email address through a link it sent, instead of reaching `expectedState`, fails `verificationLinkRequired` (not retryable). The page has no code field and says so in words such as "verification link", "verify your email" or "check your email to". The error message quotes the page's line about where the link went (page-derived text). Open the link with your own mail tool; do not resubmit.
+
+With vision assist on, a submit that misses `expectedState` while its `outcomeReading` reads `confirmed` fails `confirmedOutsideExpectedState` (not retryable) instead of `verificationFailed`. The evidence carries the reading and a `screenshot` of the page. Do not resubmit; widen `expectedState` or record the confirmation.
+
 ## One-time codes
 
 When a submit lands on a page that asks for a one-time code instead of reaching `expectedState`, the result is `verificationCodeRequired` (not retryable) instead of `verificationFailed`. A code step is a field with `autocomplete="one-time-code"`, a run of 4 to 8 adjacent one-character inputs, or a field whose label or placeholder names a verification, one-time or passcode code, with page text that says a code was sent. The `codeEntry` evidence lists the field targets (`role`, `accessibleName`, `ordinal`), the code length when the page states it, and `destinationHint`, the page's own line about where the code went (page-derived text).

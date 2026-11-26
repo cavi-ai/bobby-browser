@@ -742,8 +742,7 @@ impl PendingDownload {
     }
 
     pub fn commit(self) -> Result<CommittedDownload, CommandError> {
-        self.root
-            .publish(&self.record, &self.filename, &self.sha256, self.bytes)?;
+        self.publish()?;
         Ok(CommittedDownload {
             root: self.root,
             record: self.record,
@@ -753,12 +752,36 @@ impl PendingDownload {
     pub fn discard(self) {
         let _ = self.root.cleanup(&self.record);
     }
+
+    fn publish_unjournaled(self) -> Result<(), CommandError> {
+        let publication = self.publish();
+        let cleanup = self.root.cleanup(&self.record);
+        publication.and(cleanup)
+    }
+
+    fn publish(&self) -> Result<(), CommandError> {
+        self.root
+            .publish(&self.record, &self.filename, &self.sha256, self.bytes)
+    }
 }
 
 impl CommittedDownload {
     pub fn cleanup(self) -> Result<(), CommandError> {
         self.root.cleanup(&self.record)
     }
+}
+
+/// Writes `bytes` to `save_as` under the rules of `download_url` `saveAs`: a
+/// new file directly below `downloads_root`, given relative to it or as an
+/// absolute path inside it.
+pub async fn save_file_as(
+    downloads_root: &Path,
+    save_as: &str,
+    staging_id: &types::CommandId,
+    bytes: &[u8],
+) -> Result<(), CommandError> {
+    let destination = DownloadDestination::validate(downloads_root, save_as, staging_id).await?;
+    destination.stage(bytes).await?.publish_unjournaled()
 }
 
 impl SecureDownloadRoot {
@@ -2435,6 +2458,29 @@ mod tests {
 
         assert!(!secure.exists(&staging).unwrap());
         assert!(!secure.exists(&metadata).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_unjournaled_publication_removes_only_its_own_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let command_id = types::CommandId::new();
+        let pending = super::DownloadDestination::validate(root.path(), "capture.png", &command_id)
+            .await
+            .unwrap()
+            .stage(b"staged screenshot")
+            .await
+            .unwrap();
+        let staging_id = &pending.record().staging_id;
+        let staging = root.path().join(staging_name(staging_id).unwrap());
+        let metadata = root.path().join(metadata_name(staging_id).unwrap());
+        let dest = root.path().join("capture.png");
+        std::fs::write(&dest, b"winning screenshot").unwrap();
+
+        assert!(pending.publish_unjournaled().is_err());
+        assert!(!staging.exists(), "staging file still exists");
+        assert!(!metadata.exists(), "staging metadata still exists");
+        assert_eq!(std::fs::read(dest).unwrap(), b"winning screenshot");
     }
 
     #[cfg(unix)]

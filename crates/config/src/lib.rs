@@ -508,6 +508,9 @@ impl AppConfig {
 pub struct HttpConfig {
     pub allow_loopback: bool,
     pub allow_private_network: bool,
+    /// Lets `navigate` open `file://` URLs, for local previews. Off by
+    /// default: navigation accepts only `http`, `https` and `data` URLs.
+    pub allow_file_urls: bool,
     pub max_redirects: usize,
     pub max_header_bytes: usize,
     pub max_body_bytes: usize,
@@ -521,6 +524,7 @@ impl Default for HttpConfig {
         Self {
             allow_loopback: false,
             allow_private_network: false,
+            allow_file_urls: false,
             max_redirects: 5,
             max_header_bytes: 64 * 1024,
             max_body_bytes: 8 * 1024 * 1024,

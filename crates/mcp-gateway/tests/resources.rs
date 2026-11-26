@@ -241,6 +241,7 @@ async fn fixture_with(
         catalog_entries,
         ONE_PIXEL_PNG.to_vec(),
         4096,
+        true,
     )
     .await
 }
@@ -251,6 +252,7 @@ async fn fixture_capturing(
     catalog_entries: usize,
     png: Vec<u8>,
     max_bytes: usize,
+    allow_file_download: bool,
 ) -> (Server, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let artifacts = ArtifactStore::new(root.path().join("artifacts"), max_bytes, 4096);
@@ -274,18 +276,21 @@ async fn fixture_capturing(
         PageRuntime::new(journal, workers),
     );
     let authority = AuthorityStore::with_capacity(1);
+    let mut capabilities = vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::ArtifactRead,
+        Capability::ArtifactCapture,
+    ];
+    if allow_file_download {
+        capabilities.push(Capability::FileDownload);
+    }
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000026")),
-            [
-                Capability::SessionRead,
-                Capability::SessionWrite,
-                Capability::PageWrite,
-                Capability::BrowserMutate,
-                Capability::FileDownload,
-                Capability::ArtifactRead,
-                Capability::ArtifactCapture,
-            ],
+            capabilities,
             types::WireTimestamp::now() + Duration::from_hours(1),
         )
         .await
@@ -671,6 +676,40 @@ async fn screenshot_result_includes_the_verified_image() {
     assert_eq!(bytes, ONE_PIXEL_PNG);
 }
 
+#[tokio::test]
+async fn screenshot_save_as_requires_file_download_but_plain_capture_does_not() {
+    let (server, root) = fixture_capturing(1, 8, ONE_PIXEL_PNG.to_vec(), 4096, false).await;
+    let (session_id, page_id) = create_session_page(&server).await;
+    let args = json!({"sessionId": session_id, "pageId": page_id});
+    let capture = server
+        .handle_message(request(
+            4,
+            "tools/call",
+            json!({"name": "screenshot", "arguments": args}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        capture["result"]["structuredContent"]["status"], "completed",
+        "{capture}"
+    );
+
+    let mut export_args = args;
+    export_args["saveAs"] = json!("capture.png");
+    let denied = server
+        .handle_message(request(
+            5,
+            "tools/call",
+            json!({"name": "screenshot", "arguments": export_args}),
+        ))
+        .await
+        .unwrap();
+    let error = &denied["error"]["data"]["interfaceError"];
+    assert_eq!(error["code"], "missingCapability", "{denied}");
+    assert_eq!(error["requiredCapability"], "file:download", "{denied}");
+    assert!(!root.path().join("downloads/capture.png").exists());
+}
+
 /// A screenshot too large to inline still returns an image: a downscaled
 /// preview under the inline limit whose scale the result names, beside the
 /// link to the full-size artifact.
@@ -696,7 +735,7 @@ async fn an_oversized_screenshot_inlines_a_downscaled_preview() {
     let inline_limit = 768 * 1024;
     assert!(full.len() * 4 / 3 > inline_limit);
 
-    let (server, _root) = fixture_capturing(1, 8, full, 16 * 1024 * 1024).await;
+    let (server, _root) = fixture_capturing(1, 8, full, 16 * 1024 * 1024, true).await;
     let captured = execute_screenshot(&server).await;
     let content = captured["result"]["content"].as_array().unwrap();
     let image = content
@@ -750,7 +789,7 @@ async fn screenshots_past_the_frame_limit_stay_links() {
     assert!(png.len() * 4 / 3 <= 768 * 1024);
     assert!(3 * png.len() * 4 / 3 > mcp_gateway::protocol::MAX_FRAME_BYTES);
 
-    let (server, _root) = fixture_capturing(3, 8, png, 16 * 1024 * 1024).await;
+    let (server, _root) = fixture_capturing(3, 8, png, 16 * 1024 * 1024, true).await;
     let captured = execute_screenshot(&server).await;
     let frame = serde_json::to_vec(&captured).unwrap().len();
     assert!(

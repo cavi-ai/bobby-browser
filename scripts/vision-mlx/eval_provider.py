@@ -263,6 +263,7 @@ CHALLENGE_PURPOSE = "Check whether this page shows a captcha or verification cha
 # runtime fails a detection naming any other type.
 CHALLENGE_TYPES = frozenset((
     "recaptchaV2Checkbox", "recaptchaV3", "textCaptcha", "imageGridCaptcha", "mfaCodeEntry",
+    "turnstile",
 ))
 
 

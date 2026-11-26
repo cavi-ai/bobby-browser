@@ -556,7 +556,8 @@ pub(crate) fn screenshot_schema() -> (Value, Vec<&'static str>) {
             "sessionId": id(),
             "pageId": id(),
             "mode": {"$ref":"#/$defs/ScreenshotMode"},
-            "maxEdge": {"type":"integer","minimum":1,"description":"Shrink the stored image so its longest side is at most this many pixels."}
+            "maxEdge": {"type":"integer","minimum":1,"description":"Shrink the stored image so its longest side is at most this many pixels."},
+            "saveAs": string(1, 4096)
         }),
         vec!["sessionId", "pageId"],
     )
@@ -697,7 +698,8 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
                 &[]
             ),
             "zigzagzig":{"type":"boolean"},
-            "url": string(1, MAX_URL_BYTES)
+            "url": string(1, MAX_URL_BYTES),
+            "callerKey": string(1, 128)
         }),
         vec!["profile"],
     )
@@ -804,6 +806,8 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("download_url", "url") => "URL to download.",
         ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
         ("download_url", "saveAs") => "Absolute path to save the file to.",
+        ("screenshot", "saveAs") => "Same rules as download_url saveAs.",
+        ("workflow_start", "callerKey") => "Job key echoed in evidenceKey.",
         ("download_url", "expectedContentType") => "Content type the response must have.",
         ("intent_complete_form", "fields") => "Fields to fill, in order.",
         ("workflow_run", "workflow") => "Name in bobby://workflows.",
@@ -3163,7 +3167,8 @@ fn evidence_variants() -> Vec<Value> {
                             "recaptchaV3",
                             "textCaptcha",
                             "imageGridCaptcha",
-                            "mfaCodeEntry"
+                            "mfaCodeEntry",
+                            "turnstile"
                         ]},
                         "confidence":{"type":"number"},
                         "region":object(
@@ -3241,7 +3246,8 @@ fn error_code() -> Value {
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
         "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
-        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired"
+        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired",
+        "verificationLinkRequired","confirmedOutsideExpectedState"
     ]})
 }
 
@@ -3309,6 +3315,8 @@ fn command_outcome_properties() -> Value {
         "priorAttemptId":id(),
         "attemptId":id(),
         "artifactRegistration":{"type":"object"},
+        "evidenceKey":evidence_key(),
+        "savedTo":string(1, 4096),
         "downloadPreviews":array(
             object(
                 json!({
@@ -3441,9 +3449,23 @@ fn page_state() -> Value {
 /// The persisted `types::WorkflowCheckpoint` as `checkpoint_save` and `recovery_status`
 /// return it. Distinct from the input definition (`workflow_checkpoint()`), which forces
 /// `evidence`/`recoveryHistory`/`recoveryReceipts` empty; the runtime populates all three.
+/// The `workflow_start` `callerKey` with the page URL and screenshot digest
+/// of the result that carries it.
+fn evidence_key() -> Value {
+    object(
+        json!({
+            "callerKey":string(1, 128),
+            "url":nullable(string(1, MAX_URL_BYTES)),
+            "sha256":nullable(sha256())
+        }),
+        &["callerKey", "url", "sha256"],
+    )
+}
+
 fn checkpoint_record() -> Value {
     object(
         json!({
+            "evidenceKey":evidence_key(),
             "schemaVersion":{"type":"integer","const":1},
             "checkpointId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(), "pageId":id(),
             "restartUrl":string(1, MAX_URL_BYTES), "currentUrl":string(1, MAX_URL_BYTES),

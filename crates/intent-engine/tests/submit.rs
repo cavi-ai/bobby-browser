@@ -934,6 +934,58 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     assert_eq!(log.waits.len(), 2);
 }
 
+/// A submit that lands on a page asking to confirm an email address through a
+/// link is the next step, named with where the link went.
+#[tokio::test]
+async fn submit_and_verify_names_an_email_link_step_instead_of_failing_verification() {
+    let calls = Arc::new(Mutex::new(CallLog {
+        inspection_evidence: vec![Evidence::Inspection {
+            selector: None,
+            url: "https://example.test/verify".into(),
+            title: "Verify".into(),
+            text: "Check your email\nWe sent a verification link to j***@example.test. \
+                   Click the link to activate your account."
+                .into(),
+            html: None,
+            truncated: false,
+        }],
+        ..CallLog::default()
+    }));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: Some(CommandError {
+            code: ErrorCode::WaitConditionTimedOut,
+            message: "url did not match within 1000ms".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: true,
+        }),
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), thanks_wait()),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationLinkRequired);
+    assert!(!error.retryable);
+    assert!(
+        error
+            .message
+            .contains("We sent a verification link to j***@example.test"),
+        "{error:?}"
+    );
+}
+
 /// A dialog that opens instead of the expected state is named in the
 /// verification failure, which still never invites a resubmit.
 #[tokio::test]

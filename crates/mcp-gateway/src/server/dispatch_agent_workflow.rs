@@ -499,7 +499,10 @@ impl Server {
                     // and its evidence; this read never verifies or replays it.
                     outcome["status"] == "completed"
                         || (outcome["status"] == "failed"
-                            && outcome["error"]["code"] == "verificationFailed"
+                            && matches!(
+                                outcome["error"]["code"].as_str(),
+                                Some("verificationFailed" | "confirmedOutsideExpectedState")
+                            )
                             && outcome["evidence"].as_array().is_some_and(|evidence| {
                                 evidence.iter().any(|item| {
                                     item["kind"] == "intentExecution"
@@ -1702,6 +1705,71 @@ mod tests {
         ) -> interface_core::InterfaceResult<Vec<types::WorkflowId>> {
             unused()
         }
+    }
+
+    #[tokio::test]
+    async fn a_submit_confirmed_outside_expected_state_keeps_its_post_state() {
+        let authority = AuthorityStore::with_capacity(1);
+        let now = types::WireTimestamp::now();
+        let token = authority
+            .issue(
+                types::PrincipalId::from_uuid(uuid::Uuid::from_u128(702)),
+                [types::Capability::SessionRead, types::Capability::PageRead],
+                now + Duration::from_hours(1),
+            )
+            .await
+            .unwrap();
+        let handle = authority.verify(&token.expose_once()).await.unwrap();
+        let session_id = types::SessionId::new();
+        let page_id = types::PageId::new();
+        let runtime = Arc::new(ExpiredRequestRuntime {
+            session: types::SessionState {
+                id: session_id.clone(),
+                profile: "post-state".into(),
+                proxy: None,
+                page_ids: vec![page_id.clone()],
+                created_at: now,
+                last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
+            },
+            page: None,
+            delete_contexts: Mutex::default(),
+            fail_delete: false,
+        });
+        let server = Server::for_interface(
+            runtime,
+            handle,
+            EventStore::new(8),
+            ArtifactResources::default(),
+        );
+        let failure = json!({
+            "status": "failed",
+            "error": {"code": "confirmedOutsideExpectedState"},
+            "evidence": [{
+                "kind": "intentExecution",
+                "record": {"intentKind": "submitAndVerify", "verification": "verifyFailed"}
+            }]
+        });
+
+        let outcome = server
+            .attach_post_state(
+                Ok(failure.clone()),
+                server.request_context(),
+                session_id,
+                page_id.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["status"], "failed", "{outcome}");
+        assert_eq!(outcome["error"], failure["error"], "{outcome}");
+        assert_eq!(
+            outcome["postStateStatus"]["status"], "available",
+            "{outcome}"
+        );
+        assert_eq!(outcome["postState"]["pageId"], json!(page_id), "{outcome}");
     }
 
     #[tokio::test]

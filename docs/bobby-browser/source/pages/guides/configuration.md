@@ -134,6 +134,7 @@ Limits on outbound requests the runtime makes, such as downloads. These are not 
 |---|---|---|
 | `allow_loopback` | `false` | Allow requests to loopback addresses |
 | `allow_private_network` | `false` | Allow requests to private networks |
+| `allow_file_urls` | `false` | Allow `navigate` and `workflow_start` to open `file://` URLs, for local previews |
 | `max_redirects` | `5` | Redirect limit |
 | `max_header_bytes` | `65536` | Response header limit |
 | `max_body_bytes` | `8388608` | Response body limit |
