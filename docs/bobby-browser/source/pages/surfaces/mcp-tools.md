@@ -120,7 +120,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `pdf` | `landscape`, `printBackground`, `scale` 0.1 to 2.0, `pageRanges` |
 | `network_log` | `clear`. Recording starts at the first call; `clear: false` keeps the buffer |
 | `context_ask`, `context_neighbors` | `description` (required, up to 256 bytes) |
-| `wait_for` | `condition` and `timeoutMs` (both required) |
+| `wait_for` | `condition` and `timeoutMs` (both required). A `waitConditionTimedOut` message ends with the text, value, URL or ready state the last poll read, as does an `upload_files` or intent `expectedState` wait that times out |
 | `extract_structured` | `schema` (required), `purpose`. Needs `executionPolicy.visionAssist` |
 
 `wait_for` conditions are objects with a `kind`:

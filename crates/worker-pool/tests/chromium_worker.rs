@@ -2239,6 +2239,69 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
     worker.close().await.unwrap();
 }
 
+/// A text wait that times out names the text it last read, so the caller sees
+/// the state the page reached instead of only the deadline.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn wait_for_text_timeout_reports_the_last_observed_text() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<p id=\"status\">report.pdf attached</p>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    css: Some("#status".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Upload complete".into()),
+            },
+            timeout_ms: 500,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut, "{error:?}");
+    assert!(
+        error.message.contains("report.pdf attached"),
+        "timeout must name the last observed text: {}",
+        error.message
+    );
+
+    worker.close().await.unwrap();
+}
+
 // Keep the first collection ambiguous, then remove marked candidates after
 // the second collection returns and before their live text is read. Target
 // stamps persist across collections, so attribute mutations cannot trigger

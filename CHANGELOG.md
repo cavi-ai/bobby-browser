@@ -9,6 +9,7 @@
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
 - `page_open` keeps the new page open when its first load runs out of time, so it can be read or navigated again.
+- A wait that times out, including an `expectedState` wait, names the text, value, URL or ready state it last read.
 
 ## 0.28.0 - 2026-11-23
 
