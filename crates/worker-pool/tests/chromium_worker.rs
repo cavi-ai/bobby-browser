@@ -861,22 +861,55 @@ async fn correlates_popup_and_download_before_clicking() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
-async fn download_started_in_a_new_tab_is_found_in_the_downloads_folder() {
+async fn click_download_ignores_another_tabs_download_while_waiting_for_the_popup() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let popup_requested = std::sync::Arc::new(tokio::sync::Notify::new());
+    let unrelated_sent = std::sync::Arc::new(tokio::sync::Notify::new());
+    let fixture_popup_requested = popup_requested.clone();
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
+            let popup_requested = fixture_popup_requested.clone();
+            let unrelated_sent = unrelated_sent.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut request = [0_u8; 4096];
                 let read = stream.read(&mut request).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&request[..read]);
-                let response = if request.starts_with("GET /file") {
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"attachment.bin\"\r\nContent-Length: 10\r\nConnection: close\r\n\r\nattachment"
+                let (content_type, disposition, body) = if request.starts_with("GET /file ") {
+                    popup_requested.notify_one();
+                    unrelated_sent.notified().await;
+                    // Let Chromium finish writing the other tab's download first.
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    (
+                        "application/octet-stream",
+                        "Content-Disposition: attachment; filename=attachment.bin\r\n",
+                        "attachment",
+                    )
+                } else if request.starts_with("GET /other-file ") {
+                    (
+                        "application/octet-stream",
+                        "Content-Disposition: attachment; filename=other.bin\r\n",
+                        "unrelated",
+                    )
+                } else if request.starts_with("GET /other ") {
+                    ("text/html", "", "<a id=save href=/other-file>Other</a>")
                 } else {
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 64\r\nConnection: close\r\n\r\n<title>A</title><a id=\"save\" href=\"/file\" target=\"_blank\">Save</a>"
+                    (
+                        "text/html",
+                        "",
+                        "<a id=save href=/file target=_blank>Save</a>",
+                    )
                 };
-                let _ = stream.write_all(response.as_bytes()).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{disposition}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                if stream.write_all(response.as_bytes()).await.is_ok()
+                    && request.starts_with("GET /other-file ")
+                {
+                    unrelated_sent.notify_one();
+                }
             });
         }
     });
@@ -912,17 +945,53 @@ async fn download_started_in_a_new_tab_is_found_in_the_downloads_folder() {
         .await
         .unwrap();
 
-    let download = worker_pool::events_or_default(worker.events())
-        .click_and_wait_for_download(
-            &page_id,
-            &ClickAndWaitForDownloadCommand {
-                selector: "#save".into(),
-                target: None,
-                timeout_ms: 5_000,
+    let other_page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(other_page.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &other_page,
+            &NavigateCommand {
+                url: format!("http://{address}/other"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
             },
         )
         .await
         .unwrap();
+    let events = worker_pool::events_or_default(worker.events());
+    let command = ClickAndWaitForDownloadCommand {
+        selector: "#save".into(),
+        target: None,
+        timeout_ms: 8_000,
+    };
+    let (download, _) = tokio::join!(
+        events.click_and_wait_for_download(&page_id, &command),
+        async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                popup_requested.notified(),
+            )
+            .await
+            .expect("the click must request the popup download");
+            worker_pool::input_or_default(worker.input())
+                .click(
+                    &other_page,
+                    &ClickCommand {
+                        selector: "#save".into(),
+                        target: None,
+                        boundary: false,
+                        expected_url: None,
+                        modifiers: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    );
+    let download = download.unwrap();
     let types::Evidence::Download {
         path,
         bytes,
@@ -940,83 +1009,6 @@ async fn download_started_in_a_new_tab_is_found_in_the_downloads_folder() {
     assert!(saved_to
         .as_deref()
         .is_some_and(|saved| saved.ends_with("attachment.bin")));
-    worker.close().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore = "requires installed Chrome or Chromium"]
-async fn fetch_in_page_follows_redirects_with_the_page_session_cookies() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let mut request = [0_u8; 4096];
-                let read = stream.read(&mut request).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
-                let response = if request.starts_with("get /signin") {
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: sid=signed-in; Path=/\r\nContent-Length: 20\r\nConnection: close\r\n\r\n<title>In</title>in!".to_owned()
-                } else if request.starts_with("get /redirect") {
-                    "HTTP/1.1 302 Found\r\nLocation: /file\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
-                } else if request.contains("cookie: sid=signed-in") {
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\nrow,one\n".to_owned()
-                } else {
-                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_owned()
-                };
-                let _ = stream.write_all(response.as_bytes()).await;
-            });
-        }
-    });
-    let root = tempfile::tempdir().unwrap();
-    let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(chrome_executable()),
-        profiles_dir: root.path().join("profiles"),
-        headless: true,
-        max_active: 1,
-        upload_roots: vec![root.path().to_path_buf()],
-        downloads_dir: root.path().join("downloads"),
-        artifacts_dir: root.path().join("artifacts"),
-        max_artifact_bytes: 8 * 1024 * 1024,
-        max_screenshot_dimension: 16_384,
-        max_js_result_bytes: 64 * 1024,
-        max_js_timeout_ms: 30_000,
-    });
-    let worker = factory.launch(&SessionId::new()).await.unwrap();
-    let page_id = PageId::new();
-    worker_pool::tabs_or_default(worker.tabs())
-        .open_page(page_id.clone())
-        .await
-        .unwrap();
-    worker_pool::navigation_or_default(worker.navigation())
-        .navigate(
-            &page_id,
-            &NavigateCommand {
-                url: format!("http://{address}/signin"),
-                wait_until: WaitUntil::Interactive,
-                timeout_ms: 10_000,
-            },
-        )
-        .await
-        .unwrap();
-    let web_state = worker_pool::web_state_or_default(worker.web_state());
-    let redirect = format!("http://{address}/redirect");
-
-    let fetched = web_state
-        .fetch_in_page(&page_id, &redirect, 1024)
-        .await
-        .unwrap();
-    assert_eq!(fetched.body, b"row,one\n");
-    assert_eq!(
-        fetched.download_metadata(),
-        ("report.csv".to_owned(), "text/csv".to_owned())
-    );
-    let error = web_state
-        .fetch_in_page(&page_id, &redirect, 4)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, types::ErrorCode::HttpResponseTooLarge);
     worker.close().await.unwrap();
 }
 

@@ -8,8 +8,7 @@
 
 ### Fixed
 
-- `download_url` fetches inside the page's own browser session when the direct HTTP path cannot prove its cookie state, including Domain, partitioned and cross-site SameSite cookies, under the same `maxBytes`, `expectedContentType` and `saveAs` rules.
-- Chromium `click_and_wait_for_download` returns the finished file from the session's downloads folder, with `savedTo` and `sha256`, when the download events never arrive, such as for a download a new tab starts.
+- Chromium `click_and_wait_for_download` associates downloads with the clicked page or its new tab and returns the finished file with `savedTo` and `sha256`.
 
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - Chromium `targetObscured` click errors name the covering element, or the dialog that holds it, by role, accessible name, tag, id and classes.

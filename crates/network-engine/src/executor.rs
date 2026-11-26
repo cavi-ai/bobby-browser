@@ -411,7 +411,7 @@ fn collect_state(
             continue;
         };
         if cookie.partitioned() == Some(true) {
-            return Err(equivalence_error(
+            return Err(policy_error(
                 "partitioned response cookie cannot be represented safely",
             ));
         }
@@ -493,31 +493,6 @@ fn content_type(headers: &HeaderMap) -> String {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
-}
-
-/// A response the page's own browser session fetched, outside the HTTP mirror.
-#[derive(Debug, Clone, Default)]
-pub struct PageFetch {
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-impl PageFetch {
-    /// The saved filename and media type, derived exactly as for a direct fetch.
-    pub fn download_metadata(&self) -> (String, String) {
-        let mut headers = HeaderMap::new();
-        for (name, value) in &self.headers {
-            if let (Ok(name), Ok(value)) = (
-                header::HeaderName::from_bytes(name.as_bytes()),
-                header::HeaderValue::from_str(value),
-            ) {
-                headers.append(name, value);
-            }
-        }
-        let url = Url::parse(&self.url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
-        (filename(&headers, &url), content_type(&headers))
-    }
 }
 
 fn decode_text(bytes: &[u8], headers: &HeaderMap) -> Option<String> {

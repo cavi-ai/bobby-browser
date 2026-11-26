@@ -2,7 +2,6 @@
 use crate::{unsupported_error, wait::WaitObserver};
 use async_trait::async_trait;
 use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
-use network_engine::PageFetch;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
@@ -378,17 +377,6 @@ pub trait WebStateEngine: Send + Sync {
         _expected_version: u64,
         _delta: ResponseStateDelta,
     ) -> Result<(), CommandError> {
-        Err(unsupported_error())
-    }
-
-    /// Fetches `url` inside the page's own browser session, with its cookies,
-    /// partitions and redirects. A body over `max_bytes` fails the fetch.
-    async fn fetch_in_page(
-        &self,
-        _page_id: &PageId,
-        _url: &str,
-        _max_bytes: u64,
-    ) -> Result<PageFetch, CommandError> {
         Err(unsupported_error())
     }
 }

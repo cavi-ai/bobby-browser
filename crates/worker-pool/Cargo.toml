@@ -15,7 +15,6 @@ test-support = []
 hex = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
-base64.workspace = true
 chromiumoxide.workspace = true
 jiff.workspace = true
 config.workspace = true
@@ -45,6 +44,7 @@ companion-protocol.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+base64.workspace = true
 test-site.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
