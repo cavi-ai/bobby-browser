@@ -2716,7 +2716,9 @@
         "visionAssistFailed",
         "expectedStatePreSatisfied",
         "boundaryAlreadyExecuted",
-        "verificationCodeRequired"
+        "verificationCodeRequired",
+        "verificationLinkRequired",
+        "confirmedOutsideExpectedState"
       ]
     },
     "RestartLineage": {

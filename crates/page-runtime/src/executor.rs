@@ -936,6 +936,8 @@ fn is_postcondition_failure(error: &CommandError) -> bool {
         error.code,
         ErrorCode::VerificationFailed
             | ErrorCode::VerificationCodeRequired
+            | ErrorCode::VerificationLinkRequired
+            | ErrorCode::ConfirmedOutsideExpectedState
             | ErrorCode::WaitConditionTimedOut
     )
 }

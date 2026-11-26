@@ -228,6 +228,41 @@ async fn a_rejected_submit_reports_the_message_the_page_shows() {
 }
 
 #[tokio::test]
+async fn a_confirmed_submit_outside_its_expected_state_says_so_with_a_screenshot() {
+    let (url, _requests) = vision_endpoint(serde_json::json!({
+        "confidence": 0.9375,
+        "action": {"kind": "outcomeRead", "outcome": "confirmed", "message": "Thanks, we received it"}
+    }))
+    .await;
+    let outcome = IntentEngine::execute(
+        &submit(),
+        &PageId::new(),
+        &FakeBrowser { verified: false },
+        &vision(&url, true),
+    )
+    .await;
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("a submit whose expected state never held does not complete");
+    };
+    assert_eq!(error.code, ErrorCode::ConfirmedOutsideExpectedState);
+    assert!(!error.retryable);
+    assert!(
+        error
+            .message
+            .contains("the page shows a confirmation: \"Thanks, we received it\""),
+        "{}",
+        error.message
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Screenshot { artifact_id, .. } if artifact_id == "after-submit"
+        )),
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_verified_submit_carries_the_confirmation_the_page_shows() {
     let (url, _requests) = vision_endpoint(serde_json::json!({
         "confidence": 0.9375,

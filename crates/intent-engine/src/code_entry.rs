@@ -431,6 +431,35 @@ fn submit_target(
         .and_then(|control| control.target.clone())
 }
 
+const LINK_PHRASES: &[&str] = &[
+    "verification link",
+    "confirmation link",
+    "activation link",
+    "verify your email",
+    "confirm your email",
+    "verify your account",
+    "activate your account",
+    "click the link",
+    "check your email to",
+    "check your inbox to",
+];
+
+/// The page's line about where a confirmation link went, when the page asks
+/// to confirm an email address through a link rather than a code.
+pub(crate) fn link_step_hint(page_text: &str) -> Option<String> {
+    let text = page_text.to_lowercase();
+    if !LINK_PHRASES.iter().any(|phrase| text.contains(phrase)) {
+        return None;
+    }
+    destination_hint(page_text).or_else(|| {
+        let line = page_text.lines().map(str::trim).find(|line| {
+            let lower = line.to_lowercase();
+            LINK_PHRASES.iter().any(|phrase| lower.contains(phrase))
+        })?;
+        Some(line.chars().take(MAX_HINT_CHARS).collect())
+    })
+}
+
 /// The page's own sentence about where the code went, as shown. Engines
 /// differ on whether block text keeps its line breaks, so a line is cut down
 /// to the sentence around "sent" when it holds more than that.

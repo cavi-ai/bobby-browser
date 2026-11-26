@@ -995,6 +995,12 @@ pub enum ErrorCode {
     // A submit did not reach its expected state because the page now asks for
     // a one-time code. Not a failure of the submit: the code is the next step.
     VerificationCodeRequired,
+    // A submit did not reach its expected state because the page asks to
+    // confirm an email address through a link it sent.
+    VerificationLinkRequired,
+    // A submit missed its expected state while the page reads as a
+    // confirmation: the effect likely landed somewhere the caller did not expect.
+    ConfirmedOutsideExpectedState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -3215,7 +3215,8 @@ fn error_code() -> Value {
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
         "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
-        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired"
+        "expectedStatePreSatisfied","boundaryAlreadyExecuted","verificationCodeRequired",
+        "verificationLinkRequired","confirmedOutsideExpectedState"
     ]})
 }
 

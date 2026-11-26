@@ -2538,6 +2538,43 @@ async fn execute_submit_and_verify(
                 },
             };
         }
+        let page_text = browser
+            .inspect_settled_page(page_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::Inspection { text, .. } => Some(text),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if let Some(hint) = crate::code_entry::link_step_hint(&page_text) {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VerificationLinkRequired,
+                    message: format!(
+                        "the submit landed and the page asks to confirm the email address \
+                         through a link it sent ({hint:?}); open that link from your own mail \
+                         tool, then continue. Do not resubmit"
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: {
+                    let mut evidence = vec![resolution];
+                    evidence.append(&mut click_evidence);
+                    evidence.push(intent_evidence(execution_record(
+                        "submitAndVerify",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "linkRequired",
+                    )));
+                    evidence
+                },
+            };
+        }
     }
     let mut wait_evidence = match waited {
         Ok(evidence) => evidence,
@@ -2556,8 +2593,19 @@ async fn execute_submit_and_verify(
                 command_deadline,
             )
             .await;
+            let confirmed = matches!(
+                reading,
+                Some(Evidence::OutcomeReading {
+                    outcome: types::PageOutcome::Confirmed,
+                    ..
+                })
+            );
             let error = CommandError {
-                code: ErrorCode::VerificationFailed,
+                code: if confirmed {
+                    ErrorCode::ConfirmedOutsideExpectedState
+                } else {
+                    ErrorCode::VerificationFailed
+                },
                 message: format!(
                     "submit click landed but the expected post-state did not hold ({}): {}{}{}. \
                      Do not resubmit blindly — inspect the page for a server rejection or \
