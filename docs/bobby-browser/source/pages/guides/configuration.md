@@ -75,6 +75,8 @@ Before starting that Firefox workflow, require `firefox-background-attachment` i
 | `authority_path` | `./data/storage/authority.json` | Authority records |
 | `journal_key_path` | `journal.key` beside the loaded config file | Key that seals command journal records; created owner-only on first use. Records written before a key was set stay readable. |
 
+Live sessions and their page IDs are recorded in `sessions.json` beside `journal_path`. Sessions do not survive a runtime restart; the next runtime reports the ones it found there in `runtime_info.lostSessions`, to their owning principal only.
+
 ## `[context]`
 
 Remembered form structure per site. See [Context graph](../concepts/context-graph.md). It opens for profiles with a durable identity: a paired Firefox profile, a Chromium selection with `profileId`, or managed Chromium (stored under `managed-chromium`).

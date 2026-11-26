@@ -1298,6 +1298,14 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 "engineScope":{"type":"string","enum":["chromium","firefox","webKit"]},
                 "capabilities":array(string(0, 64), 32),
                 "active_sessions":{"type":"integer","minimum":0},
+                // Sessions the previous runtime held when it stopped; they are gone.
+                "lostSessions":{"type":"array","items":object(
+                    json!({
+                        "sessionId":{"type":"string"},
+                        "pageIds":{"type":"array","items":{"type":"string"}}
+                    }),
+                    &["sessionId", "pageIds"],
+                )},
                 "queued_jobs":{"type":"integer","minimum":0},
                 "uptime_ms":{"type":"integer","minimum":0},
                 "credentialExpiresAt":{"type":"string","format":"date-time"},
@@ -1633,6 +1641,12 @@ fn advertised_output_shape(name: &str) -> Value {
                 .as_object_mut()
                 .expect("output schemas are objects")
                 .remove("$defs");
+            // `lostSessions` stays in `tool_output_schema` only: naming it here
+            // would exceed the explore-catalog size ceiling.
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("lostSessions");
+            }
+            schema["additionalProperties"] = json!(true);
             schema
         }
         _ => {

@@ -492,7 +492,8 @@ impl RuntimeService {
         if let Some(observer) = observer {
             pages = pages.with_execution_phase_observer(observer);
         }
-        let sessions = SessionManager::new(workers.clone());
+        let sessions = SessionManager::new(workers.clone())
+            .with_ledger(config.storage.journal_path.with_file_name("sessions.json"));
         Ok(Self::with_recovery(sessions, pages, recovery)
             .with_idempotency_stores(command_idempotency, lifecycle_idempotency)
             .with_workers(workers)
@@ -537,6 +538,7 @@ impl RuntimeService {
         }
         RuntimeInfo {
             engine_scope: None,
+            lost_sessions: self.sessions.lost_sessions(None),
             storage_integrity: [
                 ("commandIdempotency", self.idempotency.integrity_issue()),
                 (

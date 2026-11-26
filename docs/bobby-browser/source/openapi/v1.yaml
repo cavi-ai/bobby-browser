@@ -1438,6 +1438,16 @@ components:
           type: string
           enum: [chromium, firefox, webKit]
           description: Present when the request specifies an engine.
+        lostSessions:
+          type: array
+          description: Sessions the previous runtime held when it stopped, with their pages. They no longer exist.
+          items:
+            type: object
+            additionalProperties: false
+            required: [sessionId, pageIds]
+            properties:
+              sessionId: { type: string }
+              pageIds: { type: array, items: { type: string } }
         storageIntegrity:
           type: array
           maxItems: 4

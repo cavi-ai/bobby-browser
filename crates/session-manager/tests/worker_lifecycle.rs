@@ -77,6 +77,50 @@ async fn session_owns_worker_from_creation_through_delete() {
     assert!(closed.load(Ordering::SeqCst));
 }
 
+#[tokio::test]
+async fn a_restarted_manager_names_the_sessions_and_pages_the_previous_one_held() {
+    let storage = tempfile::tempdir().unwrap();
+    let ledger = storage.path().join("sessions.json");
+    let pool = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(LifecycleFactory {
+            closed: Arc::default(),
+        }),
+    ));
+    let manager = SessionManager::new(pool).with_ledger(ledger.clone());
+    let request = || CreateSessionRequest {
+        profile: "default".into(),
+        proxy: None,
+        execution_policy: Default::default(),
+        zigzagzig: false,
+    };
+    let held = manager.create(request()).await.unwrap();
+    let closed = manager.create(request()).await.unwrap();
+    let page = types::PageId::new();
+    manager.add_page(&held.id, page.clone()).await.unwrap();
+    manager.record_owner(&held.id, "owner-a".into()).await;
+    manager.delete(&closed.id).await.unwrap();
+    // The runtime stops without closing `held`; the next one opens the same storage.
+    drop(manager);
+
+    let restarted = SessionManager::default().with_ledger(ledger.clone());
+    assert!(restarted.list().await.is_empty());
+    let lost = restarted.lost_sessions(None);
+    assert_eq!(
+        lost,
+        vec![types::LostSession {
+            session_id: held.id.clone(),
+            page_ids: vec![page],
+        }]
+    );
+    assert_eq!(restarted.lost_sessions(Some("owner-a")), lost);
+    assert!(restarted.lost_sessions(Some("owner-b")).is_empty());
+    // Each runtime names only what the one before it held.
+    drop(restarted);
+    let again = SessionManager::default().with_ledger(ledger);
+    assert!(again.lost_sessions(None).is_empty());
+}
+
 fn engine_request(engine: SkillBrowserEngine) -> CreateSessionRequest {
     CreateSessionRequest {
         profile: "default".into(),

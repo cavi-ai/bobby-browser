@@ -5,6 +5,7 @@
 ### Added
 
 - A listed Chromium profile with `"systemKeychain": true` launches its Chrome with the system keychain and password store instead of the mock keychain.
+- `runtime_info.lostSessions` names the sessions and pages the previous runtime held when it stopped.
 
 ### Fixed
 
