@@ -28,6 +28,10 @@ cases::every_case!(
     scoped_iframe_descent_respects_the_node_budget,
     password_manager_fill_never_touches_the_field,
     password_manager_fill_requires_the_session_opt_in,
+    password_manager_fill_completes_on_a_field_the_manager_filled,
+    password_manager_fill_keeps_distinct_form_owners_separate,
+    set_text_closes_a_frame_menu_that_takes_the_fields_focus,
+    dismiss_obstruction_closes_a_frame_menu_without_vision,
     a_split_code_with_one_named_box_takes_the_code,
     a_code_field_that_submits_itself_completes,
     a_fill_only_code_requires_readback,
@@ -146,6 +150,15 @@ async fn password_manager_fill_clicks_the_managers_prompt() {
     let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
     let rig = Rig::chromium_with_vision_node(&endpoint).await;
     cases::password_manager_fill_clicks_the_managers_prompt(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn password_manager_fill_sets_both_new_password_fields() {
+    let (x, y) = cases::PASSWORD_MANAGER_PROMPT_POINT;
+    let endpoint = runtime_tests::clicking_vision_node(x, y, 0.9, Default::default()).await;
+    let rig = Rig::chromium_with_vision_node(&endpoint).await;
+    cases::password_manager_fill_sets_both_new_password_fields(&rig).await;
 }
 
 /// Screenshots of a display with two device pixels per CSS pixel are twice

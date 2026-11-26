@@ -3179,6 +3179,11 @@ impl crate::ObservationEngine for ChromiumWorker {
             .map(|point| (point.x, point.y))
     }
 
+    async fn close_frame_overlay(&self, page_id: &PageId) -> Result<bool, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        crate::targeting::close_frame_overlay(&page).await
+    }
+
     async fn element_at_point(
         &self,
         page_id: &PageId,
@@ -3938,6 +3943,19 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
             ));
         }
         Ok(())
+    }
+
+    async fn take_peer_new_password(
+        &self,
+        prepared: &ChromiumPreparedControl,
+    ) -> Result<bool, CommandError> {
+        prepared
+            .resolved
+            .fill_secret(
+                &prepared.page,
+                crate::control_action_fill::PEER_NEW_PASSWORD_SCRIPT,
+            )
+            .await
     }
 }
 

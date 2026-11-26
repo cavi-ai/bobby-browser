@@ -17,12 +17,19 @@ const PROMPT: (f64, f64) = (612.0, 40.0);
 
 /// A login page with a password-manager extension: its prompt sits in the
 /// extension's own frame, and only a click on it fills the password field.
-/// With `submits`, the manager also submits the form, and the page opens a
-/// code dialog over it while the password field stays.
+/// The page may also open a dialog while the password field stays. A code
+/// dialog changes the form fields, while an informational dialog does not.
 struct ExtensionPage {
     prompt: Option<(f64, f64)>,
     filled: Mutex<bool>,
-    submits: bool,
+    dialog: Option<PromptDialog>,
+    watch_error: Option<ErrorCode>,
+}
+
+#[derive(Clone, Copy)]
+enum PromptDialog {
+    Information,
+    Code,
 }
 
 fn control(name: &str, control_kind: FormControlKind) -> FormControl {
@@ -81,8 +88,16 @@ impl IntentBrowser for ExtensionPage {
         let mut password = candidate("pass", "textbox", "Password");
         password.attributes = BTreeMap::from([("type".into(), "password".into())]);
         let mut census = vec![password];
-        if self.submits && *self.filled.lock().expect("fill state") {
-            census.push(candidate("code", "dialog", "Enter the code"));
+        if *self.filled.lock().expect("fill state") {
+            match self.dialog {
+                Some(PromptDialog::Information) => {
+                    census.push(candidate("information", "dialog", "About password fill"));
+                }
+                Some(PromptDialog::Code) => {
+                    census.push(candidate("code", "dialog", "Enter the code"));
+                }
+                None => {}
+            }
         }
         Ok(census)
     }
@@ -90,11 +105,11 @@ impl IntentBrowser for ExtensionPage {
     async fn form_snapshot(&self, page_id: &PageId) -> Result<Option<FormSnapshot>, CommandError> {
         let mut controls = vec![control("Password", FormControlKind::Password)];
         if *self.filled.lock().expect("fill state") {
-            controls.push(if self.submits {
-                control("Code", FormControlKind::Text)
-            } else {
-                control("Show password", FormControlKind::Other)
-            });
+            match self.dialog {
+                Some(PromptDialog::Code) => controls.push(control("Code", FormControlKind::Text)),
+                None => controls.push(control("Show password", FormControlKind::Other)),
+                Some(PromptDialog::Information) => {}
+            }
         }
         Ok(Some(FormSnapshot {
             schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
@@ -148,6 +163,14 @@ impl IntentBrowser for ExtensionPage {
         command: &ControlActionCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let present = *self.filled.lock().expect("fill state");
+        if let Some(code) = self.watch_error.filter(|_| present) {
+            return Err(CommandError {
+                code,
+                message: "field watch failed".into(),
+                layer: types::ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         Ok(vec![Evidence::ControlAction {
             action: ControlActionEvidence {
                 operation: FormControlOperation::PasswordManagerFill,
@@ -224,7 +247,8 @@ async fn fill_only_with_a_new_show_password_button_is_reported_as_filled() {
     let page = ExtensionPage {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
-        submits: false,
+        dialog: None,
+        watch_error: None,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),
@@ -248,7 +272,8 @@ async fn a_manager_submit_that_opens_a_dialog_with_a_new_field_reports_both() {
     let page = ExtensionPage {
         prompt: Some(PROMPT),
         filled: Mutex::new(false),
-        submits: true,
+        dialog: Some(PromptDialog::Code),
+        watch_error: None,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),
@@ -278,11 +303,79 @@ async fn a_manager_submit_that_opens_a_dialog_with_a_new_field_reports_both() {
 }
 
 #[tokio::test]
+async fn a_manager_submit_that_fails_the_field_read_reports_the_submit() {
+    let page = ExtensionPage {
+        prompt: Some(PROMPT),
+        filled: Mutex::new(false),
+        dialog: Some(PromptDialog::Code),
+        watch_error: Some(ErrorCode::BrowserCommandFailed),
+    };
+    let outcome = IntentEngine::execute(
+        &password_manager_fill(),
+        &PageId::new(),
+        &page,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("the manager's submit was reported as a failure: {outcome:?}");
+    };
+    assert_eq!(
+        execution_record(&evidence).verification,
+        "passwordManagerSubmitted",
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_dialog_alone_does_not_recover_a_failed_field_read() {
+    let page = ExtensionPage {
+        prompt: Some(PROMPT),
+        filled: Mutex::new(false),
+        dialog: Some(PromptDialog::Information),
+        watch_error: Some(ErrorCode::BrowserCommandFailed),
+    };
+    let outcome = IntentEngine::execute(
+        &password_manager_fill(),
+        &PageId::new(),
+        &page,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("a dialog alone was reported as a submit: {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+}
+
+#[tokio::test]
+async fn a_new_dialog_and_fields_do_not_override_a_field_validation_error() {
+    let page = ExtensionPage {
+        prompt: Some(PROMPT),
+        filled: Mutex::new(false),
+        dialog: Some(PromptDialog::Code),
+        watch_error: Some(ErrorCode::IntentActionMismatch),
+    };
+    let outcome = IntentEngine::execute(
+        &password_manager_fill(),
+        &PageId::new(),
+        &page,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("a field validation error was reported as a submit: {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::IntentActionMismatch);
+}
+
+#[tokio::test]
 async fn without_a_located_prompt_the_fill_still_asks_for_vision() {
     let page = ExtensionPage {
         prompt: None,
         filled: Mutex::new(false),
-        submits: false,
+        dialog: None,
+        watch_error: None,
     };
     let outcome = IntentEngine::execute(
         &password_manager_fill(),

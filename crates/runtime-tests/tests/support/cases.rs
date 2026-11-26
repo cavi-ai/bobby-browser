@@ -5342,6 +5342,330 @@ pub async fn password_manager_fill_clicks_the_managers_prompt(rig: &Rig) {
     live.close().await;
 }
 
+/// A login form the password manager filled as the page loaded, with no
+/// prompt left to press.
+fn password_manager_filled_page() -> String {
+    page(
+        "Sign in",
+        r#"<form id="login">
+            <label>Email <input id="user" type="email" autocomplete="username"></label>
+            <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+            <button>Sign in</button>
+        </form>
+        <script>
+            user.value = "agent@example.test";
+            pass.value = "fixture-secret";
+        </script>"#,
+    )
+}
+
+/// Without a prompt or vision, a field the manager already filled still
+/// completes the fill.
+pub async fn password_manager_fill_completes_on_a_field_the_manager_filled(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/login",
+        Route::Html(password_manager_filled_page()),
+    )])
+    .await;
+    let started =
+        start_password_manager_session(rig, &site.url("/login"), json!({"passwordManager":true}))
+            .await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Sign in with the saved login",
+                   "hints":{"role":"textbox","accessibleName":"Email"},
+                   "value":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "passwordManagerFill on a filled field: {filled}"
+    );
+    assert!(
+        !filled.to_string().contains("fixture-secret"),
+        "the filled password reached the caller: {filled}"
+    );
+    live.close().await;
+}
+
+/// A sign-up form whose two new-password fields the manager's suggestion
+/// fills only in part: a trusted click on its prompt fills the confirmation.
+fn password_manager_sign_up_page() -> String {
+    page(
+        "Create account",
+        r#"<form id="signup">
+            <label>Password <input id="pass" type="password" autocomplete="new-password"></label>
+            <button>Create account</button>
+        </form>
+        <label>Confirm password <input id="repeat" form="signup" type="password" autocomplete="new-password"></label>
+        <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#ff00aa;color:#fff;display:flex;align-items:center;justify-content:center">Suggested password</div>
+        <p role="status" aria-label="Match" id="match">unset</p>
+        <script>
+            const match = document.getElementById("match");
+            const repeat = document.getElementById("repeat");
+            for (const input of [pass, repeat]) {
+                input.addEventListener("input", () => {
+                    match.textContent = pass.value && pass.value === repeat.value ? "match" : "mismatch";
+                });
+            }
+            document.getElementById("prompt").addEventListener("click", (event) => {
+                if (!event.isTrusted) return;
+                repeat.value = "fixture-new-secret";
+            });
+        </script>"#,
+    )
+}
+
+/// Needs a rig whose loopback vision node answers [`PASSWORD_MANAGER_PROMPT_POINT`].
+pub async fn password_manager_fill_sets_both_new_password_fields(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/signup",
+        Route::Html(password_manager_sign_up_page()),
+    )])
+    .await;
+    let started = start_password_manager_session(
+        rig,
+        &site.url("/signup"),
+        json!({"passwordManager":true,"visionAssist":true}),
+    )
+    .await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Use the suggested password",
+                   "hints":{"role":"textbox","accessibleName":"Password"},
+                   "value":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "passwordManagerFill on a sign-up form: {filled}"
+    );
+    assert!(
+        !filled.to_string().contains("fixture-new-secret"),
+        "the suggested password reached the caller: {filled}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    for name in ["Password", "Confirm password"] {
+        let mut fields = Vec::new();
+        controls_named(&snapshot, name, &mut fields);
+        assert_eq!(
+            fields.first().map(|control| control["state"].clone()),
+            Some(json!({"kind":"redacted","present":true})),
+            "{name} was not filled: {snapshot}"
+        );
+    }
+    let page = live.call("a11y_snapshot", json!({})).await.to_string();
+    assert!(page.contains("\"match\""), "the fields differ: {page}");
+    live.close().await;
+}
+
+pub async fn password_manager_fill_keeps_distinct_form_owners_separate(rig: &Rig) {
+    const FIELDS: &str = r#"
+        <label>Password <input type="password" autocomplete="new-password"></label>
+        <label>Other password <input form="other" type="password" autocomplete="new-password" value="fixture-value"></label>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/unowned", Route::Html(page("Unowned fields", FIELDS))),
+        (
+            "/different-owners",
+            Route::Html(page(
+                "Separate forms",
+                &format!(r#"<form id="signup">{FIELDS}</form><form id="other"></form>"#),
+            )),
+        ),
+    ])
+    .await;
+    for path in ["/unowned", "/different-owners"] {
+        let started =
+            start_password_manager_session(rig, &site.url(path), json!({"passwordManager":true}))
+                .await;
+        let live = Live {
+            rig,
+            session_id: started["sessionId"].clone(),
+            page_id: started["pageId"].clone(),
+            started,
+        };
+        let filled = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"Use the suggested password",
+                       "hints":{"role":"textbox","accessibleName":"Password"},
+                       "value":{"kind":"passwordManagerFill"}}),
+            )
+            .await;
+        assert_eq!(
+            filled["status"], "failed",
+            "unexpected fill on {path}: {filled}"
+        );
+        let snapshot = live.call("form_snapshot", json!({})).await;
+        let mut fields = Vec::new();
+        controls_named(&snapshot, "Password", &mut fields);
+        assert_eq!(
+            fields.first().map(|control| control["state"].clone()),
+            Some(json!({"kind":"redacted","present":false})),
+            "the target field changed on {path}: {snapshot}"
+        );
+        live.close().await;
+    }
+}
+
+/// The document of an inline menu served from another origin: it keeps focus
+/// on its own item and asks its host page to close it on Escape.
+fn inline_menu_frame() -> String {
+    page(
+        "Menu",
+        r#"<button id="item">Saved login</button>
+        <script>
+            const item = document.getElementById("item");
+            addEventListener("focus", () => item.focus());
+            if (document.hasFocus()) item.focus();
+            addEventListener("keydown", (event) => {
+                if (event.key === "Escape") parent.postMessage("close-menu", "*");
+            });
+        </script>"#,
+    )
+}
+
+/// A login form that, like a password manager's inline menu, opens a frame
+/// from `menu_url` under the email field when the field takes focus. The frame
+/// takes focus and covers the fields below; it closes on Escape for good.
+fn inline_menu_page(menu_url: &str) -> String {
+    page(
+        "Sign in",
+        &format!(
+            r#"<style>label {{ display: block; margin: 4px 0; }}</style>
+            <form id="login">
+                <label>Email <input id="user" type="email" autocomplete="username"></label>
+                <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+                <button id="go" type="button">Continue</button>
+            </form>
+            <p role="status" aria-label="Result" id="result">idle</p>
+            <script>
+                let menu = null;
+                let dismissed = false;
+                user.addEventListener("focus", () => {{
+                    if (menu || dismissed) return;
+                    const box = user.getBoundingClientRect();
+                    menu = document.createElement("iframe");
+                    menu.src = {menu_url:?};
+                    menu.style = `position:absolute;left:0;top:${{box.bottom + scrollY}}px;width:420px;height:160px;border:0;background:#fff;z-index:2147483647`;
+                    document.body.append(menu);
+                    menu.focus();
+                }});
+                addEventListener("message", (event) => {{
+                    if (event.data !== "close-menu" || !menu) return;
+                    menu.remove();
+                    menu = null;
+                    dismissed = true;
+                }});
+                document.getElementById("go").addEventListener("click", (event) => {{
+                    if (event.isTrusted) document.getElementById("result").textContent = "continued";
+                }});
+            </script>"#
+        ),
+    )
+}
+
+async fn inline_menu_session(rig: &Rig) -> (FixtureSite, FixtureSite, Value) {
+    let menu = FixtureSite::spawn(vec![("/menu", Route::Html(inline_menu_frame()))]).await;
+    let site = FixtureSite::spawn(vec![(
+        "/login",
+        Route::Html(inline_menu_page(&menu.url("/menu"))),
+    )])
+    .await;
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":site.url("/login")}),
+        )
+        .await;
+    assert_eq!(started["status"], "completed", "workflow_start: {started}");
+    (menu, site, started)
+}
+
+pub async fn set_text_closes_a_frame_menu_that_takes_the_fields_focus(rig: &Rig) {
+    let (_menu, _site, started) = inline_menu_session(rig).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let typed = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"textbox","accessibleName":"Email"},
+                   "action":{"kind":"setText","value":"agent@example.test"}}),
+        )
+        .await;
+    assert_eq!(
+        typed["status"], "completed",
+        "setText under a menu: {typed}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut emails = Vec::new();
+    controls_named(&snapshot, "Email", &mut emails);
+    assert_eq!(
+        emails.first().map(|control| control["state"].clone()),
+        Some(json!({"kind":"text","value":"agent@example.test"})),
+        "the email was not typed: {snapshot}"
+    );
+    live.close().await;
+}
+
+pub async fn dismiss_obstruction_closes_a_frame_menu_without_vision(rig: &Rig) {
+    let (_menu, _site, started) = inline_menu_session(rig).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let continue_button = json!({"role":"button","accessibleName":"Continue"});
+    let opened = live
+        .call(
+            "click",
+            json!({"target":{"role":"textbox","accessibleName":"Email"}}),
+        )
+        .await;
+    assert_eq!(opened["status"], "completed", "click Email: {opened}");
+    let covered = live
+        .call("click", json!({"target":continue_button.clone()}))
+        .await;
+    assert_eq!(
+        covered["error"]["code"], "targetObscured",
+        "the menu does not cover the button: {covered}"
+    );
+    let dismissed = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"Close the menu over the sign-in form"}),
+        )
+        .await;
+    assert_eq!(
+        dismissed["status"], "completed",
+        "dismiss the frame menu: {dismissed}"
+    );
+    let clicked = live.call("click", json!({"target":continue_button})).await;
+    assert_eq!(clicked["status"], "completed", "click Continue: {clicked}");
+    let landed = wait_for_result(&live, "continued").await;
+    assert_eq!(landed["status"], "completed", "the click missed: {landed}");
+    live.close().await;
+}
+
 pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
     let started =
