@@ -1060,9 +1060,8 @@ impl ResolvedTarget {
         let node = page.execute(describe).await.map_err(cdp_error)?.result.node;
         let file_input = node.node_name.eq_ignore_ascii_case("input")
             && node.attributes.as_deref().is_some_and(|attributes| {
-                attributes.chunks_exact(2).any(|pair| {
-                    pair[0].eq_ignore_ascii_case("type")
-                        && pair[1].trim().eq_ignore_ascii_case("file")
+                attributes.as_chunks::<2>().0.iter().any(|[name, value]| {
+                    name.eq_ignore_ascii_case("type") && value.trim().eq_ignore_ascii_case("file")
                 })
             });
         Ok(file_input.then_some(node.backend_node_id))
