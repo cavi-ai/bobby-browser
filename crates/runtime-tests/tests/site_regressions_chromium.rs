@@ -35,6 +35,8 @@ cases::every_case!(
     a_split_code_with_one_named_box_takes_the_code,
     a_code_field_that_submits_itself_completes,
     a_fill_only_code_requires_readback,
+    leaving_a_split_code_step_early_fails_verification,
+    named_dismissal_checks_its_own_dialog,
     select_one_picks_the_exact_option_of_an_aria_combobox,
     a_submit_without_expected_state_is_verified_by_the_page,
     control_ids_stay_on_unnamed_controls_when_the_form_grows,

@@ -3794,13 +3794,20 @@ async fn read_typed_control_value(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return null;const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
             }),
         )
         .await?;
+    if response.pointer("/result/type").and_then(Value::as_str) == Some("null") {
+        return Err(driver_error(
+            ErrorCode::TargetDetached,
+            "Firefox control detached during post-input readback",
+            false,
+        ));
+    }
     let encoded = response
         .pointer("/result/value")
         .and_then(Value::as_str)
@@ -3840,13 +3847,20 @@ async fn form_control_validity_evidence(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return null;const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
             }),
         )
         .await?;
+    if response.pointer("/result/type").and_then(Value::as_str) == Some("null") {
+        return Err(driver_error(
+            ErrorCode::TargetDetached,
+            "Firefox control detached during post-input readback",
+            false,
+        ));
+    }
     let encoded = response
         .pointer("/result/value")
         .and_then(Value::as_str)
@@ -4467,6 +4481,45 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             },
             _ => target.clone(),
         }
+    }
+
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<Option<types::TargetSpec>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let script = dom_engine::enclosing_dialog_script(true);
+        let response = self.transport.send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});{script}}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        ).await?;
+        let result = &response["result"];
+        if result["type"] == "null" {
+            return Ok(None);
+        }
+        let css = result["value"].as_str().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "could not identify the dismissal control's dialog",
+                false,
+            )
+        })?;
+        Ok(Some(types::TargetSpec {
+            css: Some(css.into()),
+            frame_path: target.frame_path.clone(),
+            ..types::TargetSpec::default()
+        }))
     }
 
     async fn read_attribute(

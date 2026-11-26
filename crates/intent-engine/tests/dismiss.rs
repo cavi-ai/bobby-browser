@@ -32,6 +32,7 @@ struct FakeBrowser {
     /// The candidates once a vision click has landed, when it changes them.
     candidates_after_vision_click: Option<Vec<Candidate>>,
     candidates_after_click: Option<Vec<Candidate>>,
+    enclosing_dialog: Option<TargetSpec>,
 }
 
 #[async_trait]
@@ -47,6 +48,14 @@ impl IntentBrowser for FakeBrowser {
         } else {
             Ok(sequence.front().cloned().unwrap_or_default())
         }
+    }
+
+    async fn enclosing_dialog(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        Ok(self.enclosing_dialog.clone())
     }
 
     async fn click(
@@ -624,6 +633,11 @@ async fn unhinted_dismiss_clicks_a_named_close_control_when_vision_fails() {
                 vec![editor.clone()]
             } else {
                 Vec::new()
+            }),
+            enclosing_dialog: Some(TargetSpec {
+                role: editor.role.clone(),
+                accessible_name: editor.name.clone(),
+                ..TargetSpec::default()
             }),
             ..FakeBrowser::default()
         };

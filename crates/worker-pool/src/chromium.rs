@@ -3157,6 +3157,25 @@ impl crate::ObservationEngine for ChromiumWorker {
         gather_candidates(&page, target, Some(&browser)).await
     }
 
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        let resolved =
+            resolve_browser_target(page_id, &page, "", Some(target), Some(&browser)).await?;
+        Ok(resolved
+            .enclosing_dialog(&page)
+            .await?
+            .map(|css| TargetSpec {
+                css: Some(css),
+                frame_path: target.frame_path.clone(),
+                ..TargetSpec::default()
+            }))
+    }
+
     async fn read_attribute(
         &self,
         page_id: &PageId,

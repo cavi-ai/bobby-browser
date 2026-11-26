@@ -531,6 +531,15 @@ impl ResolvedTarget {
         Ok(open)
     }
 
+    /// Pins the dialog that contains or is controlled by this element.
+    pub(crate) async fn enclosing_dialog(
+        &self,
+        page: &Page,
+    ) -> Result<Option<String>, CommandError> {
+        self.eval(page, &dom_engine::enclosing_dialog_script(false))
+            .await
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {
@@ -1269,9 +1278,9 @@ const COMBOBOX_OPTIONS: &str = r#"
     let options = listed.filter(o => visible(o) && o.getAttribute('aria-disabled') !== 'true');
 "#;
 
-/// After COMBOBOX_OPTIONS, detects roleless rows. Only a popup associated with
-/// the field can supply rows that were visible before the operation.
-/// Live regions and visually hidden text are announcements, not rows.
+/// After [`COMBOBOX_OPTIONS`], detects roleless rows. Only a popup associated
+/// with the field can supply rows that were visible before the operation.
+/// Visible live containers can hold options alongside announcement nodes.
 const COMBOBOX_ROLELESS: &str = r#"
     const rolelessOptions = includeExisting => {
         if (options.length) return;
@@ -1284,10 +1293,16 @@ const COMBOBOX_ROLELESS: &str = r#"
             const kids = [...n.children].filter(c => norm(c.textContent));
             return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
         };
-        const spoken = n => {
+        const tiny = n => {
             const r = n.getBoundingClientRect();
-            const live = n.closest('[aria-live]')?.getAttribute('aria-live').trim().toLowerCase();
-            return r.width <= 1 || r.height <= 1 || live === 'polite' || live === 'assertive'
+            return r.width <= 1 || r.height <= 1;
+        };
+        const spoken = n => {
+            const region = n.closest('[aria-live]');
+            const live = region?.getAttribute('aria-live').trim().toLowerCase();
+            const announcement = (live === 'polite' || live === 'assertive')
+                && (region === n || tiny(region));
+            return tiny(n) || announcement
                 || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
         };
         options = roots.flatMap(r => [...r.querySelectorAll('*')]).filter(n =>

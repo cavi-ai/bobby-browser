@@ -2963,6 +2963,65 @@ pub async fn unhinted_dismiss_names_the_open_dialog(rig: &Rig) {
     live.close().await;
 }
 
+/// A named dismissal can remove a banner beside a dialog. After clicking a
+/// dialog's own close control, losing the control alone is insufficient.
+pub async fn named_dismissal_checks_its_own_dialog(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<section aria-label="Cookie notice">
+            <button onclick="this.parentElement.remove()">No thanks</button>
+        </section>
+        <div role="dialog" aria-label="Settings">
+            <p>Settings are open</p>
+            <button onclick="this.remove(); document.getElementById('close-help').hidden = false">Close</button>
+        </div>
+        <div id="help" role="dialog" aria-label="Help"><p>Help is open</p></div>
+        <button id="close-help" aria-controls="help" hidden
+            onclick="document.getElementById('help').hidden = true">Close modal</button>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let banner = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"dismiss the cookie prompt","timeoutMs":500}),
+        )
+        .await;
+    assert_eq!(banner["status"], "completed", "{banner}");
+    let dialogs = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&dialogs, "Settings are open"),
+        "{dialogs}"
+    );
+
+    let dialog = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"dismiss the settings prompt","timeoutMs":500}),
+        )
+        .await;
+    assert_eq!(dialog["error"]["code"], "obstructionSuspected", "{dialog}");
+    let dialogs = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&dialogs, "Settings are open"),
+        "{dialogs}"
+    );
+    let help = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"dismiss the help prompt","timeoutMs":500}),
+        )
+        .await;
+    assert_eq!(help["status"], "completed", "{help}");
+    let dialogs = live.snapshot(json!({})).await;
+    assert!(
+        page_text_contains(&dialogs, "Settings are open"),
+        "{dialogs}"
+    );
+    assert!(!page_text_contains(&dialogs, "Help is open"), "{dialogs}");
+    live.close().await;
+}
+
 /// Closing a modal reveals a banner with its own Close button: dismiss
 /// completes because the clicked control is gone, whatever else shares its name.
 pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
@@ -6494,6 +6553,58 @@ pub async fn a_fill_only_code_requires_readback(rig: &Rig) {
     live.close().await;
 }
 
+/// Exiting a named code box on its first digit differs from a page that
+/// submits after all digits have landed.
+pub async fn leaving_a_split_code_step_early_fails_verification(rig: &Rig) {
+    let form = r#"<h1>Enter the verification code</h1>
+        <form id="code-step">
+        <input aria-label="Verification code digit 1" inputmode="numeric" maxlength="1">
+        <input aria-label="Verification code digit 2" inputmode="numeric" maxlength="1">
+        <input aria-label="Verification code digit 3" inputmode="numeric" maxlength="1">
+        <input aria-label="Verification code digit 4" inputmode="numeric" maxlength="1">
+        </form><div id="result"></div>"#;
+    let code_step = |exit_index: usize, result: &str| {
+        page(
+            "Code",
+            &format!(
+                r#"{form}<script>
+                const step = document.getElementById('code-step');
+                const digits = [...step.querySelectorAll('input')];
+                step.addEventListener('input', (event) => {{
+                    if (event.target === digits[{exit_index}] &&
+                        digits.slice(0, {exit_index} + 1).every(digit => digit.value)) {{
+                        step.remove();
+                        document.getElementById('result').textContent = '{result}';
+                    }}
+                }});
+                </script>"#
+            ),
+        )
+    };
+    let site = FixtureSite::spawn(vec![
+        ("/expired", Route::Html(code_step(0, "Session expired"))),
+        ("/accepted", Route::Html(code_step(3, "Code accepted"))),
+    ])
+    .await;
+    let expired = Live::open(rig, &site.url("/expired")).await;
+    let outcome = expired
+        .call("intent_enter_code", json!({"code":"4829"}))
+        .await;
+    assert_eq!(outcome["error"]["code"], "verificationFailed", "{outcome}");
+    let page = expired.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Session expired"), "{page}");
+    expired.close().await;
+
+    let accepted = Live::open(rig, &site.url("/accepted")).await;
+    let outcome = accepted
+        .call("intent_enter_code", json!({"code":"4829"}))
+        .await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    let page = accepted.snapshot(json!({})).await;
+    assert!(page_text_contains(&page, "Code accepted"), "{page}");
+    accepted.close().await;
+}
+
 /// Eight boxes where only the first has a name: the code is typed from the
 /// first box while the page moves focus on input, and every box is read back.
 pub async fn a_split_code_with_one_named_box_takes_the_code(rig: &Rig) {
@@ -7100,7 +7211,7 @@ pub async fn select_one_reads_the_native_button_label(rig: &Rig) {
 pub async fn text_boxes_pick_a_suggestion_without_a_role(rig: &Rig) {
     let body = r#"<form><label for="city">Current location</label>
         <input id="city" type="text" autocomplete="off"><input type="hidden" id="place">
-        <div id="results" aria-live="off"></div></form><p id="picked"></p>
+        <div id="results" aria-live="polite"></div></form><p id="picked"></p>
         <script>
           const input = document.getElementById("city");
           const place = document.getElementById("place");
