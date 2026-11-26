@@ -60,6 +60,7 @@ pub struct RawFormControl {
     pub accessible_name: Option<String>,
     pub label: Option<String>,
     pub description: Option<String>,
+    pub container_description: Option<String>,
     pub placeholder: Option<String>,
     pub autocomplete: Option<String>,
     pub value: Option<String>,
@@ -413,7 +414,13 @@ fn normalize_control(
         label: raw
             .label
             .filter(|label| Some(label) != raw.accessible_name.as_ref()),
-        description: raw.description,
+        description: raw.description.or_else(|| {
+            raw.container_description.map(|text| {
+                let mut description = crate::secret_material::redact_secret_material(text);
+                description.truncate(description.floor_char_boundary(160));
+                description
+            })
+        }),
         placeholder: raw.placeholder,
         autocomplete: raw.autocomplete,
         state,
@@ -922,8 +929,22 @@ const pressedMark=/(^|[-_])(active|selected|checked|pressed)([-_]|$)/i;
 const isButton=e=>e.tagName==='BUTTON'||e.getAttribute('role')==='button';
 const pressed=e=>{if(!isButton(e))return false;if(e.getAttribute('aria-pressed')==='true'||e.getAttribute('aria-selected')==='true'||(e.getAttribute('aria-current')||'false')!=='false')return true;const marks=[...e.classList].filter(c=>pressedMark.test(c));return marks.length>0&&[...(e.parentElement?.children||[])].some(o=>o!==e&&isButton(o)&&marks.some(c=>!o.classList.contains(c)))};
 const fileNames=e=>{let box=null;for(let node=e.parentElement,hop=0;node&&hop<5&&!/^(FORM|FIELDSET|BODY)$/.test(node.tagName);node=node.parentElement,hop++){if([...node.querySelectorAll('input[type="file"]')].some(other=>other!==e))break;box=node}const shown=new Set();const walker=box&&box.ownerDocument.createTreeWalker(box,NodeFilter.SHOW_TEXT);for(let node=walker?.nextNode();node&&shown.size<8;node=walker.nextNode()){for(const match of node.data.matchAll(/[^\s\/\\:*?"<>|]+\.(?:pdf|docx?|odt|rtf|txt|md|pages|png|jpe?g|gif|webp|heic|csv|xlsx?|pptx?|zip)\b/giu))shown.add(clip(match[0],256))}const held=[...(e.files||[])].slice(0,32).map(f=>clip(f.name,256));if(!held.length)return [...shown].slice(0,8);const r=e.getBoundingClientRect(),s=getComputedStyle(e);return !box||shown.size||(r.width>=4&&r.height>=4&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0)?held:[]};
-const containerText=e=>{const buttons='button,[role="button"],input[type="button"],input[type="submit"],input[type="reset"]';if(!e.matches(buttons)||label(e))return null;let n=e.parentElement;for(let i=0;n&&i<4&&n.tagName!=='FORM'&&n!==document.body;i++,n=n.parentElement){if(n.querySelectorAll(buttons).length>1)return null;const t=text(n.innerText,160);if(t)return t}return null};
-const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description'))||containerText(e),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
+const containerText=e=>{
+    const buttons='button,[role="button"],input[type="button"],input[type="submit"],input[type="reset"]';
+    if(!e.matches(buttons)||label(e))return null;
+    let container=e.parentElement;
+    for(let depth=0;container&&depth<4&&container.tagName!=='FORM'&&container!==document.body;depth++,container=container.parentElement){
+        if(container.querySelectorAll(buttons).length>1)return null;
+        const content=container.innerText;
+        if(content?.trim()){
+            // Send complete text for redaction, or omit an oversized description.
+            if(content.length>2048||new TextEncoder().encode(content).length>2048)return null;
+            return text(content);
+        }
+    }
+    return null;
+};
+const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const description=text(describedBy.join(' '))||text(e.getAttribute('aria-description'));const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description,containerDescription:description?null:containerText(e),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
 "#;
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -1013,6 +1034,7 @@ mod tests {
             accessible_name: Some(name.into()),
             label: Some(name.into()),
             description: None,
+            container_description: None,
             placeholder: None,
             autocomplete: None,
             value: None,

@@ -3,6 +3,8 @@
 //! Intent-specific actions stay in the executor. This module owns the policy
 //! differences that affect resolution and keeps their failure evidence stable.
 
+use std::borrow::Cow;
+
 use super::*;
 
 /// Non-escalating resolution retains the full census for near-miss reporting.
@@ -29,21 +31,28 @@ pub(super) fn decide_candidates(
     census: &[Candidate],
     action: Option<&ControlAction>,
 ) -> Result<ResolutionDecision, dom_engine::ResolutionError> {
-    let compatible_pool = action
-        .map(|action| {
-            census
-                .iter()
-                .filter(|candidate| compatible(action, candidate))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let pool = if compatible_pool.is_empty() {
-        census
-    } else {
-        &compatible_pool
+    let pool = resolution_pool(census, action);
+    resolve_candidates(target, &pool, &ResolutionPolicy::default())
+}
+
+pub(super) fn resolution_pool<'a>(
+    census: &'a [Candidate],
+    action: Option<&ControlAction>,
+) -> Cow<'a, [Candidate]> {
+    let Some(action) = action else {
+        return Cow::Borrowed(census);
     };
-    resolve_candidates(target, pool, &ResolutionPolicy::default())
+    let compatible_pool = census
+        .iter()
+        .filter(|candidate| compatible(action, candidate))
+        .cloned()
+        .collect::<Vec<_>>();
+    if compatible_pool.is_empty() {
+        // Preserve action-mismatch errors when there are no compatible controls.
+        Cow::Borrowed(census)
+    } else {
+        Cow::Owned(compatible_pool)
+    }
 }
 
 pub(super) fn decide_file_candidates(
@@ -138,21 +147,12 @@ pub(super) async fn locate(
                 },
             )
         })?;
-    // Only resolution sees the compatible pool. Vision must retain the full
-    // census, and an empty compatible pool must retain action-mismatch errors.
-    let compatible_pool = match request.mode {
-        LocateMode::Fill(action) => census
-            .iter()
-            .filter(|candidate| compatible(action, candidate))
-            .cloned()
-            .collect::<Vec<_>>(),
-        _ => Vec::new(),
+    let action = match request.mode {
+        LocateMode::Fill(action) => Some(action),
+        _ => None,
     };
-    let pool = if compatible_pool.is_empty() {
-        &census
-    } else {
-        &compatible_pool
-    };
+    let pool = resolution_pool(&census, action);
+    let pool = pool.as_ref();
     let decision = decide_candidates(request.target, pool, None).map_err(|error| {
         failure(
             CommandError {
@@ -211,7 +211,7 @@ pub(super) async fn locate(
             }
             let candidates =
                 if request.intent_kind == "locate" || matches!(request.mode, LocateMode::Fill(_)) {
-                    ranked_near_miss_window(&census, request.purpose)
+                    ranked_near_miss_window(&census, pool, request.purpose)
                 } else {
                     Vec::new()
                 };

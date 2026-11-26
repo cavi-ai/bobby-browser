@@ -23,9 +23,8 @@ const NAME_FROM_CONTENT_ROLES: &[&str] = &[
 ];
 
 /// Why a snapshot reads `[redacted]`, stated once per snapshot that holds one.
-const REDACTION_REASON: &str = "[redacted] replaces text that looks like a credential, such as \
-    a token, key, password or card number, and the contents of password, payment and \
-    one-time-code fields.";
+const REDACTION_REASON: &str =
+    "[redacted] marks masked field values or text the runtime recognized as a credential.";
 
 fn carries_redaction(node: &Value) -> bool {
     ["name", "value", "description"]

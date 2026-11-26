@@ -8,7 +8,9 @@ use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
+use dom_engine::{
+    rank_candidates, resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy,
+};
 use futures_util::{stream, StreamExt};
 use observability::{
     ContextCandidateRankingMetric, ContextLookupOutcome, ContextRankedVisionMetric,
@@ -943,7 +945,11 @@ async fn prefill_candidates(
             }
             Some((
                 StuckKind::TargetMissing,
-                ranked_near_miss_window(&window_candidates, Some(&field.purpose)),
+                ranked_near_miss_window(
+                    &window_candidates,
+                    &locate::resolution_pool(&window_candidates, Some(&field.value)),
+                    Some(&field.purpose),
+                ),
             ))
         }
         ResolutionDecision::Ambiguous { candidates } => {
@@ -1085,11 +1091,11 @@ fn near_miss_tokens(purpose: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The stuck-step window: window-eligible candidates ranked by how many
-/// purpose words their role, name, label or text holds, DOM order on ties.
-/// Each row's role, name and ordinal target it.
+/// Rank the stuck-step window by role, name and label, with DOM order on ties.
+/// Candidate text can contain a live value and must not influence the score.
 fn ranked_near_miss_window(
     candidates: &[Candidate],
+    retry_pool: &[Candidate],
     purpose: Option<&str>,
 ) -> Vec<types::CandidateEvidence> {
     let tokens = near_miss_tokens(purpose);
@@ -1101,11 +1107,10 @@ fn ranked_near_miss_window(
         })
         .map(|(index, candidate)| {
             let haystack = format!(
-                "{} {} {} {}",
+                "{} {} {}",
                 candidate.role.as_deref().unwrap_or_default(),
                 candidate.name.as_deref().unwrap_or_default(),
                 candidate.label.as_deref().unwrap_or_default(),
-                candidate.text
             )
             .to_lowercase();
             let overlap = tokens
@@ -1127,10 +1132,19 @@ fn ranked_near_miss_window(
         .take(CONTEXT_RANK_CANDIDATE_LIMIT)
         .map(|(overlap, index)| {
             let candidate = &candidates[index];
-            let peer =
-                |other: &&Candidate| other.role == candidate.role && other.name == candidate.name;
-            let ordinal = (candidates.iter().filter(peer).count() > 1)
-                .then(|| candidates[..index].iter().filter(peer).count());
+            let retry = TargetSpec {
+                role: candidate.role.clone(),
+                accessible_name: candidate.name.clone(),
+                ..TargetSpec::default()
+            };
+            let ordinal = rank_candidates(&retry, retry_pool, &ResolutionPolicy::default())
+                .ok()
+                .filter(|matches| matches.len() > 1)
+                .and_then(|matches| {
+                    matches
+                        .iter()
+                        .position(|(matched, _)| matched.id == candidate.id)
+                });
             // Purpose words every row shares do not single any row out.
             let distinct = overlap > floor && best > floor;
             types::CandidateEvidence {

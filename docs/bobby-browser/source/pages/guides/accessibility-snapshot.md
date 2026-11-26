@@ -36,7 +36,7 @@ Each node is `{role, name, children?}`. Form controls add optional state:
 | `valueMin`, `valueMax` | Range bounds |
 | `target` | `{role, accessibleName, ordinal?}` for actionable nodes |
 
-Text that looks like a credential, and the contents of password, payment and one-time-code fields, read `"[redacted]"`. Over MCP, a snapshot that holds such text carries `redactionReason`, which says so.
+A snapshot can show `"[redacted]"` in place of masked field values or text recognized as credentials. Over MCP, a snapshot that contains this marker also carries `redactionReason`. Redaction depends on what the browser exposes and what the runtime recognizes.
 
 Repeated role and name pairs get zero-based `ordinal` values in tree order. Ordinals count every matching control on the page, even ones cut by `maxNodes`. A node whose name is redacted has no `target`.
 

@@ -1979,7 +1979,7 @@ async fn form_snapshot_describes_an_unnamed_button_by_its_container_text() {
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<form aria-label=Skills><ul><li><span>Rust</span><button type=button><svg width=8 height=8></svg></button></li><li><span>Go</span><button type=button><svg width=8 height=8></svg></button></li></ul><button type=button>Add skill</button></form>".into(),
+                url: "data:text/html,<form aria-label=Skills><ul><li><span>Rust</span><button type=button><svg width=8 height=8></svg></button></li><li><span>Go</span><button type=button><svg width=8 height=8></svg></button></li><li><span>API key: example-value</span><button type=button><svg width=8 height=8></svg></button></li></ul><button type=button>Add skill</button></form>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -2008,6 +2008,7 @@ async fn form_snapshot_describes_an_unnamed_button_by_its_container_text() {
         [
             (None, Some("Rust".to_owned())),
             (None, Some("Go".to_owned())),
+            (None, Some("[redacted]".to_owned())),
             (Some("Add skill".to_owned()), None),
         ]
     );
