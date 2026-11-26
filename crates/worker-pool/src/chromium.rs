@@ -2853,6 +2853,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
+        let mut truncated = false;
         let (text, html, resolution) = if command
             .target
             .as_ref()
@@ -2878,7 +2879,8 @@ impl crate::ObservationEngine for ChromiumWorker {
             // `find_element("body")` builds a chromiumoxide Element via
             // DescribeNode depth=100. Deserializing that tree overflows the
             // Linux debug stack on the Northstar cookie/consent page.
-            let text = read_page_body_text(&page).await?;
+            let (text, cut) = read_bounded_page_body_text(&page).await?;
+            truncated = cut;
             let text = self.with_form_values(&page, page_id, text).await;
             let html = if command.include_html {
                 Some(page.content().await.map_err(command_failed)?)
@@ -2912,6 +2914,7 @@ impl crate::ObservationEngine for ChromiumWorker {
             title: page_title_evidence(title),
             text: redact_secret_material(text),
             html: html.map(redact_secret_material),
+            truncated,
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
@@ -4999,6 +5002,23 @@ fn page_busy_evidence() -> Evidence {
         name: "pageBusy".into(),
         value: "true: the page still marked content as loading (aria-busy) when it was read; read again".into(),
     }
+}
+
+/// Whole-page text, cut in the page at [`crate::MAX_INSPECT_TEXT_CHARS`] so a
+/// large page never ships its full text; the flag says the page had more.
+async fn read_bounded_page_body_text(page: &Page) -> Result<(String, bool), CommandError> {
+    let expression = format!(
+        "(() => {{const text=document.body?(document.body.innerText||''):'';\
+const max={};if(text.length<=max)return [text,false];\
+let cut=text.slice(0,max);if(/[\\uD800-\\uDBFF]$/.test(cut))cut=cut.slice(0,-1);\
+return [cut,true]}})()",
+        crate::MAX_INSPECT_TEXT_CHARS
+    );
+    page.evaluate(expression)
+        .await
+        .map_err(command_failed)?
+        .into_value::<(String, bool)>()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {

@@ -12,6 +12,7 @@
 - A wait that times out, including an `expectedState` wait, names the text, value, URL or ready state it last read.
 - Chromium `inspect` and `form_snapshot` wait for `aria-busy` content to finish loading and flag a read that is still busy with `pageBusy`.
 - A failed `form_snapshot` or page open returns the browser's error code and `retryable` flag (`browserCommandFailed`, HTTP 502) instead of `internal`.
+- Chromium whole-page `inspect` cuts page text at 65,536 characters in the page and marks the inspection `truncated: true`.
 
 ## 0.28.0 - 2026-11-23
 

@@ -336,6 +336,7 @@ impl worker_pool::ObservationEngine for LiveWorker {
             title: "live-harness".into(),
             text,
             html: None,
+            truncated: false,
         }])
     }
 

@@ -71,6 +71,7 @@ pub(crate) fn inspect_document(
         title,
         text,
         html: command.include_html.then(|| selected.html()),
+        truncated: false,
     })
 }
 

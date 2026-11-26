@@ -2715,6 +2715,91 @@ async fn a_covered_click_names_the_covering_element() {
     worker.close().await.unwrap();
 }
 
+/// Whole-page text past the page-text bound is cut in the page and flagged.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn page_inspect_cuts_text_past_the_bound_and_flags_it() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    // About 1 MB of rendered text, far over the bound.
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,<main id=feed></main><script>",
+                    "document.getElementById('feed').textContent=",
+                    "'Row of listing text. '.repeat(50000);</script>"
+                )
+                .into(),
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let observation = worker_pool::observation_or_default(worker.observation());
+    let evidence = observation
+        .inspect(&page_id, &InspectCommand::default())
+        .await
+        .unwrap();
+    let Some(Evidence::Inspection {
+        text, truncated, ..
+    }) = evidence.first()
+    else {
+        panic!("inspect returned no inspection: {evidence:?}");
+    };
+    assert!(text.starts_with("Row of listing text."), "{}", &text[..64]);
+    assert!(*truncated, "text past the bound must be flagged");
+    assert!(
+        text.chars().count() <= worker_pool::MAX_INSPECT_TEXT_CHARS,
+        "returned {} chars",
+        text.chars().count()
+    );
+
+    let evidence = observation
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            evidence.first(),
+            Some(Evidence::Inspection {
+                truncated: true,
+                ..
+            })
+        ),
+        "a body selector is the whole page too"
+    );
+
+    worker.close().await.unwrap();
+}
+
 /// A read taken while the page marks its content as loading (`aria-busy`)
 /// waits for the mark to clear and returns the content that replaced it.
 #[tokio::test]

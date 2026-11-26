@@ -619,6 +619,7 @@ async fn settle_network_quiet(snapshot: Option<types::FormSnapshot>) -> IntentOu
             title: "Apply".into(),
             text: "Email is required".into(),
             html: None,
+            truncated: false,
         }],
         form_snapshot: snapshot,
         ..CallLog::default()

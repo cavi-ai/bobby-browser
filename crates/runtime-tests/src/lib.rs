@@ -1782,6 +1782,7 @@ mod tests {
                 title: "proof".into(),
                 text: "Authorization: Bearer do-not-retain".into(),
                 html: None,
+                truncated: false,
             },
         ];
         let proof = derive_native_browser_proof(

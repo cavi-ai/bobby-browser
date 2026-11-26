@@ -144,7 +144,7 @@ export interface ExecutionRecord {
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
-  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; pageDerived?: true }
+  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; truncated?: true; pageDerived?: true }
   | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[]; sha256?: string[] }

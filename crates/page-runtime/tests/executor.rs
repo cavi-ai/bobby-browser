@@ -329,6 +329,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "not-the-typed-value".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::AppendPrefill) {
@@ -338,6 +339,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "prefilledx".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::MaskedPhone) {
@@ -347,6 +349,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
                 title: "Fixture".into(),
                 text: "(555) 010-0199".into(),
                 html: None,
+                truncated: false,
             }]);
         }
         if matches!(self.mode, DriverMode::FailInspect) {
@@ -370,6 +373,7 @@ impl worker_pool::ObservationEngine for FakeWorker {
             title: "Fixture".into(),
             text: text.into(),
             html: None,
+            truncated: false,
         }])
     }
 
@@ -4125,6 +4129,7 @@ impl worker_pool::ObservationEngine for LifecycleTestWorker {
             title: "Inspected".into(),
             text: "ok".into(),
             html: None,
+            truncated: false,
         }])
     }
 

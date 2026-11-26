@@ -2941,7 +2941,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "inspection",
-            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES))}),
+            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES)),"truncated":{"type":"boolean"}}),
             &["selector", "url", "title", "text", "html"],
         ),
         tagged_fields(

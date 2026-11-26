@@ -460,7 +460,7 @@ export function isEvidence(value: unknown): value is Evidence {
         && ((value.bytes === null) === (value.sha256 === null))
         && validExecutionPathOptionalFields(value);
     case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
-    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["truncated", "pageDerived"]) && (value.truncated === undefined || value.truncated === true) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
     case "submitSettlement": return hasExactKeys(value, ["kind", "outcome"]) && (value.outcome === "settled" || value.outcome === "validationRejected");
     case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
     case "upload": return hasExactKeys(value, ["kind", "selector", "paths"], ["sha256"]) && isString(value.selector) && isStringArray(value.paths) && optional(value, "sha256", (digests): digests is string[] => Array.isArray(digests) && digests.every(isLowerSha256));
