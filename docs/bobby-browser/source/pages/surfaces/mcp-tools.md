@@ -89,7 +89,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `session_list` | `session:read` | List the caller's sessions |
 | `toolset_select` | none | Narrow `tools/list` to one phase |
 | `type_text` | `browser:mutate` | Type text into a selector or target |
-| `upload_files` | `browser:mutate`, `file:upload` | Set files on a file input |
+| `upload_files` | `browser:mutate`, `file:upload` | Set files on a file input; on Chromium, a target with no file input is clicked and the files go to the input its file chooser opens |
 | `wait_for` | `browser:mutate` | Wait for a page condition |
 | `workflow_observe` | `browser:mutate` (+ `page:read` with `includeForms`) | Read page context for a goal |
 | `workflow_recover` | `recovery:write` | Resume or restart from the last verified checkpoint |

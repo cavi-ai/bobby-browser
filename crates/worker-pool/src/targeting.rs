@@ -7,7 +7,9 @@ use crate::pointer_hit::{
     covering_element_function, parse_pointer_hit, pointer_hit_function, CoveringElement, PointerHit,
 };
 use chromiumoxide::browser::BrowserHandle;
-use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
+use chromiumoxide::cdp::browser_protocol::accessibility::{
+    GetPartialAxTreeParams, QueryAxTreeParams,
+};
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
@@ -16,11 +18,12 @@ use chromiumoxide::cdp::browser_protocol::dom::{
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, GetFrameTreeParams, GetLayoutMetricsParams, Viewport,
+    CaptureScreenshotFormat, EventFileChooserOpened, GetFrameTreeParams, GetLayoutMetricsParams,
+    SetInterceptFileChooserDialogParams, Viewport,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallFunctionOnParams, EvaluateParams, ExecutionContextId, GetPropertiesParams,
-    ReleaseObjectGroupParams, RemoteObjectId,
+    ReleaseObjectGroupParams, ReleaseObjectParams, RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
@@ -1112,49 +1115,100 @@ impl ResolvedTarget {
         .map_err(cdp_error)
     }
 
+    /// Sets `paths` on the file input the target is, labels or holds; a target
+    /// with none is clicked and the files go to the input its chooser opens.
     pub async fn set_files(&self, page: &Page, paths: Vec<String>) -> Result<(), CommandError> {
-        let page = self.execution_page(page);
+        let session = self.execution_page(page);
+        let input = match self.file_input_node(session).await? {
+            Some(input) => input,
+            None => self.open_file_chooser(page).await?,
+        };
+        check_file_selection(session, input, &paths).await?;
+        set_input_files(session, input, paths).await
+    }
+
+    async fn file_input_node(&self, page: &Page) -> Result<Option<BackendNodeId>, CommandError> {
         // Raw selectors own a stable native element handle. Semantic targets,
         // however, are gathered and then re-resolved; using the opportunistic
         // native handle here can hand DOM.setFileInputFiles an already-invalid
         // backend node even when the freshly stamped JS locator still resolves.
-        if self.locator.id.is_empty() {
+        let describe = if self.locator.id.is_empty() {
             let element = self.native.as_ref().ok_or_else(|| {
                 target_error(
                     ErrorCode::TargetNotFound,
                     "file input selector did not resolve to a native element",
                 )
             })?;
-            page.execute(
-                SetFileInputFilesParams::builder()
-                    .files(paths)
-                    .backend_node_id(element.backend_node_id)
-                    .build()
-                    .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
+            DescribeNodeParams::builder()
+                .backend_node_id(element.backend_node_id)
+                .build()
+        } else {
+            let expression = locator_expression(&self.locator, FILE_INPUT_OF_SCRIPT)?;
+            let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
+            DescribeNodeParams::builder().object_id(object_id).build()
+        };
+        let node = page.execute(describe).await.map_err(cdp_error)?.result.node;
+        let file_input = node.node_name.eq_ignore_ascii_case("input")
+            && node.attributes.as_deref().is_some_and(|attributes| {
+                attributes.as_chunks::<2>().0.iter().any(|[name, value]| {
+                    name.eq_ignore_ascii_case("type") && value.trim().eq_ignore_ascii_case("file")
+                })
+            });
+        Ok(file_input.then_some(node.backend_node_id))
+    }
+
+    /// A form's submit or reset button is never clicked to look for a chooser.
+    async fn open_file_chooser(&self, page: &Page) -> Result<BackendNodeId, CommandError> {
+        let submits = self
+            .eval::<bool>(
+                page,
+                "return Boolean(el.form)&&['submit','reset','image'].includes(el.type)",
             )
+            .await?;
+        if submits {
+            return Err(target_error(
+                ErrorCode::InvalidRequest,
+                "target is a form's submit or reset button, not a file input",
+            ));
+        }
+        use futures::StreamExt;
+        let session = self.execution_page(page);
+        let mut opened = session
+            .event_listener::<EventFileChooserOpened>()
             .await
             .map_err(cdp_error)?;
-            return Ok(());
-        }
-        let expression = locator_expression(&self.locator, FILE_INPUT_OF_SCRIPT)?;
-        let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
-        let backend_node_id = page
-            .execute(DescribeNodeParams::builder().object_id(object_id).build())
+        session
+            .execute(SetInterceptFileChooserDialogParams::new(true))
             .await
-            .map_err(cdp_error)?
-            .result
-            .node
-            .backend_node_id;
-        page.execute(
-            SetFileInputFilesParams::builder()
-                .files(paths)
-                .backend_node_id(backend_node_id)
-                .build()
-                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
-        )
-        .await
-        .map_err(cdp_error)?;
-        Ok(())
+            .map_err(cdp_error)?;
+        let chosen = async {
+            // Only trusted input may open a file chooser.
+            self.scroll_into_view(page).await?;
+            let point = self.clickable_point(page).await?.ok_or_else(|| {
+                target_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "target has no clickable point",
+                )
+            })?;
+            crate::chromium::pointer_check(self.receives_pointer(page).await?)?;
+            page.click(point).await.map_err(cdp_error)?;
+            tokio::time::timeout(FILE_CHOOSER_WAIT, opened.next())
+                .await
+                .ok()
+                .flatten()
+                .and_then(|event| event.backend_node_id)
+                .ok_or_else(|| {
+                    target_error(
+                        ErrorCode::TargetNotFound,
+                        "target is not a file input and opened no file chooser",
+                    )
+                })
+        }
+        .await;
+        let _ = session
+            .execute(SetInterceptFileChooserDialogParams::new(false))
+            .await;
+        chosen
     }
 
     /// Whether the target takes typed text; see [`ACCEPTS_TEXT_SCRIPT`].
@@ -1181,6 +1235,66 @@ impl ResolvedTarget {
         let expression = locator_expression(&self.locator, operation)?;
         eval_scoped(page, &self.locator.scope, expression).await
     }
+}
+
+/// How long a clicked upload target may take to open the file chooser.
+const FILE_CHOOSER_WAIT: Duration = Duration::from_secs(3);
+
+/// Read the input we will write to, including one created by the click and
+/// kept outside the document.
+async fn check_file_selection(
+    page: &Page,
+    input: BackendNodeId,
+    paths: &[String],
+) -> Result<(), CommandError> {
+    let object_id = page
+        .execute(ResolveNodeParams::builder().backend_node_id(input).build())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .object
+        .object_id
+        .ok_or_else(|| target_error(ErrorCode::TargetNotFound, "file input is gone"))?;
+    let mut request = CallFunctionOnParams::new(format!(
+        "function() {{ const el=this; {} }}",
+        crate::form_snapshot::file_input_control_script()
+    ));
+    request.object_id = Some(object_id.clone());
+    request.return_by_value = Some(true);
+    // Call on the resolved object in its own context. CDP rejects a separate
+    // execution context when an object id is supplied.
+    let result = page.execute(request).await;
+    let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+    let result = result.map_err(cdp_error)?.result;
+    if let Some(exception) = result.exception_details {
+        return Err(cdp_error(
+            chromiumoxide::error::CdpError::JavascriptException(Box::new(exception)),
+        ));
+    }
+    let encoded = result
+        .result
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| target_error(ErrorCode::TargetNotFound, "file input is gone"))?;
+    crate::chromium::refuse_shown_files_on_control(encoded, paths)
+}
+
+async fn set_input_files(
+    page: &Page,
+    input: BackendNodeId,
+    paths: Vec<String>,
+) -> Result<(), CommandError> {
+    page.execute(
+        SetFileInputFilesParams::builder()
+            .files(paths)
+            .backend_node_id(input)
+            .build()
+            .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
+    )
+    .await
+    .map_err(cdp_error)?;
+    Ok(())
 }
 
 /// How long an ARIA combobox may take to show the wanted option, and to show
@@ -1542,7 +1656,7 @@ pub(crate) async fn iframe_candidates(
     Ok(raw
         .into_iter()
         .map(into_candidate)
-        .filter(|candidate| candidate.role.as_deref() == Some("iframe") && candidate.state.attached)
+        .filter(|candidate| candidate.tag.as_deref() == Some("iframe") && candidate.state.attached)
         .collect())
 }
 
@@ -1571,7 +1685,7 @@ fn semantic_iframe_hop(
     let visible_iframes: Vec<_> = candidates
         .iter()
         .filter(|other| {
-            other.role.as_deref() == Some("iframe") && other.state.attached && other.state.visible
+            other.tag.as_deref() == Some("iframe") && other.state.attached && other.state.visible
         })
         .collect();
     types::SemanticTargetSegment {
@@ -1769,7 +1883,19 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        let mut candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        // A generated iframe hop identifies a DOM frame owner regardless of
+        // its ARIA role. Keep explicit non-iframe role selectors as written.
+        if normalized_frame_target
+            .role
+            .as_deref()
+            .is_some_and(|role| role.eq_ignore_ascii_case("iframe"))
+        {
+            candidates.retain(|candidate| candidate.tag.as_deref() == Some("iframe"));
+            for candidate in &mut candidates {
+                candidate.role = Some("iframe".into());
+            }
+        }
         let (candidate, evidence, _) = choose(&normalized_frame_target, &candidates, true)?;
         frame_path.push(semantic_iframe_hop(&candidate, &candidates));
         frame_trace.push(evidence);
@@ -2182,9 +2308,56 @@ async fn align_with_accessibility(
     {
         return Ok(candidates);
     }
-    let exposed = accessibility_matches(page, context_id, role, name).await?;
+    let mut exposed = accessibility_matches(page, context_id, role, name).await?;
+    add_unlabeled_file_matches(page, context_id, role, name, &candidates, &mut exposed).await;
     apply_accessibility_alignment(&mut candidates, role, name, &exposed);
     Ok(candidates)
+}
+
+/// An unlabeled file input takes the name the accessibility tree gives it from
+/// the browser's own button text, which a name query does not find.
+async fn add_unlabeled_file_matches(
+    page: &Page,
+    context_id: Option<ExecutionContextId>,
+    role: &str,
+    name: &str,
+    candidates: &[Candidate],
+    matches: &mut Vec<String>,
+) {
+    if role != "button" {
+        return;
+    }
+    let scope = LocatorScope::Context(context_id);
+    for candidate in candidates.iter().filter(|candidate| {
+        candidate.name.as_deref().is_none_or(str::is_empty)
+            && candidate.attributes.get("type").map(String::as_str) == Some("file")
+    }) {
+        let Ok(backend_node_id) = candidate_backend_node_id(page, &scope, &[], candidate).await
+        else {
+            continue;
+        };
+        let Ok(tree) = page
+            .execute(
+                GetPartialAxTreeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .fetch_relatives(false)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let name_matches = tree
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.backend_dom_node_id == Some(backend_node_id) && !node.ignored)
+            .and_then(|node| node.name.as_ref()?.value.as_ref()?.as_str().map(str::trim))
+            == Some(name.trim());
+        if name_matches {
+            matches.push(candidate.id.clone());
+        }
+    }
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
