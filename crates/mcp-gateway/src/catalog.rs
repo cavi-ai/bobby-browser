@@ -254,7 +254,7 @@ tools! {
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_fill_schema, args: IntentFillArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Fill", "Reconciliable"), hints: (false, false, false, false) }
-    intent_follow { order: 16, title: "Follow link", description: "Prefer over click + wait_for. Unknown next text: networkQuiet, then inspect postState. On failure inspect postState. With visionAssist, outcomeReading evidence says what the page shows. On needsReconciliation do not retry; call recovery_status. Requires browser:mutate and intent:execute.",
+    intent_follow { order: 16, title: "Follow link", description: "Prefer over click + wait_for. For unknown text use networkQuiet, then read postState. On failure read postState. Vision can add outcomeReading. On needsReconciliation do not retry. Call recovery_status. Requires browser:mutate and intent:execute.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
@@ -273,7 +273,7 @@ tools! {
             types::Capability::VisionAssist,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SolveChallenge", "Reconciliable"), hints: (false, false, false, false) }
-    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. No expectedState: a URL, submit control or field change verifies. submitSettlement=settled|validationRejected; on rejection fix formValidation fields, do not inspect or blindly resubmit. outcomeReading (visionAssist) says what the page shows. On failure with needsReconciliation call recovery_status.",
+    intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once via workflowHandle. Without expectedState, verify URL, submit control or field changes. Vision can add outcomeReading. On failure fix formValidation for validationRejected or call recovery_status for needsReconciliation. Requires browser:mutate and intent:execute.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
@@ -321,7 +321,7 @@ tools! {
     runtime_info { order: 41, title: "Runtime info", description: "Runtime state. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: RuntimeInfoArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
-    screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate; saveAs also requires file:download.",
+    screenshot { order: 42, title: "Screenshot", description: "Capture viewport, full page or element. Requires browser:mutate and, with saveAs, file:download.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
     session_capabilities { order: 43, title: "Inspect session capabilities", description: "Read engine-option eligibility for a session, with capability, policy, and connection reasons. Requires session:read. Consult tools/list for callable tools.",
