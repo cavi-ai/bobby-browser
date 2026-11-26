@@ -499,6 +499,15 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Pins the dialog that contains or is controlled by this element.
+    pub(crate) async fn enclosing_dialog(
+        &self,
+        page: &Page,
+    ) -> Result<Option<String>, CommandError> {
+        self.eval(page, &dom_engine::enclosing_dialog_script(false))
+            .await
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {
@@ -1162,7 +1171,8 @@ const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ')
 
 /// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
 /// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
-/// Live regions and visually hidden text are announcements, not rows.
+/// Skip announcement nodes and visually hidden text, including text inside
+/// a collapsed live region. A visible live container may still hold options.
 const COMBOBOX_ROLELESS: &str = r#"
 if (!options.length) {
     const before = el[Symbol.for('bobby.shownBeforeOptions')];
@@ -1172,10 +1182,16 @@ if (!options.length) {
         const kids = [...n.children].filter(c => norm(c.textContent));
         return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
     };
-    const spoken = n => {
+    const tiny = n => {
         const r = n.getBoundingClientRect();
-        const live = n.closest('[aria-live]')?.getAttribute('aria-live').trim().toLowerCase();
-        return r.width <= 1 || r.height <= 1 || live === 'polite' || live === 'assertive'
+        return r.width <= 1 || r.height <= 1;
+    };
+    const spoken = n => {
+        const region = n.closest('[aria-live]');
+        const live = region?.getAttribute('aria-live').trim().toLowerCase();
+        const announcement = (live === 'polite' || live === 'assertive')
+            && (region === n || tiny(region));
+        return tiny(n) || announcement
             || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
     };
     if (before) {

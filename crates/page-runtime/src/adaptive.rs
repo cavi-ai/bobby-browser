@@ -411,6 +411,27 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .ok()
     }
 
+    async fn enclosing_dialog(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        let worker = worker_pool::observation_or_default(self.lease.worker().observation());
+        let mut target = target.clone();
+        loop {
+            if let Some(dialog) = worker.enclosing_dialog(page_id, &target).await? {
+                return Ok(Some(dialog));
+            }
+            // A dialog in the parent document can contain the frame that
+            // supplies the close control.
+            let Some(mut parent) = target.frame_path.pop() else {
+                return Ok(None);
+            };
+            parent.frame_path = target.frame_path;
+            target = *parent;
+        }
+    }
+
     async fn read_attribute(
         &self,
         page_id: &PageId,
