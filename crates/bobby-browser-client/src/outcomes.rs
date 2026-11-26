@@ -918,6 +918,10 @@ pub enum ExecutionReason {
 pub struct CandidateEvidence {
     pub role: Option<String>,
     pub name: Option<String>,
+    /// Zero-based index among candidates with the same role and name, when
+    /// several share them; with `role` and `name` it targets this candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
     pub score: i32,
     pub reasons: Vec<String>,
 }

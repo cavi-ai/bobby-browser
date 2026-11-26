@@ -97,6 +97,7 @@ pub(super) fn open_dialogs(census: &[Candidate]) -> Vec<types::CandidateEvidence
         .map(|candidate| types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
+            ordinal: None,
             score: 0,
             reasons: vec!["openDialog".into()],
         })

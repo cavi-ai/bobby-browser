@@ -2751,6 +2751,7 @@ fn execution_record() -> Value {
             "candidates":array(object(json!({
                 "role":nullable(string(0,256)),
                 "name":nullable(string(0,MAX_STRING_BYTES)),
+                "ordinal":{"type":"integer","minimum":0,"maximum":1048576},
                 "score":{"type":"integer","minimum":-1000000,"maximum":1000000},
                 "reasons":array(string(0,MAX_STRING_BYTES),64)
             }), &["role","name","score","reasons"]), 64),
@@ -3200,7 +3201,7 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "target":{"$ref":"#/$defs/TargetSpec"},
                 "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
-                "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
+                "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"ordinal":{"type":"integer","minimum":0,"maximum":1048576},"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
                 "bestMatchAuthorized":{"type":"boolean"}
             }),
             &["target", "fingerprint", "candidates", "bestMatchAuthorized"],

@@ -7,6 +7,7 @@
 - A `schemaViolation` repair carries `example`, a complete argument object the tool's advertised schema accepts.
 - Snapshots nested in compact MCP results keep the first 10 options of each list inside a combobox and count the rest in `optionsOmitted`.
 - MCP accessibility snapshots that hold `[redacted]` text carry `redactionReason`, which says what is redacted and why.
+- A stuck locate or fill ranks its candidates by purpose words in their text as well as their names, and each candidate carries the `ordinal` that targets it.
 - Chromium `form_snapshot` describes an unnamed button by the text of the nearest container that holds no other button.
 
 ### Fixed

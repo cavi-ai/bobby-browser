@@ -334,6 +334,72 @@ async fn locate_reports_a_hidden_control_as_hidden_not_a_mismatch() {
 }
 
 #[tokio::test]
+async fn locate_near_miss_window_ranks_purpose_words_in_element_text_and_targets_the_row() {
+    let entry = |index: usize, person: &str| Candidate {
+        id: format!("entry-{index}"),
+        css: Some(format!("#entry-{index}")),
+        text: format!("{person} sent a message"),
+        attributes: BTreeMap::from([("id".to_owned(), format!("entry-{index}"))]),
+        ..button("Open conversation")
+    };
+    let mut candidates = (0..11)
+        .map(|index| entry(index, &format!("Person {index}")))
+        .collect::<Vec<_>>();
+    candidates.push(entry(11, "Ada Lovelace"));
+    let browser = FakeBrowser {
+        candidates: Arc::new(candidates),
+        wait_ok: true,
+    };
+    let purpose = "conversation entry for Ada Lovelace";
+    let stuck = IntentCommand::Locate(LocateIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+    let outcome =
+        IntentEngine::execute(&stuck, &PageId::new(), &browser, &VisionContext::default()).await;
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    let record = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution on stuck failure");
+    let first = &record.candidates[0];
+    assert_eq!(first.reasons, ["purposeOverlap"], "{:?}", record.candidates);
+    assert!(first.score > record.candidates[1].score);
+
+    let retry = IntentCommand::Locate(LocateIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: first.role.clone(),
+            accessible_name: first.name.clone(),
+            ordinal: first.ordinal,
+            ..IntentHints::default()
+        },
+    });
+    let outcome =
+        IntentEngine::execute(&retry, &PageId::new(), &browser, &VisionContext::default()).await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution { fingerprint, .. }
+                if fingerprint.stable_attributes.values().any(|value| value == "entry-11")
+        )),
+        "{evidence:?}"
+    );
+}
+
+#[tokio::test]
 async fn locate_zero_candidates_is_the_stuck_code_when_gates_closed() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![]),

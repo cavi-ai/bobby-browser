@@ -89,6 +89,8 @@ to retry its wait.
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |
 
+When `intent_locate` or a fill finds no control, its evidence lists up to ten candidates, before any vision step, ranked by how many purpose words each one's role, name, label or text holds. A row those words single out reads `purposeOverlap` and carries a score. Its `role`, `name` and `ordinal` copied into hints target it.
+
 Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete.
 
 ## Fill values

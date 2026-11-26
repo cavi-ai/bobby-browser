@@ -1049,18 +1049,7 @@ fn vision_window_eligible(role: Option<&str>, name: Option<&str>) -> bool {
 /// the target; this approximates that distribution without pretending to
 /// know it.
 pub fn near_miss_order(purpose: Option<&str>, rows: &[(Option<&str>, Option<&str>)]) -> Vec<usize> {
-    const STOPWORDS: [&str; 12] = [
-        "the", "and", "for", "with", "that", "this", "into", "your", "now", "off", "out", "put",
-    ];
-    let tokens = purpose
-        .map(|purpose| {
-            purpose
-                .split(|c: char| !c.is_alphanumeric())
-                .map(str::to_lowercase)
-                .filter(|token| token.len() > 2 && !STOPWORDS.contains(&token.as_str()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let tokens = near_miss_tokens(purpose);
     let mut scored = rows
         .iter()
         .enumerate()
@@ -1080,28 +1069,84 @@ pub fn near_miss_order(purpose: Option<&str>, rows: &[(Option<&str>, Option<&str
     scored.into_iter().map(|(_, index)| index).collect()
 }
 
+/// Purpose words the near-miss rankings match, lowercased.
+fn near_miss_tokens(purpose: Option<&str>) -> Vec<String> {
+    const STOPWORDS: [&str; 12] = [
+        "the", "and", "for", "with", "that", "this", "into", "your", "now", "off", "out", "put",
+    ];
+    purpose
+        .map(|purpose| {
+            purpose
+                .split(|c: char| !c.is_alphanumeric())
+                .map(str::to_lowercase)
+                .filter(|token| token.len() > 2 && !STOPWORDS.contains(&token.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The stuck-step window: window-eligible candidates ranked by how many
+/// purpose words their role, name, label or text holds, DOM order on ties.
+/// Each row's role, name and ordinal target it.
 fn ranked_near_miss_window(
     candidates: &[Candidate],
     purpose: Option<&str>,
 ) -> Vec<types::CandidateEvidence> {
-    let rows = candidates
+    let tokens = near_miss_tokens(purpose);
+    let mut scored = candidates
         .iter()
-        .map(|candidate| (candidate.role.as_deref(), candidate.name.as_deref()))
+        .enumerate()
+        .filter(|(_, candidate)| {
+            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+        })
+        .map(|(index, candidate)| {
+            let haystack = format!(
+                "{} {} {} {}",
+                candidate.role.as_deref().unwrap_or_default(),
+                candidate.name.as_deref().unwrap_or_default(),
+                candidate.label.as_deref().unwrap_or_default(),
+                candidate.text
+            )
+            .to_lowercase();
+            let overlap = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            (overlap, index)
+        })
         .collect::<Vec<_>>();
-    near_miss_order(purpose, &rows)
+    scored.sort_by_key(|(overlap, _)| std::cmp::Reverse(*overlap));
+    let best = scored.first().map_or(0, |(overlap, _)| *overlap);
+    let floor = scored
+        .iter()
+        .map(|(overlap, _)| *overlap)
+        .min()
+        .unwrap_or(0);
+    scored
         .into_iter()
         .take(CONTEXT_RANK_CANDIDATE_LIMIT)
-        .map(|index| &candidates[index])
-        .map(|candidate| types::CandidateEvidence {
-            role: candidate.role.clone(),
-            name: candidate.name.clone(),
-            score: 0,
-            // A control that exists but is not visible cannot match; say so.
-            reasons: vec![if candidate.state.visible {
-                "noMatch".into()
-            } else {
-                "hidden".into()
-            }],
+        .map(|(overlap, index)| {
+            let candidate = &candidates[index];
+            let peer =
+                |other: &&Candidate| other.role == candidate.role && other.name == candidate.name;
+            let ordinal = (candidates.iter().filter(peer).count() > 1)
+                .then(|| candidates[..index].iter().filter(peer).count());
+            // Purpose words every row shares do not single any row out.
+            let distinct = overlap > floor && best > floor;
+            types::CandidateEvidence {
+                role: candidate.role.clone(),
+                name: candidate.name.clone(),
+                ordinal,
+                score: if distinct { overlap as i32 * 10 } else { 0 },
+                // A control that exists but is not visible cannot match; say so.
+                reasons: vec![if !candidate.state.visible {
+                    "hidden".into()
+                } else if distinct {
+                    "purposeOverlap".into()
+                } else {
+                    "noMatch".into()
+                }],
+            }
         })
         .collect()
 }
@@ -1165,6 +1210,7 @@ fn disambiguate_by_purpose(
             evidence: types::CandidateEvidence {
                 role: candidate.role.clone(),
                 name: candidate.name.clone(),
+                ordinal: None,
                 score,
                 reasons,
             },
@@ -1208,6 +1254,7 @@ fn disambiguate_by_purpose(
         evidence: types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
+            ordinal: None,
             score,
             reasons,
         },
@@ -1455,6 +1502,7 @@ mod context_candidate_ranking_tests {
         types::CandidateEvidence {
             role: Some("button".into()),
             name: Some(name.into()),
+            ordinal: None,
             score: 0,
             reasons: vec!["noMatch".into()],
         }
@@ -2907,6 +2955,7 @@ fn disambiguate_submit_by_purpose(
         evidence: types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
+            ordinal: None,
             score,
             reasons,
         },
@@ -4740,6 +4789,7 @@ async fn stuck_outcome_with_prior_evidence(
             let candidates = [types::CandidateEvidence {
                 role: Some(label.role),
                 name: Some(label.accessible_name),
+                ordinal: None,
                 score: 0,
                 reasons: vec!["context".into()],
             }];
@@ -4814,6 +4864,7 @@ fn cached_candidate_evidence(
         .map(|candidate| types::CandidateEvidence {
             role: Some(candidate.role),
             name: Some(candidate.name),
+            ordinal: None,
             score: 0,
             reasons: vec!["visionPrefill".into()],
         })
@@ -4940,6 +4991,7 @@ mod screen_window_tests {
         let candidate = |name: &str| types::CandidateEvidence {
             role: Some("button".into()),
             name: Some(name.into()),
+            ordinal: None,
             score: 0,
             reasons: Vec::new(),
         };
