@@ -246,6 +246,14 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                if input.save_as.is_some() {
+                    if let Err(error) = self
+                        .authorization
+                        .require_capability(&context, types::Capability::FileDownload)
+                    {
+                        return interface_error_response(id, error);
+                    }
+                }
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,

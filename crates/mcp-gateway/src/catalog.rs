@@ -321,7 +321,7 @@ tools! {
     runtime_info { order: 41, title: "Runtime info", description: "Runtime state. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: RuntimeInfoArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
-    screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
+    screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate; saveAs also requires file:download.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
     session_capabilities { order: 43, title: "Inspect session capabilities", description: "Read engine-option eligibility for a session, with capability, policy, and connection reasons. Requires session:read. Consult tools/list for callable tools.",

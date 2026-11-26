@@ -2474,7 +2474,7 @@ fn first_screenshot(outcome: &Value) -> Option<&Value> {
 }
 
 /// `evidenceKey`: the caller key with the URL and digest of the result's
-/// screenshot, or the checkpoint's or post-state's URL when it has none.
+/// screenshot, or the checkpoint, post-state, or URL wait when it has none.
 fn attach_evidence_key(response: &mut Value, caller_key: &str) {
     let Some(outcome) = response
         .get_mut("result")
@@ -2485,11 +2485,17 @@ fn attach_evidence_key(response: &mut Value, caller_key: &str) {
     };
     let shot = first_screenshot(outcome);
     let url = shot
-        .and_then(|shot| shot.get("url"))
-        .or_else(|| outcome.get("currentUrl"))
-        .or_else(|| outcome.get("postState")?.get("url"))
-        .cloned()
-        .unwrap_or(Value::Null);
+        .and_then(|shot| shot["url"].as_str())
+        .or_else(|| outcome["currentUrl"].as_str())
+        .or_else(|| outcome["postState"]["url"].as_str())
+        .or_else(|| {
+            outcome["evidence"]
+                .as_array()?
+                .iter()
+                .rev()
+                .filter(|item| item["kind"] == "wait" && item["condition"]["kind"] == "url")
+                .find_map(|item| item["observed"].as_str())
+        });
     let sha256 = shot
         .and_then(|shot| shot.get("sha256"))
         .cloned()
@@ -2825,6 +2831,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_evidence_key_uses_the_observed_url_without_a_screenshot() {
+        let mut response = json!({
+            "result": {
+                "structuredContent": {
+                    "status": "completed",
+                    "currentUrl": null,
+                    "postState": {"status": "completed"},
+                    "evidence": [
+                        {"kind": "wait", "condition": {"kind": "document", "ready": "complete"},
+                         "elapsedMs": 5, "observations": 1, "observed": "complete"},
+                        {"kind": "wait", "condition": {"kind": "url",
+                            "matcher": {"kind": "contains", "value": "/sent"}},
+                         "elapsedMs": 5, "observations": 1, "observed": "https://example.test/sent"}
+                    ]
+                }
+            }
+        });
+
+        attach_evidence_key(&mut response, "test-job");
+
+        assert_eq!(
+            response["result"]["structuredContent"]["evidenceKey"],
+            json!({"callerKey": "test-job", "url": "https://example.test/sent", "sha256": null})
+        );
+    }
 
     #[test]
     fn an_envelope_outlasts_the_wait_its_command_asks_for() {

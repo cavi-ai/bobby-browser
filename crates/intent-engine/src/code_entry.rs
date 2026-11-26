@@ -435,29 +435,35 @@ const LINK_PHRASES: &[&str] = &[
     "verification link",
     "confirmation link",
     "activation link",
-    "verify your email",
-    "confirm your email",
-    "verify your account",
-    "activate your account",
-    "click the link",
-    "check your email to",
-    "check your inbox to",
+    "link to verify ",
+    "link to confirm ",
+    "link to activate ",
 ];
 
-/// The page's line about where a confirmation link went, when the page asks
-/// to confirm an email address through a link rather than a code.
+/// The page's instruction to open a verification link delivered by email.
 pub(crate) fn link_step_hint(page_text: &str) -> Option<String> {
-    let text = page_text.to_lowercase();
-    if !LINK_PHRASES.iter().any(|phrase| text.contains(phrase)) {
-        return None;
-    }
-    destination_hint(page_text).or_else(|| {
-        let line = page_text.lines().map(str::trim).find(|line| {
-            let lower = line.to_lowercase();
-            LINK_PHRASES.iter().any(|phrase| lower.contains(phrase))
-        })?;
-        Some(line.chars().take(MAX_HINT_CHARS).collect())
-    })
+    const DELIVERED: &[&str] = &[
+        "we sent ",
+        "we've sent ",
+        "we have sent ",
+        "has been sent ",
+        "was sent ",
+        "emailed ",
+    ];
+    // Read the verification link and email delivery from the same sentence.
+    page_text
+        .split(['\n', '\r', '!', '?'])
+        .flat_map(|line| line.split(". "))
+        .map(str::trim)
+        .find_map(|sentence| {
+            let text = sentence.to_lowercase().replace('\u{2019}', "'");
+            let verification_link = LINK_PHRASES.iter().any(|phrase| text.contains(phrase));
+            let check_mail = text.contains("check your email") || text.contains("check your inbox");
+            let delivered = DELIVERED.iter().any(|phrase| text.contains(phrase));
+            let by_email = text.contains("email") || text.contains("inbox") || text.contains('@');
+            (verification_link && (check_mail || (delivered && by_email)))
+                .then(|| sentence.chars().take(MAX_HINT_CHARS).collect())
+        })
 }
 
 /// The page's own sentence about where the code went, as shown. Engines
@@ -675,5 +681,30 @@ mod tests {
             Some("We sent a code to a***@example.com")
         );
         assert_eq!(step.code_length, Some(6));
+    }
+
+    #[test]
+    fn email_link_step_requires_specific_verification_instructions() {
+        for copy in [
+            "Click the link to view our privacy policy.",
+            "Create an account\nEmail\nConfirm your email\nContinue",
+            "We will send a verification link to your email address.",
+            "We sent a code to your email. Click the link to view our privacy policy.",
+            "We sent a confirmation link by text message.",
+            "We sent an email receipt. Verify your email in Settings.",
+        ] {
+            assert_eq!(link_step_hint(copy), None, "{copy}");
+        }
+
+        for copy in [
+            "We sent a verification link to j***@example.test.",
+            "We've emailed you a confirmation link.",
+            "Check your inbox for an activation link.",
+            "Check your email and click the link to verify your account.",
+            "A confirmation link has been sent to your email address.",
+            "We sent you an email with a link to verify your email address.",
+        ] {
+            assert!(link_step_hint(copy).is_some(), "{copy}");
+        }
     }
 }
