@@ -39,6 +39,22 @@ test("runtimeInfoForEngine sends and accepts the requested scope", async () => {
   });
 });
 
+test("runtime info requests opt into lost sessions on either scope", async () => {
+  const lostSessions = [{ sessionId: SESSION_ID, pageIds: [PAGE_ID] }];
+  await withServer((request, response) => {
+    const engineScope = request.url === "/v1/runtime?engine=firefox" ? "firefox" : undefined;
+    writeJson(response, 200, {
+      version: "test", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 1,
+      engineScope,
+      ...(request.headers["x-bobby-include-lost-sessions"] === "true" ? { lostSessions } : {}),
+    });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    assert.deepEqual((await client.runtimeInfo()).lostSessions, lostSessions);
+    assert.deepEqual((await client.runtimeInfoForEngine("firefox")).lostSessions, lostSessions);
+  });
+});
+
 async function withServer(
   handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
   run: (baseUrl: string) => Promise<void>,

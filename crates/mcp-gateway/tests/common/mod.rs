@@ -336,6 +336,7 @@ impl worker_pool::ObservationEngine for LiveWorker {
             title: "live-harness".into(),
             text,
             html: None,
+            truncated: false,
         }])
     }
 
@@ -412,6 +413,7 @@ impl worker_pool::ObservationEngine for LiveWorker {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
                 truncated: false,
+                page_busy: false,
             },
         }])
     }

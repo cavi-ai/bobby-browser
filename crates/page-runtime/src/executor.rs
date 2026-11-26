@@ -603,6 +603,7 @@ impl PageRuntime {
             _ => None,
         };
         if let Some((outcome_label, error)) = failure_fields {
+            // The live error message can contain page observations.
             tracing::warn!(
                 command = crate::context::command_kind_name(&envelope.command),
                 session_id = %envelope.session_id.0,
@@ -610,7 +611,6 @@ impl PageRuntime {
                 outcome = outcome_label,
                 code = ?error.code,
                 retryable = error.retryable,
-                message = %error.message,
                 "command failed"
             );
         }

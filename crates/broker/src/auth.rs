@@ -595,6 +595,8 @@ fn error_status(error: &InterfaceError) -> StatusCode {
         // The runtime is up; its browser engine is not. A dependency outage, so
         // the same request is worth resubmitting once the engine answers.
         InterfaceErrorCode::EngineUnreachable => StatusCode::SERVICE_UNAVAILABLE,
+        // The browser answered with a failure for this page's command.
+        InterfaceErrorCode::BrowserCommandFailed => StatusCode::BAD_GATEWAY,
         InterfaceErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         InterfaceErrorCode::InvalidRequest
         | InterfaceErrorCode::UnsupportedInterfaceVersion

@@ -821,23 +821,25 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let cdp_config = config.cdp.clone();
-    let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle, _) = bootstrap_listener_with(
-        config,
-        startup,
-        types::WireTimestamp::now,
-        |config| async move {
-            RuntimeService::build(&config)
-                .await
-                .map_err(anyhow::Error::new)
-        },
-        |addr| async move {
-            tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(anyhow::Error::new)
-        },
-    )
-    .await?;
+    let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle, runtime) =
+        bootstrap_listener_with(
+            config,
+            startup,
+            types::WireTimestamp::now,
+            |config| async move {
+                RuntimeService::build(&config)
+                    .await
+                    .map_err(anyhow::Error::new)
+            },
+            |addr| async move {
+                tokio::net::TcpListener::bind(addr)
+                    .await
+                    .map_err(anyhow::Error::new)
+            },
+        )
+        .await?;
     let cdp_listen = spawn_configured_cdp(&cdp_config, cdp_bootstrap).await?;
+    runtime.sessions.activate_ledger().await;
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
@@ -1492,11 +1494,12 @@ where
         )
         .await?;
     if let Some(control) = &shared {
-        control.attach(impact_runtime, gateway_lifecycle.clone());
+        control.attach(impact_runtime.clone(), gateway_lifecycle.clone());
         app = app.merge(control.router());
         (control.ready)(listener.local_addr()?)?;
     }
     let cdp_listen = spawn_configured_cdp(&cdp_config, cdp_bootstrap).await?;
+    impact_runtime.sessions.activate_ledger().await;
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })

@@ -108,6 +108,10 @@ pub struct BrowserSelectionConfig {
 pub struct ChromiumProfileConfig {
     pub profile_id: String,
     pub profile_dir: PathBuf,
+    /// Launch its Chrome with the system keychain and password store instead
+    /// of the mock keychain. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub system_keychain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -892,6 +896,12 @@ scheduler_journal_path = "s"
             parsed.chromium[0].profile_dir,
             std::path::PathBuf::from("/profiles/signed-in")
         );
+        assert!(!parsed.chromium[0].system_keychain);
+        let system: BrowserSelectionConfig = serde_json::from_value(serde_json::json!({
+            "chromium": [{ "profileId": "p", "profileDir": "/p", "systemKeychain": true }]
+        }))
+        .unwrap();
+        assert!(system.chromium[0].system_keychain);
         assert!(
             serde_json::from_value::<BrowserSelectionConfig>(serde_json::json!({
                 "chromium": [{ "profileId": "signed-in", "profileDir": "/p", "port": 9222 }]

@@ -89,6 +89,10 @@ pub struct RawFormControl {
     pub validation_message: Option<String>,
     pub described_by: Vec<String>,
     pub options: Vec<RawFormOption>,
+    /// Values of a native select's selected options, including options past
+    /// the `options` cap.
+    #[serde(default)]
+    pub selected_values: Option<Vec<String>>,
     pub frame_path: Vec<SemanticTargetSegment>,
     pub shadow_path: Vec<SemanticTargetSegment>,
     /// The number the snapshot stamped on the element; an element keeps it
@@ -251,6 +255,7 @@ pub fn normalize_form_snapshot(
         forms,
         unowned_controls,
         truncated,
+        page_busy: false,
     };
     snapshot
         .validate()
@@ -400,12 +405,13 @@ fn normalize_control(
         }
         FormControlKind::SelectOne | FormControlKind::SelectMultiple | FormControlKind::Listbox => {
             FormControlState::Selection {
-                values: raw
-                    .options
-                    .iter()
-                    .filter(|option| option.selected)
-                    .map(|option| option.value.clone())
-                    .collect(),
+                values: raw.selected_values.clone().unwrap_or_else(|| {
+                    raw.options
+                        .iter()
+                        .filter(|option| option.selected)
+                        .map(|option| option.value.clone())
+                        .collect()
+                }),
             }
         }
         // An input the widget emptied still holds the files its row shows.
@@ -987,7 +993,7 @@ const pressedMark=/(^|[-_])(active|selected|checked|pressed)([-_]|$)/i;
 const isButton=e=>e.tagName==='BUTTON'||e.getAttribute('role')==='button';
 const pressed=e=>{if(!isButton(e))return false;if(e.getAttribute('aria-pressed')==='true'||e.getAttribute('aria-selected')==='true'||(e.getAttribute('aria-current')||'false')!=='false')return true;const marks=[...e.classList].filter(c=>pressedMark.test(c));return marks.length>0&&[...(e.parentElement?.children||[])].some(o=>o!==e&&isButton(o)&&marks.some(c=>!o.classList.contains(c)))};
 const fileNames=e=>{let box=null;for(let node=e.parentElement,hop=0;node&&hop<5&&!/^(FORM|FIELDSET|BODY)$/.test(node.tagName);node=node.parentElement,hop++){if([...node.querySelectorAll('input[type="file"]')].some(other=>other!==e))break;box=node}const shown=new Set();const walker=box&&box.ownerDocument.createTreeWalker(box,NodeFilter.SHOW_TEXT);for(let node=walker?.nextNode();node&&shown.size<8;node=walker.nextNode()){for(const match of node.data.matchAll(/[^\s\/\\:*?"<>|]+\.(?:pdf|docx?|odt|rtf|txt|md|pages|png|jpe?g|gif|webp|heic|csv|xlsx?|pptx?|zip)\b/giu))shown.add(clip(match[0],256))}const held=[...(e.files||[])].slice(0,32).map(f=>clip(f.name,256));if(!held.length)return [...shown].slice(0,8);const r=e.getBoundingClientRect(),s=getComputedStyle(e);return !box||shown.size||(r.width>=4&&r.height>=4&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0)?held:[]};
-const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,framePath,shadowPath}};
+const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner=e.form&&formKeys.get(e.form)||null;const fieldset=e.closest('fieldset');const groupKey=fieldset&&groupKeys.get(fieldset)||null;const tag=e.tagName.toLowerCase();const type=text(e.getAttribute('type'))||('type'in e?text(e.type):null);const isPassword=type==='password';const describedBy=resolveRefs(e,'aria-describedby');const validity=e.validity||{};const validityFlags=['valueMissing','typeMismatch','patternMismatch','tooLong','tooShort','rangeUnderflow','rangeOverflow','stepMismatch','badInput','customError'].filter(name=>validity[name]);const own='value'in e?clip(e.value,4096):clip(e.textContent||'',4096);const current=own||(e.getAttribute('role')==='combobox'&&(tag==='input'||tag==='textarea')?shownValue(e):'');const groupMet=type==='checkbox'&&!e.checked&&validityFlags.length===1&&validityFlags[0]==='valueMissing'&&checkedPeer(e);const options=[];if(e.options)for(const option of [...e.options].slice(0,512)){const group=option.parentElement?.tagName==='OPTGROUP'?option.parentElement:null;options.push({value:clip(option.value,4096),label:clip(option.label||option.textContent||'',2048),disabled:Boolean(option.disabled||group?.disabled),selected:Boolean(option.selected),groupLabel:text(group?.label)})}return{key:`raw-control-${index+1}`,formKey:owner,groupKey,tag,inputType:type,contentEditable:Boolean(e.isContentEditable),explicitRole:text(e.getAttribute('role')),accessibleName:label(e),label:text(controlLabel(e)),description:text(describedBy.join(' '))||text(e.getAttribute('aria-description')),placeholder:text(e.getAttribute('placeholder')),autocomplete:text(e.getAttribute('autocomplete')),value:isPassword?null:current,valuePresent:Boolean(isPassword?e.value:current),checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true'||pressed(e)),fileCount:type==='file'?Math.min(e.files?.length||0,512):0,fileNames:type==='file'?fileNames(e):[],hasPopup:text(e.getAttribute('aria-haspopup')),required:Boolean(e.required||e.getAttribute('aria-required')==='true'),readOnly:Boolean(e.readOnly||e.getAttribute('aria-readonly')==='true'),disabled:Boolean(e.matches(':disabled')||e.getAttribute('aria-disabled')==='true'||e.closest('[inert]')),pattern:text(e.getAttribute('pattern')),minLength:Number.isInteger(e.minLength)&&e.minLength>=0?e.minLength:null,maxLength:Number.isInteger(e.maxLength)&&e.maxLength>=0?e.maxLength:null,min:text(e.getAttribute('min')),max:text(e.getAttribute('max')),step:text(e.getAttribute('step')),multiple:Boolean(e.multiple||e.getAttribute('aria-multiselectable')==='true'),accept:(e.getAttribute('accept')||'').split(',').map(value=>text(value)).filter(Boolean).slice(0,128),willValidate:Boolean(e.willValidate),valid:validity.valid!==false||groupMet,validityFlags:groupMet?[]:validityFlags,validationMessage:isPassword||groupMet?null:text(e.validationMessage,1024),describedBy,options,selectedValues:e.selectedOptions?[...e.selectedOptions].slice(0,512).map(option=>clip(option.value,4096)):null,framePath,shadowPath}};
 "#;
 
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
@@ -1111,6 +1117,7 @@ mod tests {
             validation_message: None,
             described_by: Vec::new(),
             options: Vec::new(),
+            selected_values: None,
             frame_path: Vec::new(),
             shadow_path: Vec::new(),
             stamp: None,

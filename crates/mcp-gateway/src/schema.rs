@@ -1298,6 +1298,14 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 "engineScope":{"type":"string","enum":["chromium","firefox","webKit"]},
                 "capabilities":array(string(0, 64), 32),
                 "active_sessions":{"type":"integer","minimum":0},
+                // Sessions the previous runtime held when it stopped; they are gone.
+                "lostSessions":{"type":"array","items":object(
+                    json!({
+                        "sessionId":{"type":"string"},
+                        "pageIds":{"type":"array","items":{"type":"string"}}
+                    }),
+                    &["sessionId", "pageIds"],
+                )},
                 "queued_jobs":{"type":"integer","minimum":0},
                 "uptime_ms":{"type":"integer","minimum":0},
                 "credentialExpiresAt":{"type":"string","format":"date-time"},
@@ -1356,8 +1364,9 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["closed"],
         ),
         // `PageState`'s own fields plus `navigationOutcome` (present whenever `url`
-        // was given) and, only if that navigation did not complete, `cleanupOutcome`
-        // and `pageClosed`. Those three are declared but not required.
+        // was given) and, only if that navigation failed for a reason other than
+        // running out of time, `cleanupOutcome` and `pageClosed`. Those three are
+        // declared but not required.
         //
         // Must be inlined into `page_state()`'s `properties`, not `allOf`-ed as a
         // `$ref`: JSON Schema 2020-12 `additionalProperties` is not annotation-aware
@@ -1550,9 +1559,10 @@ fn advertised_output_shape(name: &str) -> Value {
             let mut schema = object(
                 json!({
                     "workflowId":id(),
+                    "sessionId":id(),
                     "checkpoint":json!({"type":"object"}),
                     "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
-                    "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+                    "workflows":array(id(), MAX_RECOVERABLE_WORKFLOWS)
                 }),
                 &[],
             );
@@ -1633,6 +1643,12 @@ fn advertised_output_shape(name: &str) -> Value {
                 .as_object_mut()
                 .expect("output schemas are objects")
                 .remove("$defs");
+            // `lostSessions` stays in `tool_output_schema` only: naming it here
+            // would exceed the explore-catalog size ceiling.
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("lostSessions");
+            }
+            schema["additionalProperties"] = json!(true);
             schema
         }
         _ => {
@@ -2940,7 +2956,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "inspection",
-            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES))}),
+            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES)),"truncated":{"type":"boolean"}}),
             &["selector", "url", "title", "text", "html"],
         ),
         tagged_fields(
@@ -4804,17 +4820,43 @@ fn deref_schema<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
 }
 
 fn schema_at<'a>(root: &'a Value, schema: &'a Value, pointer: &str) -> Option<&'a Value> {
-    let mut node = deref_schema(root, schema)?;
+    let mut node = deref_non_null(root, schema)?;
     for token in pointer.split('/').skip(1) {
         let token = token.replace("~1", "/").replace("~0", "~");
-        node = deref_schema(root, node)?;
+        node = deref_non_null(root, node)?;
         node = node
             .get("properties")
             .and_then(|properties| properties.get(&token))
             .or_else(|| node.get("items").filter(|_| token.parse::<usize>().is_ok()))
             .or_else(|| node.get("additionalProperties").filter(|v| v.is_object()))?;
     }
-    deref_schema(root, node)
+    deref_non_null(root, node)
+}
+
+/// The non-null schema of `{"oneOf":[X,{"type":"null"}]}`, the shape
+/// `nullable(X)` writes.
+fn nullable_inner(choices: &[Value]) -> Option<&Value> {
+    let null = json!({"type":"null"});
+    match choices {
+        [inner, other] | [other, inner] if *other == null && *inner != null => Some(inner),
+        _ => None,
+    }
+}
+
+/// [`deref_schema`], then the non-null schema of each nullable wrapper.
+fn deref_non_null<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    let mut node = deref_schema(root, schema)?;
+    for _ in 0..8 {
+        let Some(inner) = node
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .and_then(|choices| nullable_inner(choices))
+        else {
+            return Some(node);
+        };
+        node = deref_schema(root, inner)?;
+    }
+    None
 }
 
 fn variant_kind(variant: &Value) -> Option<&str> {
@@ -5013,15 +5055,22 @@ fn validate_at(
         return validate_at(root, target, value, depth, pointer);
     }
     if let Some(choices) = schema.get("oneOf").and_then(Value::as_array) {
-        // Report the branch point rather than one arbitrary branch's failure:
-        // with a discriminated union the useful signal is "this value matched
-        // no variant", not why the last variant disagreed.
-        let matches = choices
-            .iter()
-            .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
-            .count();
-        if matches != 1 {
-            return Err(SchemaViolation::at(pointer, "oneOf"));
+        match nullable_inner(choices) {
+            // A nullable field holding a value reports where that value
+            // breaks its own schema.
+            Some(inner) if !value.is_null() => validate_at(root, inner, value, depth, pointer)?,
+            // Report the branch point rather than one arbitrary branch's failure:
+            // with a discriminated union the useful signal is "this value matched
+            // no variant", not why the last variant disagreed.
+            _ => {
+                let matches = choices
+                    .iter()
+                    .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
+                    .count();
+                if matches != 1 {
+                    return Err(SchemaViolation::at(pointer, "oneOf"));
+                }
+            }
         }
     }
     if let Some(choices) = schema.get("anyOf").and_then(Value::as_array) {
