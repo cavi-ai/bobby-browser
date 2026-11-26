@@ -888,26 +888,29 @@ pub fn form_snapshot_expression(page_id: &PageId) -> String {
 }
 
 pub fn form_snapshot_expression_with_limit(_page_id: &PageId, max_controls: usize) -> String {
-    form_projection_expression(max_controls, true, 1)
+    form_projection_expression(max_controls, true, None)
 }
 
-/// The snapshot of one frame's document, whose new control stamps start at
-/// `stamp_floor` so they stay apart from the stamps of other documents.
-pub(crate) fn frame_form_snapshot_expression(max_controls: usize, stamp_floor: u32) -> String {
-    form_projection_expression(max_controls, true, stamp_floor)
+/// The snapshot of a frame and its readable descendants. New stamps come
+/// from a range already reserved in the top document.
+pub(crate) fn frame_form_snapshot_expression(max_controls: usize, first_stamp: u32) -> String {
+    form_projection_expression(max_controls, true, Some(first_stamp))
 }
 
 pub(crate) fn inspection_form_expression(max_controls: usize) -> String {
-    form_projection_expression(max_controls, false, 1)
+    form_projection_expression(max_controls, false, None)
 }
 
 fn form_projection_expression(
     max_controls: usize,
     stamp_controls: bool,
-    stamp_floor: u32,
+    first_reserved_stamp: Option<u32>,
 ) -> String {
+    let first_reserved_stamp = first_reserved_stamp
+        .map(|stamp| stamp.to_string())
+        .unwrap_or_else(|| "null".into());
     RAW_FORM_SNAPSHOT_SCRIPT
-        .replace("__STAMP_FLOOR__", &stamp_floor.to_string())
+        .replace("__FIRST_RESERVED_STAMP__", &first_reserved_stamp)
         .replace(
             "__STAMP_CONTROLS__",
             if stamp_controls { "true" } else { "false" },
@@ -926,8 +929,18 @@ fn form_projection_expression(
 /// Returns a function body that reads `el` as one raw form control, as JSON
 /// text, or null when `el` is detached or not a form control.
 pub fn form_control_script() -> String {
+    form_control_projection_script(&format!(
+        "!el.isConnected||!el.matches('{CONTROL_SELECTOR}')"
+    ))
+}
+
+pub(crate) fn file_input_control_script() -> String {
+    form_control_projection_script("el.localName!=='input'||el.type!=='file'")
+}
+
+fn form_control_projection_script(skip: &str) -> String {
     format!(
-        "{RAW_CONTROL_FUNCTIONS}if(!el.isConnected||!el.matches('{CONTROL_SELECTOR}'))return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
+        "{RAW_CONTROL_FUNCTIONS}if({skip})return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
     )
     .replace("__SHOWN_VALUE_FUNCTION__", SHOWN_VALUE_FUNCTION)
     .replace("__CONTROL_LABEL_FUNCTION__", dom_engine::control_label_function())
@@ -1008,21 +1021,30 @@ if(!STAMP_CONTROLS){
 }
 const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;
 const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');
-let next=Math.max(__STAMP_FLOOR__,isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1);
-for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
-  const v=el.getAttribute(stampKey);
-  if(isStamp(v))next=Math.max(next,Number(v)+1);
+const firstReservedStamp=__FIRST_RESERVED_STAMP__;
+let next=firstReservedStamp;
+if(firstReservedStamp===null){
+  const cursor=docEl?.getAttribute(nextKey);
+  next=isStamp(cursor)?Number(cursor):1;
+  for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
+    const v=el.getAttribute(stampKey);
+    if(isStamp(v))next=Math.max(next,Number(v)+1);
+  }
 }
 const used=new Set();
 const controls=controlElements.map((control,index)=>{
   const e=control.element;
   const own=e.getAttribute(stampKey);
   let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;
-  if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}
+  if(!stamp){
+    while(used.has(next))next++;
+    stamp=next++;
+    e.setAttribute(stampKey,String(stamp));
+  }
   used.add(stamp);
   return{...readControl(control,index),stamp};
 });
-if(docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
+if(firstReservedStamp===null&&docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
 return{forms,groups,controls,truncated};})())"#;
 
 const _LEGACY_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{

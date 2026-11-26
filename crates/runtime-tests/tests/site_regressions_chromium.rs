@@ -22,6 +22,7 @@ cases::every_case!(
     iframe_scoped_targets_reach_the_second_frame,
     iframe_scoped_snapshot_descends_into_child_frames,
     form_snapshot_lists_a_form_inside_a_frame_from_another_site,
+    form_snapshot_reserves_control_ids_before_stamping_a_frame,
     scoped_snapshot_frame_targets_reach_the_second_frame,
     scoped_snapshot_targets_preserve_parent_frame_paths,
     scoped_snapshot_in_frame_descends_into_child_frames,
@@ -107,10 +108,38 @@ async fn a_button_that_opens_the_file_chooser_takes_the_upload() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn a_covered_upload_trigger_leaves_the_covering_input_empty() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_covered_upload_trigger_leaves_the_covering_input_empty(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_chooser_upload_preserves_an_existing_file_selection() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::a_chooser_upload_preserves_an_existing_file_selection(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn the_only_file_input_takes_its_snapshot_target() {
     let dir = tempfile::tempdir().expect("upload dir");
     let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
     cases::the_only_file_input_takes_its_snapshot_target(&rig, dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn an_unlabeled_file_input_keeps_its_snapshot_ordinal_beside_a_matching_button() {
+    let dir = tempfile::tempdir().expect("upload dir");
+    let rig = Rig::chromium_with_upload_roots(vec![dir.path().to_path_buf()]).await;
+    cases::an_unlabeled_file_input_keeps_its_snapshot_ordinal_beside_a_matching_button(
+        &rig,
+        dir.path(),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

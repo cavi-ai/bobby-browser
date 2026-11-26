@@ -4536,7 +4536,7 @@ pub async fn form_snapshot_lists_a_form_inside_a_frame_from_another_site(rig: &R
     let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
     let body = format!(
         r#"<main><h1>Host</h1><label>Search <input type="search"></label>
-        <iframe title="Widget" src="{frame_url}" style="width:400px;height:200px"></iframe>
+        <iframe role="presentation" title="Widget" src="{frame_url}" style="width:400px;height:200px"></iframe>
         <p role="status" aria-label="Result">idle</p></main>
         <script>addEventListener('message', (event) => {{ document.querySelector('[aria-label="Result"]').textContent = String(event.data); }});</script>"#
     );
@@ -4576,6 +4576,56 @@ pub async fn form_snapshot_lists_a_form_inside_a_frame_from_another_site(rig: &R
         landed["status"], "completed",
         "the framed field never got the value: {landed}"
     );
+    live.close().await;
+}
+
+/// A new frame stamp must already be reserved in the main document when
+/// written, so another snapshot cannot allocate that ID in the meantime.
+pub async fn form_snapshot_reserves_control_ids_before_stamping_a_frame(rig: &Rig) {
+    let frame = r#"<label>Email <input type="email"></label>
+        <script>
+          const set = Element.prototype.setAttribute;
+          Element.prototype.setAttribute = function(name, value) {
+            set.call(this, name, value);
+            if (name !== 'data-bobby-control') return;
+            const stampedAt = Date.now();
+            parent.postMessage({stamp: Number(value), stampedAt}, '*');
+            // Keep the frame evaluation in flight after stamping, so the
+            // parent can distinguish reservation from an update on return.
+            while (Date.now() - stampedAt < 40) {}
+          };
+          parent.postMessage('ready', '*');
+        </script>"#;
+    let frame_site = FixtureSite::spawn(vec![("/frame", Route::Html(page("Frame", frame)))]).await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let body = format!(
+        r#"<label>Search <input type="search"></label>
+        <p role="status" aria-label="Result">idle</p>
+        <script>
+          const root = document.documentElement;
+          const attribute = 'data-bobby-control-next';
+          const updates = [];
+          new MutationObserver(() => updates.push([Number(root.getAttribute(attribute)), Date.now()]))
+            .observe(root, {{attributes: true, attributeFilter: [attribute]}});
+          addEventListener('message', ({{data}}) => {{
+            const result = document.querySelector('[aria-label="Result"]');
+            result.textContent = data === 'ready' ? data :
+              updates.some(([next, at]) => next > data.stamp && at <= data.stampedAt)
+                ? 'reserved' : 'allocated before reservation';
+          }});
+        </script>
+        <iframe title="Widget" src="{frame_url}"></iframe>"#
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &body)))]).await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(ready["status"], "completed", "{ready}");
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut controls = Vec::new();
+    controls_named(&snapshot, "Email", &mut controls);
+    assert_eq!(controls.len(), 1, "{snapshot}");
+    let state = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&state, "reserved"), "{state}");
     live.close().await;
 }
 
@@ -7136,6 +7186,78 @@ pub async fn a_button_that_opens_the_file_chooser_takes_the_upload(
     live.close().await;
 }
 
+pub async fn a_covered_upload_trigger_leaves_the_covering_input_empty(
+    rig: &Rig,
+    dir: &std::path::Path,
+) {
+    let upload = dir.join("upload.txt");
+    std::fs::write(&upload, "upload-bytes").expect("write upload");
+    let body = r#"<div style="display:grid;width:200px">
+        <button type="button" id="upload" style="grid-area:1/1">Upload</button>
+        <button type="button" id="cover" style="grid-area:1/1">Other upload</button>
+      </div>
+      <p id="echo">cover=empty</p>
+      <input type="file" id="intended" hidden><input type="file" id="other" hidden>
+      <script>
+        document.querySelector('#upload').onclick = () => document.querySelector('#intended').click();
+        const other = document.querySelector('#other');
+        document.querySelector('#cover').onclick = () => other.click();
+        other.onchange = () => {
+          document.querySelector('#echo').textContent = 'cover=' + other.files[0]?.name;
+        };
+      </script>"#;
+    let site = FixtureSite::spawn(vec![("/upload", Route::Html(page("Upload", body)))]).await;
+    let live = Live::open(rig, &site.url("/upload")).await;
+    let result = live
+        .call(
+            "upload_files",
+            json!({"target":{"role":"button","accessibleName":"Upload"},
+                   "paths":[upload.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(result["error"]["code"], "targetObscured", "{result}");
+    let state = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&state, "cover=empty"), "{state}");
+    live.close().await;
+}
+
+pub async fn a_chooser_upload_preserves_an_existing_file_selection(
+    rig: &Rig,
+    dir: &std::path::Path,
+) {
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    for path in [&first, &second] {
+        std::fs::write(path, "upload-bytes").expect("write upload");
+    }
+    let body = r#"<button type="button" id="upload">Upload</button>
+      <form><input type="file" id="doc" aria-label="Document">
+        <input type="file" aria-label="Other document" hidden></form><p id="echo"></p>
+      <script>
+        const input = document.querySelector('#doc');
+        document.querySelector('#upload').onclick = () => input.click();
+        input.onchange = () => {
+          document.querySelector('#echo').textContent = 'picked=' + input.files[0]?.name;
+        };
+      </script>"#;
+    let site = FixtureSite::spawn(vec![("/upload", Route::Html(page("Upload", body)))]).await;
+    let live = Live::open(rig, &site.url("/upload")).await;
+    let args = |path: &std::path::Path| {
+        json!({"target":{"role":"button","accessibleName":"Upload"},
+               "paths":[path.to_str().expect("utf8 path")]})
+    };
+    let uploaded = live.call("upload_files", args(&first)).await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    let refused = live.call("upload_files", args(&second)).await;
+    assert_eq!(
+        refused["error"]["code"], "intentActionMismatch",
+        "{refused}"
+    );
+    let state = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&state, "picked=first.txt"), "{state}");
+    live.close().await;
+}
+
 /// The page's only file input, unlabeled, takes an upload addressed by its
 /// accessibility snapshot target, which the browser names after its button.
 pub async fn the_only_file_input_takes_its_snapshot_target(rig: &Rig, dir: &std::path::Path) {
@@ -7167,6 +7289,41 @@ pub async fn the_only_file_input_takes_its_snapshot_target(rig: &Rig, dir: &std:
     assert_eq!(by_target["status"], "completed", "{target}: {by_target}");
     let page = live.snapshot(json!({})).await;
     assert!(page_text_contains(&page, "doc=resume.txt"), "{page}");
+    live.close().await;
+}
+
+pub async fn an_unlabeled_file_input_keeps_its_snapshot_ordinal_beside_a_matching_button(
+    rig: &Rig,
+    dir: &std::path::Path,
+) {
+    let resume = dir.join("resume.txt");
+    std::fs::write(&resume, "resume-bytes").expect("write resume");
+    let body = r#"<button type="button">Choose File</button>
+      <form><input type="file" id="doc"></form><p id="echo"></p>
+      <script>
+        const input = document.querySelector('#doc');
+        input.onchange = () => {
+          document.querySelector('#echo').textContent = 'doc=' + input.files[0]?.name;
+        };
+      </script>"#;
+    let site = FixtureSite::spawn(vec![("/doc", Route::Html(page("Doc", body)))]).await;
+    let live = Live::open(rig, &site.url("/doc")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let (_, target) = targets
+        .iter()
+        .find(|(role, target)| *role == "button" && target["ordinal"] == 1)
+        .unwrap_or_else(|| panic!("file input has the second button target: {snapshot}"));
+    let result = live
+        .call(
+            "upload_files",
+            json!({"target":target,"paths":[resume.to_str().expect("utf8 path")]}),
+        )
+        .await;
+    assert_eq!(result["status"], "completed", "{target}: {result}");
+    let state = live.snapshot(json!({})).await;
+    assert!(page_text_contains(&state, "doc=resume.txt"), "{state}");
     live.close().await;
 }
 
