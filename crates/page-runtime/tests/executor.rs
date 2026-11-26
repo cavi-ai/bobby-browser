@@ -21,6 +21,8 @@ use workflow_journal::{
     CommandJournal, JournalError, JournalRecord, JournalScan, JsonlJournal, PreparedResult,
 };
 
+const WAIT_TIMEOUT_CANARY: &str = "synthetic-wait-log-canary";
+
 #[derive(Clone, Copy)]
 enum DriverMode {
     CookieOnly,
@@ -678,12 +680,9 @@ impl FakeWorker {
             });
         }
         if matches!(self.mode, DriverMode::WaitTimeout) {
-            return Err(CommandError {
-                code: ErrorCode::WaitConditionTimedOut,
-                message: "wait condition was not satisfied within 1000ms".into(),
-                layer: ErrorLayer::Driver,
-                retryable: false,
-            });
+            return Ok(worker_pool::wait::WaitObservation::Text(vec![
+                WAIT_TIMEOUT_CANARY.into(),
+            ]));
         }
         Ok(fake_wait_observation(condition))
     }
@@ -1747,6 +1746,7 @@ async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliati
 /// never the bare wait timeout that would invite a duplicate POST.
 #[tokio::test]
 async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
+    let capture = observability::test_support::CaptureSink::install();
     let events = Arc::new(Mutex::new(Vec::new()));
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
@@ -1783,7 +1783,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
                 }),
                 matcher: TextMatch::Contains("Priority saved".into()),
             },
-            timeout_ms: 1_000,
+            timeout_ms: 75,
         }),
     });
     let request = intent_envelope(session.clone(), page.id.clone(), submit);
@@ -1809,6 +1809,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
         })
         .await
         .unwrap();
+    let request_session = request.session_id.0.to_string();
     let outcome = runtime.execute(request).await;
     let CommandOutcome::Failed { error, .. } = outcome else {
         panic!("expected Failed, got {outcome:?}");
@@ -1816,6 +1817,19 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     assert_eq!(error.code, ErrorCode::VerificationFailed);
     assert!(!error.retryable);
     assert!(error.message.contains("click landed"), "{error:?}");
+    assert!(error.message.contains(WAIT_TIMEOUT_CANARY), "{error:?}");
+
+    let events = capture.events();
+    assert!(
+        events.iter().any(|event| {
+            event["fields"]["session_id"] == request_session
+                && event["fields"]["code"] == "VerificationFailed"
+        }),
+        "expected a failure diagnostic: {events:?}"
+    );
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains(WAIT_TIMEOUT_CANARY));
 }
 
 /// A pre-satisfied expected state means the matcher hit static page copy

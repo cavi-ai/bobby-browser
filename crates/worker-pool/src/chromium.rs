@@ -3126,12 +3126,9 @@ impl crate::ObservationEngine for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
-        let mut evidence = vec![Evidence::FormSnapshot { snapshot }];
-        if !settled {
-            evidence.push(page_busy_evidence());
-        }
-        Ok(evidence)
+        let mut snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        snapshot.page_busy = !settled;
+        Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
     async fn collect_candidates(

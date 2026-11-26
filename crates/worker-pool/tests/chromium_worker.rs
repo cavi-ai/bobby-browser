@@ -2887,7 +2887,27 @@ async fn inspect_and_form_snapshot_wait_for_a_busy_step_to_finish() {
         "read the busy step's controls: {labels:?}"
     );
 
+    assert!(serde_json::to_value(snapshot)
+        .unwrap()
+        .get("pageBusy")
+        .is_none());
+    worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "(() => {document.querySelector('main').setAttribute('aria-busy','true'); return true})()".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = observation.form_snapshot(&page_id, None).await.unwrap();
     worker.close().await.unwrap();
+    let Some(Evidence::FormSnapshot { snapshot }) = evidence.first() else {
+        panic!("form_snapshot returned no snapshot: {evidence:?}");
+    };
+    assert_eq!(serde_json::to_value(snapshot).unwrap()["pageBusy"], true);
 }
 
 /// Page text lists the values of filled form fields under a marked section,

@@ -251,6 +251,7 @@ pub fn normalize_form_snapshot(
         forms,
         unowned_controls,
         truncated,
+        page_busy: false,
     };
     snapshot
         .validate()

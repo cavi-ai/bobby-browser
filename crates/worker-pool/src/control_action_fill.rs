@@ -483,6 +483,7 @@ mod tests {
             forms: Vec::new(),
             unowned_controls: controls,
             truncated: false,
+            page_busy: false,
         }
     }
 

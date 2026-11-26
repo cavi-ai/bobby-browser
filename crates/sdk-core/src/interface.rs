@@ -1021,6 +1021,7 @@ fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceErro
             let code = match command.code {
                 types::ErrorCode::DeadlineExceeded => InterfaceErrorCode::DeadlineExceeded,
                 types::ErrorCode::InvalidRequest => InterfaceErrorCode::InvalidRequest,
+                types::ErrorCode::NotFound => InterfaceErrorCode::NotFound,
                 types::ErrorCode::ResourceExhausted => InterfaceErrorCode::ResourceExhausted,
                 _ => InterfaceErrorCode::BrowserCommandFailed,
             };

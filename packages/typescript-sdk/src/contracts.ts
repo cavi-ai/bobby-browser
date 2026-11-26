@@ -246,7 +246,7 @@ export interface FormControl { id: string; formId?: string | null; groupId?: str
 export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
-export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageDerived?: true; }
+export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageBusy?: boolean; pageDerived?: true; }
 /**
  * The unified mutation vocabulary for form controls. Used both as the
  * `controlAction` primitive's payload and as {@link FillIntent} /

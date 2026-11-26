@@ -112,6 +112,7 @@ impl IntentBrowser for FakeBrowser {
                             forms: Vec::new(),
                             unowned_controls: Vec::new(),
                             truncated: false,
+                            page_busy: false,
                         });
                     return Ok(Vec::new());
                 }
@@ -566,6 +567,7 @@ fn email_snapshot(valid: bool) -> types::FormSnapshot {
         }],
         unowned_controls: Vec::new(),
         truncated: false,
+        page_busy: false,
     }
 }
 
