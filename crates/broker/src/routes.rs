@@ -2,7 +2,7 @@ use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{rejection::BytesRejection, Extension, Path, Request, State},
     http::{
-        header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING, VARY},
         HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
@@ -71,7 +71,8 @@ async fn runtime_info(
     State(state): State<AppState>,
     Extension(request): Extension<AuthenticatedRequest>,
     Extension(query): Extension<RuntimeInfoQuery>,
-) -> Result<Json<types::RuntimeInfo>, ProtocolError> {
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ProtocolError> {
     let mut info = match query.engine {
         Some(engine) => {
             request
@@ -93,7 +94,10 @@ async fn runtime_info(
             });
         }
     }
-    Ok(Json(info))
+    if headers.get(types::INCLUDE_LOST_SESSIONS_HEADER) != Some(&HeaderValue::from_static("true")) {
+        info.lost_sessions.clear();
+    }
+    Ok(([(VARY, types::INCLUDE_LOST_SESSIONS_HEADER)], Json(info)))
 }
 
 #[derive(Clone)]

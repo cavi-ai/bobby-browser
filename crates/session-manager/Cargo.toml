@@ -12,6 +12,7 @@ jiff.workspace = true
 config.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types.workspace = true
@@ -20,4 +21,3 @@ worker-pool.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 companion-protocol.workspace = true
-tempfile.workspace = true

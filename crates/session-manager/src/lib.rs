@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,17 +56,23 @@ impl Ledger {
                 owner: owners.get(&session.id).cloned(),
             })
             .collect();
-        drop(owners);
+        // Owner updates can share the sessions read lock. Keep the ownership
+        // snapshot locked through replacement so older writes cannot land last.
         let written = serde_json::to_vec(&entries)
             .map_err(std::io::Error::other)
             .and_then(|bytes| {
-                if let Some(parent) = self.path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let staged = self.path.with_extension("json.tmp");
-                std::fs::write(&staged, bytes)?;
-                std::fs::rename(&staged, &self.path)
+                let parent = self
+                    .path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                std::fs::create_dir_all(parent)?;
+                let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+                staged.write_all(&bytes)?;
+                staged.persist(&self.path).map_err(|error| error.error)?;
+                Ok(())
             });
+        drop(owners);
         if let Err(error) = written {
             tracing::warn!(%error, path = %self.path.display(), "session.ledger_write_failed");
         }
@@ -96,9 +103,8 @@ impl SessionManager {
         self
     }
 
-    /// Records live sessions at `path`. The sessions a previous runtime left
-    /// there are reported by [`Self::lost_sessions`]; the file then holds only
-    /// this manager's sessions.
+    /// Reads the previous runtime's sessions for [`Self::lost_sessions`].
+    /// The snapshot stays on disk until startup succeeds or live sessions change.
     pub fn with_ledger(mut self, path: PathBuf) -> Self {
         let lost: Vec<LedgerEntry> = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
@@ -118,19 +124,21 @@ impl SessionManager {
                 "session.lost_on_restart"
             );
         }
-        let ledger = Arc::new(Ledger {
+        self.ledger = Some(Arc::new(Ledger {
             path,
             owners: Default::default(),
             lost,
-        });
-        let sessions = self
-            .inner
-            .try_read()
-            .map(|sessions| sessions.clone())
-            .unwrap_or_default();
-        ledger.write(&sessions);
-        self.ledger = Some(ledger);
+        }));
         self
+    }
+
+    /// Starts recording this runtime after its listeners and adapters are ready.
+    /// The previous snapshot remains available in memory for this runtime.
+    pub async fn activate_ledger(&self) {
+        if let Some(ledger) = &self.ledger {
+            let sessions = self.inner.read().await;
+            ledger.write(&sessions);
+        }
     }
 
     /// Sessions the previous runtime held when it stopped, with their pages.

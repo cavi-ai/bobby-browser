@@ -75,7 +75,7 @@ Before starting that Firefox workflow, require `firefox-background-attachment` i
 | `authority_path` | `./data/storage/authority.json` | Authority records |
 | `journal_key_path` | `journal.key` beside the loaded config file | Key that seals command journal records; created owner-only on first use. Records written before a key was set stay readable. |
 
-Live sessions and their page IDs are recorded in `sessions.json` beside `journal_path`. Sessions do not survive a runtime restart; the next runtime reports the ones it found there in `runtime_info.lostSessions`, to their owning principal only.
+The runtime records live session and page IDs in a file next to `journal_path` with `.sessions.json` appended to the full journal filename. After a restart, `runtime_info.lostSessions` reports the previous runtime’s sessions to their owning principal. A failed startup leaves that snapshot available for the next attempt.
 
 ## `[context]`
 

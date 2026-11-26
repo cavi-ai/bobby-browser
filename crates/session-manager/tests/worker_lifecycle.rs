@@ -103,8 +103,12 @@ async fn a_restarted_manager_names_the_sessions_and_pages_the_previous_one_held(
     // The runtime stops without closing `held`; the next one opens the same storage.
     drop(manager);
 
+    // A runtime that opens its storage but fails before serving must not
+    // consume the snapshot that the next startup needs.
+    drop(SessionManager::default().with_ledger(ledger.clone()));
     let restarted = SessionManager::default().with_ledger(ledger.clone());
     assert!(restarted.list().await.is_empty());
+    restarted.activate_ledger().await;
     let lost = restarted.lost_sessions(None);
     assert_eq!(
         lost,
@@ -119,6 +123,53 @@ async fn a_restarted_manager_names_the_sessions_and_pages_the_previous_one_held(
     drop(restarted);
     let again = SessionManager::default().with_ledger(ledger);
     assert!(again.lost_sessions(None).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_owner_updates_all_survive_restart() {
+    let storage = tempfile::tempdir().unwrap();
+    let ledger = storage.path().join("sessions.json");
+    let manager = SessionManager::default().with_ledger(ledger.clone());
+    let mut sessions = Vec::new();
+    for _ in 0..32 {
+        let session = manager
+            .create(CreateSessionRequest {
+                profile: "default".into(),
+                proxy: None,
+                execution_policy: Default::default(),
+                zigzagzig: false,
+            })
+            .await
+            .unwrap();
+        sessions.push(session.id);
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(sessions.len()));
+    let mut updates = tokio::task::JoinSet::new();
+    for (i, id) in sessions.iter().cloned().enumerate() {
+        let manager = manager.clone();
+        let barrier = barrier.clone();
+        updates.spawn(async move {
+            barrier.wait().await;
+            manager.record_owner(&id, format!("owner-{i}")).await;
+        });
+    }
+    while let Some(update) = updates.join_next().await {
+        update.unwrap();
+    }
+
+    drop(manager);
+    let restarted = SessionManager::default().with_ledger(ledger);
+    for (i, id) in sessions.iter().enumerate() {
+        let lost = restarted.lost_sessions(Some(&format!("owner-{i}")));
+        assert_eq!(
+            lost,
+            [types::LostSession {
+                session_id: id.clone(),
+                page_ids: vec![],
+            }]
+        );
+    }
 }
 
 fn engine_request(engine: SkillBrowserEngine) -> CreateSessionRequest {
