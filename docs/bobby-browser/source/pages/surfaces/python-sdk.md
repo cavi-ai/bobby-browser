@@ -58,6 +58,9 @@ Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with `max
 | `submit_job`, `job_status`, `cancel_job` | `/v1/jobs` |
 | `resolve_job(job_id, input)` | `POST /v1/jobs/{job}/resolution` |
 
+Both runtime info methods request `lostSessions`, the caller's sessions and
+pages from the previous runtime when that information is available.
+
 `resolve_job` records an operator attestation for a job whose outcome is uncertain. `input` is `{"decision": "effectObserved" | "effectAbsent", "evidenceSha256": ...}`. The caller needs `job:read`, `job:cancel` and `authority:admin`. See [Events and recovery](../guides/events-recovery.md).
 
 ## Commands

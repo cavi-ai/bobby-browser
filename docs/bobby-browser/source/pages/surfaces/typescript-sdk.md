@@ -10,6 +10,11 @@ documentedVersion: {{PRODUCT_VERSION}}
 npm install @cavi-ai/bobby-browser
 ```
 
+Upgrade the runtime and SDK together. The client validates response shapes
+against its release's contract, including evidence fields such as
+`inspection.truncated`. Updating the runtime alone can cause a `protocol`
+error in an older client.
+
 ## Connect
 
 ```ts

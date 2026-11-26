@@ -29,6 +29,30 @@ test("shared reconciliation and event gap responses preserve evidence", async ()
   });
 });
 
+test("shared SDK responses preserve locate ordinals and accept 0.28.0 inspection evidence", async () => {
+  const fixtures = JSON.parse(readFileSync(new URL("../../../../crates/bobby-browser-client/tests/fixtures/sdk-responses.json", import.meta.url), "utf8"));
+  const { locateMissWithOrdinal, legacyInspection } = fixtures;
+  const legacyLocateMiss = structuredClone(locateMissWithOrdinal);
+  delete legacyLocateMiss.evidence[0].record.candidates[0].ordinal;
+  const invalidOrdinal = structuredClone(locateMissWithOrdinal);
+  invalidOrdinal.evidence[0].record.candidates[0].ordinal = -1;
+
+  for (const [status, outcome] of [
+    [500, legacyLocateMiss],
+    [500, locateMissWithOrdinal],
+    [200, legacyInspection],
+  ] as const) {
+    await withServer((_request, response) => writeJson(response, status, outcome), async (baseUrl) => {
+      const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+      assert.deepEqual(await client.submit(envelope()), outcome);
+    });
+  }
+  await withServer((_request, response) => writeJson(response, 500, invalidOrdinal), async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    await assert.rejects(client.submit(envelope()), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  });
+});
+
 test("runtimeInfoForEngine sends and accepts the requested scope", async () => {
   await withServer((request, response) => {
     assert.equal(request.url, "/v1/runtime?engine=firefox");

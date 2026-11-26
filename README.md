@@ -77,6 +77,8 @@ After an upgrade, restart the running runtime to activate the new build. See [in
 
 The SDKs connect to an installed Bobby runtime.
 
+Upgrade the runtime and TypeScript SDK together. The SDK validates response shapes against its release's wire contract.
+
 | Language | Package | Guide |
 | --- | --- | --- |
 | TypeScript | `npm install @cavi-ai/bobby-browser` | [TypeScript SDK](docs/bobby-browser/source/pages/surfaces/typescript-sdk.md) |

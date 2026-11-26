@@ -169,10 +169,10 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "The submit landed and the page now asks for a one-time code. Get the code from the inbox or phone the page names (your own mail or SMS tool), then call intent_enter_code. Do not resubmit the sign-in."
         }
         "verificationLinkRequired" => {
-            "The submit landed and the page asks to confirm the email address through a link sent to the inbox the message names. Open that link with your own mail tool, then continue. Do not resubmit."
+            "The submit landed and the page asks you to open an emailed verification link. Read the page excerpt for delivery details. Open the link with your own mail tool. Do not resubmit."
         }
         "confirmedOutsideExpectedState" => {
-            "The submit landed and the page reads as a confirmation, but expectedState did not match. Do not resubmit; check the screenshot and outcomeReading, then widen expectedState or record the confirmation."
+            "The submit landed and the page reads as a confirmation outside expectedState. Check outcomeReading and any screenshot. Widen expectedState or record the confirmation. Do not resubmit."
         }
         "journalFailed" => {
             "Resubmit with the same idempotency key; if the status is needsReconciliation, call recovery_status first and never retry the command."

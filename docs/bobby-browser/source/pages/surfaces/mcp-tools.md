@@ -82,7 +82,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `pdf` | `browser:mutate` | Print a page to a PDF artifact |
 | `recovery_status` | `recovery:read` | Read a workflow's checkpoint and receipts |
 | `runtime_info` | `session:read` | Runtime version, active sessions, sessions lost when the previous runtime stopped (`lostSessions`), credential expiry |
-| `screenshot` | `browser:mutate` (+ `file:download` with `saveAs`) | Screenshot artifact |
+| `screenshot` | `browser:mutate` (+ `file:download` with `saveAs`) | Capture an artifact and optionally write it to the downloads directory |
 | `session_capabilities` | `session:read` | Observe an owned session's engine-option support, grants, policy, and connection state |
 | `session_close` | `session:write` | Close a session and release its browser |
 | `session_create` | `session:write` | Create a session |

@@ -262,7 +262,7 @@ class BrowserRuntimeClient:
     # ---- sessions ---------------------------------------------------
 
     def runtime_info(self, options: Optional[RequestOptions] = None) -> Dict[str, Any]:
-        """``GET /v1/runtime`` -- version, capabilities, and load counters."""
+        """``GET /v1/runtime`` -- version, capabilities, load and any lost sessions."""
         return self._json("GET", "/v1/runtime", None, options, expected_status=200)
 
     def runtime_info_for_engine(
@@ -271,7 +271,8 @@ class BrowserRuntimeClient:
         """``GET /v1/runtime?engine=`` -- guarantees for one engine's candidates.
 
         ``engine`` is ``chromium``, ``firefox``, or ``webKit``, the same
-        tokens the Rust and TypeScript clients send.
+        tokens the Rust and TypeScript clients send. Includes lost sessions
+        when available.
         """
         if engine not in ("chromium", "firefox", "webKit"):
             raise self._protocol("engine must be chromium, firefox, or webKit")
@@ -635,6 +636,8 @@ class BrowserRuntimeClient:
         url = f"{self._base_url}{path}"
         deadline, budget = deadline_budget or _effective_deadline(options, self._timeout_ms)
         headers = self._headers(options, body is not None, _format_deadline(deadline))
+        if method == "GET" and path.partition("?")[0] == "/v1/runtime":
+            headers["x-bobby-include-lost-sessions"] = "true"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:

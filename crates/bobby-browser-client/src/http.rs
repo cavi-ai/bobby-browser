@@ -1594,7 +1594,12 @@ mod tests {
     async fn shared_outcome_fixtures_obey_status_and_preserve_evidence() {
         let fixtures: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/sdk-responses.json")).unwrap();
-        for (key, expected) in [("command", 409), ("recovery", 409)] {
+        for (key, expected) in [
+            ("command", 409),
+            ("recovery", 409),
+            ("locateMissWithOrdinal", 500),
+            ("legacyInspection", 200),
+        ] {
             let value = fixtures[key].clone();
             for status in [expected, 418] {
                 let (base, _) = capture_uri(
@@ -1606,7 +1611,7 @@ mod tests {
                 )
                 .await;
                 let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
-                if key == "command" {
+                if key != "recovery" {
                     let result: Result<CommandOutcome, _> = client
                         .json_mapped(
                             Method::GET,

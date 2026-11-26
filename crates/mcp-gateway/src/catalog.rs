@@ -300,7 +300,7 @@ tools! {
     network_log { order: 31, title: "Read network log", description: "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Call it once before the traffic you want; recording starts at the first call. Requires browser:mutate. Produces HAR-artifact evidence. On failure retry; not caller-fixable.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: network_log_schema, args: NetworkLogArgs,
         phases: ACT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
-    page_activate { order: 35, title: "Activate page", description: "Bring a page to the front. Requires browser:mutate. On failure with notFound, call page_list for current ids.",
+    page_activate { order: 35, title: "Activate page", description: "Bring a page forward. Requires browser:mutate. On failure with notFound call page_list.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: page_activate_schema, args: PageCloseArgs,
         phases: ALWAYS, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
     page_close { order: 36, title: "Close page", description: "Close a page in an owned session. Requires browser:mutate. Destructive. On failure with notFound, call page_list for current ids.",
@@ -309,7 +309,7 @@ tools! {
     page_list { order: 37, title: "List pages", description: "List open pages in an owned session. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: page_list_schema, args: PageListArgs,
         phases: ALWAYS, group: PageOps, hints: (true, false, false, false) }
-    page_open { order: 38, title: "Open page", description: "Open a page, optionally navigating it. Requires page:write and browser:mutate when a URL is set. On failure with notFound, check session_list.",
+    page_open { order: 38, title: "Open page", description: "Open a page. Requires page:write and browser:mutate with url. On failure with notFound check session_list.",
         capabilities: &[types::Capability::PageWrite], operation: Some(types::InterfaceOperation::OpenPage), schema: page_open_schema, args: PageOpenArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, false, false, true) }
     pdf { order: 39, title: "Print to PDF", description: "Print a page to a PDF artifact with optional layout and scale. Requires browser:mutate. Produces a PDF artifact with its size and checksum. On failure with invalidRequest, scale is out of range -- pass a value between 0.1 and 2.0.",
@@ -321,10 +321,10 @@ tools! {
     runtime_info { order: 41, title: "Runtime info", description: "Runtime state. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: RuntimeInfoArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
-    screenshot { order: 42, title: "Screenshot", description: "Capture viewport, full page or element. Requires browser:mutate and, with saveAs, file:download.",
+    screenshot { order: 42, title: "Screenshot", description: "Capture viewport, full page or element. Requires browser:mutate. saveAs needs file:download. On failure check the target or destination.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
-        phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
-    session_capabilities { order: 43, title: "Inspect session capabilities", description: "Read engine-option eligibility for a session, with capability, policy, and connection reasons. Requires session:read. Consult tools/list for callable tools.",
+        phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, false) }
+    session_capabilities { order: 43, title: "Inspect session capabilities", description: "Read engine eligibility, grants, policy and connection state. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: session_close_schema, args: SessionCloseArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
     session_close { order: 44, title: "Close session", description: "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",

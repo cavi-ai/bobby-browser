@@ -76,9 +76,9 @@ on its configured origin and never comes back.
 
 Pass `RequestOptions(idempotency_key=...)` on mutating calls that may retry.
 
-This SDK ships primitives only: there are no `intent_*` helpers. Build a raw
-`CommandEnvelope` (see `docs/bobby-browser/source/openapi/v1.yaml` /
-`command.schema.json`) and pass it to `submit_command`. For intent-level
-workflows, use MCP `intent_*` tools or the TypeScript/Rust SDKs.
+Use `bobby_browser.intents` to build intent envelopes, for example
+`locate_envelope` or `fill_envelope`, then pass the envelope to
+`submit_command`. For raw envelopes see the OpenAPI command schema in
+`docs/bobby-browser/source/openapi/`.
 
 Full method catalog: `docs/bobby-browser/source/pages/surfaces/python-sdk.md`.
