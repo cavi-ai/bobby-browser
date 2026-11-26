@@ -163,7 +163,9 @@ On Chromium, `navigate` with `waitUntil: "commit"` returns the committed URL wit
 
 A `callerKey` passed to `workflow_start` ties later results on that session to your job. Each `screenshot`, `checkpoint_save` and `intent_submit_and_verify` result then carries `evidenceKey` with the `callerKey`, the page `url` when observed, and the `sha256` of the result's screenshot (`null` when it has none). A `screenshot` with `saveAs` requires `file:download` and returns `savedTo`. A refused path, such as an existing file, fails the call with `policyDenied`.
 
-`download_url` saves under the configured downloads directory. `saveAs` names a file directly in it, as a file name or an absolute path; subdirectories are refused. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
+`download_url` saves under the configured downloads directory, which the advertised `saveAs` description names. `saveAs` must be a filename or an absolute path directly in that directory. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. The transfer requires equivalent HTTP cookie state and enforces destination policy on every redirect. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
+
+On Chromium, `click_and_wait_for_download` uses browser events to associate the finished file with the clicked page or its new tab.
 
 `selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu or listbox, and `selectOne` on a text box types the value and clicks the suggestion that reads it. If the widget requires a separate search action, run that action first and use `selectOne` on the open results. `selectOne` verifies the choice after clicking. A value no option reads fails with the options offered.
 

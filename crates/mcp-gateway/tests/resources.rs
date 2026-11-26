@@ -374,6 +374,37 @@ async fn create_session_page(server: &Server) -> (SessionId, PageId) {
 }
 
 #[tokio::test]
+async fn download_tool_advertises_the_downloads_root_save_as_lands_in() {
+    let (server, root) = fixture().await;
+    server
+        .handle_message(request(
+            1,
+            "tools/call",
+            json!({"name":"toolset_select","arguments":{"toolset":"act"}}),
+        ))
+        .await
+        .expect("toolset_select response");
+    let listed = server
+        .handle_message(request(2, "tools/list", json!({})))
+        .await
+        .expect("tools/list response");
+    let download = listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "download_url")
+        .expect("download_url is advertised");
+    let save_as = download["inputSchema"]["properties"]["saveAs"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    let downloads = root.path().join("downloads");
+    assert!(
+        save_as.contains(downloads.to_string_lossy().as_ref()),
+        "saveAs must name the downloads root it resolves against: {download}"
+    );
+}
+
+#[tokio::test]
 async fn download_tool_advertises_the_runtime_configured_byte_limit() {
     let (server, _root) = fixture().await;
     // `download_url` is outside the default `explore` catalog; it is still

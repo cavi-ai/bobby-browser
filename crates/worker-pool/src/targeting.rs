@@ -2987,22 +2987,14 @@ pub(crate) async fn frame_session(
         .map(|session| (frame, session)))
 }
 
-/// Every frame id the page holds, its own frame tree and each frame from
-/// another site nested in it at any depth, with the sessions of those frames.
+/// Every frame id in the page's tree, including nested cross-site frames.
 pub(crate) async fn page_frames(
     page: &Page,
     browser: &BrowserHandle,
-) -> Result<
-    (
-        HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>,
-        Vec<Page>,
-    ),
-    CommandError,
-> {
+) -> Result<HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
     use chromiumoxide::cdp::browser_protocol::page::FrameId;
     use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
     let mut ids = frame_tree_ids(page).await?;
-    let mut sessions = Vec::new();
     let targets = browser
         .execute(GetTargetsParams::default())
         .await
@@ -3022,7 +3014,7 @@ pub(crate) async fn page_frames(
             })
             .collect();
         if nested.is_empty() {
-            return Ok((ids, sessions));
+            return Ok(ids);
         }
         for target in nested {
             ids.insert(FrameId::new(target.target_id.inner().clone()));
@@ -3032,7 +3024,6 @@ pub(crate) async fn page_frames(
             };
             if let Ok(frames) = frame_tree_ids(&session).await {
                 ids.extend(frames);
-                sessions.push(session);
             }
         }
     }
