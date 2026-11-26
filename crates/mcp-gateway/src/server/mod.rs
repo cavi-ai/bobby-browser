@@ -825,6 +825,7 @@ impl Server {
                     name,
                     &mut input_schema,
                     self.resources.max_download_bytes(),
+                    self.resources.downloads_root(),
                 );
                 tools.push(json!({
                     "name": name,

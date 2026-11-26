@@ -39,7 +39,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
+    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, FrameId,
     NavigateParams, Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::system_info::GetInfoParams;
@@ -4237,113 +4237,124 @@ impl crate::EventsEngine for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
-        // A frame from another site reports its downloads on its own session.
-        let (frame_ids, frame_sessions) = page_frames(&page, &browser).await?;
-        let behavior = SetDownloadBehaviorParams::builder()
-            .behavior(SetDownloadBehaviorBehavior::Allow)
-            .download_path(self.download_dir.to_string_lossy())
-            .events_enabled(true)
-            .build()
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        let mut begin_streams = Vec::new();
-        let mut progress_streams = Vec::new();
-        for session in std::iter::once(&page).chain(&frame_sessions) {
-            tokio::time::timeout(
-                Duration::from_millis(command.timeout_ms),
-                session.execute(behavior.clone()),
-            )
-            .await
-            .map_err(|_| timeout_error(command.timeout_ms))?
-            .map_err(command_failed)?;
-            begin_streams.push(
-                session
-                    .event_listener::<EventDownloadWillBegin>()
-                    .await
-                    .map_err(command_failed)?,
-            );
-            progress_streams.push(
-                session
-                    .event_listener::<EventDownloadProgress>()
-                    .await
-                    .map_err(command_failed)?,
-            );
-        }
-        let mut begins = futures::stream::select_all(begin_streams);
-        let mut progress = futures::stream::select_all(progress_streams);
-        // A popup may have backgrounded the opener. Activate it before DOM
-        // resolution, which can stall on a background target too.
         let _front = self.bring_page_to_front(&page).await;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
-        // Download events reach every connection to a shared browser: only
-        // this page's frames start this session's download.
-        let frames = self.shared_browser.then_some(frame_ids);
-        press(&page, &resolved).await?;
-        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let begin = begins.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download event stream closed",
-                    )
-                })?;
-                if frames
-                    .as_ref()
-                    .is_none_or(|frames| frames.contains(&begin.frame_id))
-                {
-                    return Ok::<_, CommandError>(begin);
-                }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let completed = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let event = progress.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download progress stream closed",
-                    )
-                })?;
-                if event.guid == begin.guid {
+        let mut frames = bounded_cmd(page_frames(&page, &browser)).await?;
+        let behavior = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+            .download_path(self.download_dir.to_string_lossy())
+            .events_enabled(true)
+            .build()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        bounded_cdp(browser.execute(behavior), command_failed).await?;
+        // Browser-level events include downloads that start in a newly opened tab
+        // before a CDP session attaches to it.
+        let mut popups = bounded_cdp(
+            browser.event_listener::<EventTargetCreated>(),
+            command_failed,
+        )
+        .await?;
+        let mut begins = bounded_cdp(
+            browser.event_listener::<EventDownloadWillBegin>(),
+            command_failed,
+        )
+        .await?;
+        let mut progress = bounded_cdp(
+            browser.event_listener::<EventDownloadProgress>(),
+            command_failed,
+        )
+        .await?;
+        let (begin, completed) =
+            tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+                press(&page, &resolved).await?;
+                let begin = loop {
+                    tokio::select! {
+                        biased;
+                        created = popups.next() => {
+                            let popup = &created.ok_or_else(|| {
+                                driver_error(ErrorCode::BrowserCommandFailed, "target event stream closed")
+                            })?.target_info;
+                            if popup.r#type == "page"
+                                && (popup.opener_id.as_ref() == Some(page.target_id())
+                                    || popup.opener_frame_id.as_ref().is_some_and(|id| frames.contains(id)))
+                            {
+                                frames.insert(FrameId::new(popup.target_id.inner().clone()));
+                            }
+                        }
+                        begin = begins.next() => {
+                            let begin = begin.ok_or_else(|| {
+                                driver_error(ErrorCode::BrowserCommandFailed, "download event stream closed")
+                            })?;
+                            if frames.contains(&begin.frame_id) {
+                                break begin;
+                            }
+                        }
+                    }
+                };
+                loop {
+                    let event = progress.next().await.ok_or_else(|| {
+                        driver_error(ErrorCode::BrowserCommandFailed, "download progress stream closed")
+                    })?;
+                    if event.guid != begin.guid {
+                        continue;
+                    }
                     match event.state {
-                        DownloadProgressState::Completed => return Ok::<_, CommandError>(event),
+                        DownloadProgressState::Completed => return Ok((begin, event)),
                         DownloadProgressState::Canceled => {
                             return Err(driver_error(
                                 ErrorCode::BrowserCommandFailed,
                                 "download was canceled",
-                            ))
+                            ));
                         }
                         DownloadProgressState::InProgress => {}
                     }
                 }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let mut path = completed
+            })
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))??;
+
+        uuid::Uuid::parse_str(&begin.guid)
+            .map_err(|_| driver_error(ErrorCode::BrowserCommandFailed, "invalid download GUID"))?;
+        let filename = begin.suggested_filename.clone();
+        let name = Path::new(&filename)
+            .file_name()
+            .filter(|name| *name == filename.as_str())
+            .ok_or_else(|| {
+                driver_error(ErrorCode::BrowserCommandFailed, "invalid download filename")
+            })?;
+        // With AllowAndName, even Chrome versions that omit filePath can identify
+        // the exact file by GUID. On shared Chrome, filePath may name another
+        // session's directory if it configured the browser between commands.
+        let source = completed
             .file_path
-            .clone()
+            .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
-        // The download directory is browser-wide, so on a shared browser
-        // another session may have redirected it: bring the file home.
-        if self.shared_browser && !path.starts_with(&self.download_dir) {
-            let home = self
-                .download_dir
-                .join(format!("{}-{}", begin.guid, begin.suggested_filename));
-            tokio::fs::rename(&path, &home)
-                .await
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            path = home;
+            .unwrap_or_else(|| self.download_dir.join(&begin.guid));
+        if source
+            .file_name()
+            .is_none_or(|name| name != begin.guid.as_str())
+        {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "completed download path does not match its GUID",
+            ));
         }
+        let directory = self.download_dir.join(format!("download-{}", begin.guid));
+        tokio::fs::create_dir(&directory)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let path = directory.join(name);
+        tokio::fs::rename(source, &path)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         Ok(vec![
             Evidence::Download {
-                filename: begin.suggested_filename.clone(),
+                filename,
                 path: path.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
                 sha256: hex::encode(Sha256::digest(&bytes)),

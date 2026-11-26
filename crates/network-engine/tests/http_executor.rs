@@ -168,6 +168,31 @@ async fn downloads_with_metadata_hash_and_exact_bound() {
 }
 
 #[tokio::test]
+async fn download_without_content_disposition_uses_the_final_url_for_its_filename() {
+    let site = spawn().await;
+    let candidate = DirectHttpExecutor::new(NetworkPolicy {
+        max_download_bytes: 1024,
+        ..policy()
+    })
+    .download(
+        &snapshot(site.base_url()),
+        &DownloadUrlCommand {
+            url: format!("{}/redirect-static", site.base_url()),
+            expected_content_type: Some("text/html".into()),
+            max_bytes: 1024,
+            save_as: None,
+        },
+    )
+    .await
+    .expect("redirect download");
+    let HttpCandidate::Download { filename, meta, .. } = candidate else {
+        panic!("expected download")
+    };
+    assert_eq!(filename, "static");
+    assert_eq!(meta.final_url, format!("{}/static", site.base_url()));
+}
+
+#[tokio::test]
 async fn enforces_shared_peak_concurrency() {
     let site = spawn().await;
     let executor = Arc::new(DirectHttpExecutor::new(NetworkPolicy {

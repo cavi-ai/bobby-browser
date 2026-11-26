@@ -6,6 +6,7 @@
 
 - A listed Chromium profile with `"systemKeychain": true` launches its Chrome with the system keychain and password store instead of the mock keychain.
 - `runtime_info.lostSessions` names the sessions and pages the previous runtime held when it stopped.
+- `download_url` advertises the downloads root that `saveAs` resolves against in its `saveAs` description.
 - Chromium `upload_files` on a button that opens the file chooser, with no file input in the page, sets the files on the input the chooser opens.
 - Chromium `form_snapshot` lists forms inside frames from another site and sandboxed frames, with targets that act in those frames.
 
@@ -39,6 +40,7 @@
 - Chromium `selectOne` on a combobox whose suggestions carry no option role leaves live-region and visually hidden announcements out of the options it reads and lists.
 - `intent_dismiss_obstruction` without hints clicks a visible close or decline control when vision cannot place the dismissal, as it does when the purpose names no control.
 - `intent_enter_code` on a code field that leaves the page as the code goes in judges the code by the page that follows instead of failing `targetDetached` or `verificationFailed`.
+- Chromium `click_and_wait_for_download` associates downloads with the clicked page or its new tab and returns the finished file with `savedTo` and `sha256`.
 - The MCP tools reference names the Rust `regex` syntax of `regex` matchers and states that `download_url` `saveAs` names a file directly in the downloads directory.
 
 ## 0.28.0 - 2026-11-23

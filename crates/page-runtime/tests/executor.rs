@@ -2786,6 +2786,51 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
 }
 
 #[tokio::test]
+async fn download_url_rejects_unproven_response_cookies_without_browser_fetch() {
+    for (case, set_cookie, expected_code) in [
+        (
+            "domain",
+            "Set-Cookie: sid=1; Domain=127.0.0.1; Path=/",
+            ErrorCode::HttpEquivalenceUnproven,
+        ),
+        (
+            "partitioned",
+            "Set-Cookie: sid=1; Secure; Partitioned; Path=/",
+            ErrorCode::NetworkPolicyDenied,
+        ),
+    ] {
+        let url = http_fixture_with_header("direct-bytes", "text/csv", Some(set_cookie)).await;
+        let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::Succeed).await;
+        events.lock().await.push(format!("url:{url}"));
+        let outcome = runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: Some("text/csv".into()),
+                    max_bytes: 1024,
+                    save_as: Some(format!("{case}.csv")),
+                }),
+            ))
+            .await;
+        let error = match &outcome {
+            CommandOutcome::NeedsReconciliation { error, .. }
+            | CommandOutcome::PolicyDenied { error, .. } => error,
+            _ => panic!("{case}: unexpected outcome: {outcome:?}"),
+        };
+        assert_eq!(error.code, expected_code, "{case}");
+        assert!(!root.path().join(format!("downloads/{case}.csv")).exists());
+        let events = events.lock().await;
+        assert!(
+            !events.iter().any(|event| event.starts_with("browser:")),
+            "{case}"
+        );
+        assert!(!events.contains(&"http:commit".to_string()), "{case}");
+    }
+}
+
+#[tokio::test]
 async fn download_url_over_max_bytes_reports_failed_not_needs_reconciliation() {
     let url = http_fixture(
         "this response body is well over the configured byte cap",
