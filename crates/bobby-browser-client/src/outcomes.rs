@@ -1038,6 +1038,10 @@ pub enum RuntimeError {
     /// resubmitting them unchanged is the right move once the engine is up.
     #[error("{0}")]
     EngineUnreachable(String),
+    /// A browser command failed. The worker's error keeps its code and
+    /// whether resubmitting the same call can succeed.
+    #[error("browser command failed: {}", .0.message)]
+    Command(CommandError),
     #[error("internal error: {0}")]
     Internal(String),
 }

@@ -11,6 +11,7 @@
 - `page_open` keeps the new page open when its first load runs out of time, so it can be read or navigated again.
 - A wait that times out, including an `expectedState` wait, names the text, value, URL or ready state it last read.
 - Chromium `inspect` and `form_snapshot` wait for `aria-busy` content to finish loading and flag a read that is still busy with `pageBusy`.
+- A failed `form_snapshot` or page open returns the browser's error code and `retryable` flag (`browserCommandFailed`, HTTP 502) instead of `internal`.
 
 ## 0.28.0 - 2026-11-23
 

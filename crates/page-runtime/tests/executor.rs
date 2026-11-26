@@ -286,6 +286,22 @@ impl worker_pool::NavigationEngine for FakeWorker {
 
 #[async_trait]
 impl worker_pool::ObservationEngine for FakeWorker {
+    async fn form_snapshot(
+        &self,
+        _: &PageId,
+        _: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if matches!(self.mode, DriverMode::FailInspect) {
+            return Err(driver_failure());
+        }
+        Err(CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "fixture has no form snapshot".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+
     async fn inspect(
         &self,
         _: &PageId,
@@ -1595,6 +1611,22 @@ async fn replayable_driver_failure_is_retryable() {
         ))
         .await;
     assert!(matches!(outcome, CommandOutcome::RetryableFailure { .. }));
+}
+
+/// A failed form snapshot read returns the worker's code and retry hint, not
+/// an opaque internal error.
+#[tokio::test]
+async fn form_snapshot_failure_keeps_the_worker_code_and_retry_hint() {
+    let (runtime, session, page, _) = runtime(DriverMode::FailInspect, None).await;
+    let error = runtime
+        .form_snapshot(&session, &page, None)
+        .await
+        .unwrap_err();
+    let types::RuntimeError::Command(error) = error else {
+        panic!("worker failure lost its code: {error:?}");
+    };
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(error.retryable, "{error:?}");
 }
 
 /// A dead browser must not wedge the session: open_browser invalidates the
