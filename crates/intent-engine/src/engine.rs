@@ -943,7 +943,14 @@ async fn prefill_candidates(
             }
             Some((
                 StuckKind::TargetMissing,
-                ranked_near_miss_window(&window_candidates, Some(&field.purpose)),
+                ranked_near_miss_window(
+                    &window_candidates,
+                    Some(&field.value),
+                    Some(&field.purpose),
+                )
+                .into_iter()
+                .map(|(_, evidence)| evidence)
+                .collect(),
             ))
         }
         ResolutionDecision::Ambiguous { candidates } => {
@@ -1085,27 +1092,27 @@ fn near_miss_tokens(purpose: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The stuck-step window: window-eligible candidates ranked by how many
-/// purpose words their role, name, label or text holds, DOM order on ties.
-/// Each row's role, name and ordinal target it.
-fn ranked_near_miss_window(
-    candidates: &[Candidate],
+/// Rank the stuck-step window by role, name and label, with DOM order on ties.
+/// Candidate text can contain a live value and must not influence the score.
+fn ranked_near_miss_window<'a>(
+    candidates: &'a [Candidate],
+    action: Option<&ControlAction>,
     purpose: Option<&str>,
-) -> Vec<types::CandidateEvidence> {
+) -> Vec<(&'a Candidate, types::CandidateEvidence)> {
     let tokens = near_miss_tokens(purpose);
     let mut scored = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
             vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+                && action.is_none_or(|action| compatible(action, candidate))
         })
         .map(|(index, candidate)| {
             let haystack = format!(
-                "{} {} {} {}",
+                "{} {} {}",
                 candidate.role.as_deref().unwrap_or_default(),
                 candidate.name.as_deref().unwrap_or_default(),
                 candidate.label.as_deref().unwrap_or_default(),
-                candidate.text
             )
             .to_lowercase();
             let overlap = tokens
@@ -1127,26 +1134,25 @@ fn ranked_near_miss_window(
         .take(CONTEXT_RANK_CANDIDATE_LIMIT)
         .map(|(overlap, index)| {
             let candidate = &candidates[index];
-            let peer =
-                |other: &&Candidate| other.role == candidate.role && other.name == candidate.name;
-            let ordinal = (candidates.iter().filter(peer).count() > 1)
-                .then(|| candidates[..index].iter().filter(peer).count());
             // Purpose words every row shares do not single any row out.
             let distinct = overlap > floor && best > floor;
-            types::CandidateEvidence {
-                role: candidate.role.clone(),
-                name: candidate.name.clone(),
-                ordinal,
-                score: if distinct { overlap as i32 * 10 } else { 0 },
-                // A control that exists but is not visible cannot match; say so.
-                reasons: vec![if !candidate.state.visible {
-                    "hidden".into()
-                } else if distinct {
-                    "purposeOverlap".into()
-                } else {
-                    "noMatch".into()
-                }],
-            }
+            (
+                candidate,
+                types::CandidateEvidence {
+                    role: candidate.role.clone(),
+                    name: candidate.name.clone(),
+                    ordinal: None,
+                    score: if distinct { overlap as i32 * 10 } else { 0 },
+                    // A control that exists but is not visible cannot match; say so.
+                    reasons: vec![if !candidate.state.visible {
+                        "hidden".into()
+                    } else if distinct {
+                        "purposeOverlap".into()
+                    } else {
+                        "noMatch".into()
+                    }],
+                },
+            )
         })
         .collect()
 }

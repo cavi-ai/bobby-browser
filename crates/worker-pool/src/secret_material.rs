@@ -256,10 +256,14 @@ pub fn contains_secret_material(value: &str) -> bool {
 /// A page title as evidence reports it, on every engine and path: a title
 /// that discloses a credential is withheld whole.
 pub fn page_title_evidence(title: String) -> String {
-    if contains_secret_material(&title) {
+    redact_secret_material(title)
+}
+
+pub(crate) fn redact_secret_material(value: String) -> String {
+    if contains_secret_material(&value) {
         "[redacted]".to_owned()
     } else {
-        title
+        value
     }
 }
 
