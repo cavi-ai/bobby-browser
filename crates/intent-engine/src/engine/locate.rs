@@ -4,6 +4,9 @@
 //! differences that affect resolution and keeps their failure evidence stable.
 
 use std::borrow::Cow;
+use std::collections::{btree_map::Entry, BTreeMap};
+
+use dom_engine::rank_candidates;
 
 use super::*;
 
@@ -113,6 +116,98 @@ pub(super) fn open_dialogs(census: &[Candidate]) -> Vec<types::CandidateEvidence
         .collect()
 }
 
+struct RetryMatches {
+    unnumbered: Option<Box<Candidate>>,
+    numbered: Option<Vec<Candidate>>,
+}
+
+async fn near_miss_evidence(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    request: &LocateRequest<'_>,
+    census: &[Candidate],
+    action: Option<&ControlAction>,
+) -> Vec<types::CandidateEvidence> {
+    let mut matches_by_name = BTreeMap::new();
+    let mut evidence = Vec::new();
+    for (candidate, mut row) in ranked_near_miss_window(census, action, request.purpose) {
+        if !candidate.state.visible {
+            evidence.push(row);
+            continue;
+        }
+
+        // The browser may gather different candidates for the suggested
+        // role and name. Chromium also changes accessibility alignment
+        // when an ordinal is supplied, so probe each form separately.
+        let mut retry = TargetSpec {
+            role: row.role.clone(),
+            accessible_name: row.name.clone(),
+            frame_path: request.target.frame_path.clone(),
+            shadow_path: request.target.shadow_path.clone(),
+            ..TargetSpec::default()
+        };
+        let matches = match matches_by_name.entry((row.role.clone(), row.name.clone())) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let unnumbered = browser
+                    .collect_candidates(page_id, &retry)
+                    .await
+                    .ok()
+                    .and_then(|census| {
+                        match resolve_candidates(&retry, &census, &ResolutionPolicy::default()) {
+                            Ok(ResolutionDecision::Resolved { candidate, .. })
+                                if action.is_none_or(|action| compatible(action, &candidate)) =>
+                            {
+                                Some(candidate)
+                            }
+                            _ => None,
+                        }
+                    });
+                entry.insert(RetryMatches {
+                    unnumbered,
+                    numbered: None,
+                })
+            }
+        };
+        if matches.unnumbered.as_ref().is_some_and(|matched| {
+            matched.id == candidate.id && matched.frame_path == candidate.frame_path
+        }) {
+            evidence.push(row);
+            continue;
+        }
+
+        if matches.numbered.is_none() {
+            // The value only requests ordinal-aware collection. Ranking that
+            // census gives the actual index to report for each candidate.
+            retry.ordinal = Some(0);
+            let numbered = match browser.collect_candidates(page_id, &retry).await {
+                Ok(census) => rank_candidates(&retry, &census, &ResolutionPolicy::default())
+                    .unwrap_or_default()
+                    .into_iter()
+                    // Fill resolves against compatible controls first and the
+                    // browser then acts using the full ranking. After an
+                    // incompatible match those ordinals no longer agree.
+                    .take_while(|(matched, _)| {
+                        action.is_none_or(|action| compatible(action, matched))
+                    })
+                    .map(|(matched, _)| matched.clone())
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            matches.numbered = Some(numbered);
+        }
+        if let Some(ordinal) = matches.numbered.as_ref().and_then(|ranked| {
+            ranked.iter().position(|matched| {
+                matched.id == candidate.id && matched.frame_path == candidate.frame_path
+            })
+        }) {
+            row.ordinal = Some(ordinal);
+            evidence.push(row);
+        }
+    }
+    evidence
+}
+
 pub(super) async fn locate(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -211,7 +306,7 @@ pub(super) async fn locate(
             }
             let candidates =
                 if request.intent_kind == "locate" || matches!(request.mode, LocateMode::Fill(_)) {
-                    ranked_near_miss_window(&census, pool, request.purpose)
+                    near_miss_evidence(page_id, browser, &request, &census, action).await
                 } else {
                     Vec::new()
                 };

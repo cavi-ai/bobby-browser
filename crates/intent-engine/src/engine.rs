@@ -8,9 +8,7 @@ use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy,
-};
+use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use futures_util::{stream, StreamExt};
 use observability::{
     ContextCandidateRankingMetric, ContextLookupOutcome, ContextRankedVisionMetric,
@@ -947,9 +945,12 @@ async fn prefill_candidates(
                 StuckKind::TargetMissing,
                 ranked_near_miss_window(
                     &window_candidates,
-                    &locate::resolution_pool(&window_candidates, Some(&field.value)),
+                    Some(&field.value),
                     Some(&field.purpose),
-                ),
+                )
+                .into_iter()
+                .map(|(_, evidence)| evidence)
+                .collect(),
             ))
         }
         ResolutionDecision::Ambiguous { candidates } => {
@@ -1093,17 +1094,18 @@ fn near_miss_tokens(purpose: Option<&str>) -> Vec<String> {
 
 /// Rank the stuck-step window by role, name and label, with DOM order on ties.
 /// Candidate text can contain a live value and must not influence the score.
-fn ranked_near_miss_window(
-    candidates: &[Candidate],
-    retry_pool: &[Candidate],
+fn ranked_near_miss_window<'a>(
+    candidates: &'a [Candidate],
+    action: Option<&ControlAction>,
     purpose: Option<&str>,
-) -> Vec<types::CandidateEvidence> {
+) -> Vec<(&'a Candidate, types::CandidateEvidence)> {
     let tokens = near_miss_tokens(purpose);
     let mut scored = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
             vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+                && action.is_none_or(|action| compatible(action, candidate))
         })
         .map(|(index, candidate)| {
             let haystack = format!(
@@ -1132,35 +1134,25 @@ fn ranked_near_miss_window(
         .take(CONTEXT_RANK_CANDIDATE_LIMIT)
         .map(|(overlap, index)| {
             let candidate = &candidates[index];
-            let retry = TargetSpec {
-                role: candidate.role.clone(),
-                accessible_name: candidate.name.clone(),
-                ..TargetSpec::default()
-            };
-            let ordinal = rank_candidates(&retry, retry_pool, &ResolutionPolicy::default())
-                .ok()
-                .filter(|matches| matches.len() > 1)
-                .and_then(|matches| {
-                    matches
-                        .iter()
-                        .position(|(matched, _)| matched.id == candidate.id)
-                });
             // Purpose words every row shares do not single any row out.
             let distinct = overlap > floor && best > floor;
-            types::CandidateEvidence {
-                role: candidate.role.clone(),
-                name: candidate.name.clone(),
-                ordinal,
-                score: if distinct { overlap as i32 * 10 } else { 0 },
-                // A control that exists but is not visible cannot match; say so.
-                reasons: vec![if !candidate.state.visible {
-                    "hidden".into()
-                } else if distinct {
-                    "purposeOverlap".into()
-                } else {
-                    "noMatch".into()
-                }],
-            }
+            (
+                candidate,
+                types::CandidateEvidence {
+                    role: candidate.role.clone(),
+                    name: candidate.name.clone(),
+                    ordinal: None,
+                    score: if distinct { overlap as i32 * 10 } else { 0 },
+                    // A control that exists but is not visible cannot match; say so.
+                    reasons: vec![if !candidate.state.visible {
+                        "hidden".into()
+                    } else if distinct {
+                        "purposeOverlap".into()
+                    } else {
+                        "noMatch".into()
+                    }],
+                },
+            )
         })
         .collect()
 }
