@@ -1950,6 +1950,69 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     worker.close().await.unwrap();
 }
 
+/// An unnamed button inside an item takes the item's text as its
+/// description; a named button keeps its own.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn form_snapshot_describes_an_unnamed_button_by_its_container_text() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<form aria-label=Skills><ul><li><span>Rust</span><button type=button><svg width=8 height=8></svg></button></li><li><span>Go</span><button type=button><svg width=8 height=8></svg></button></li></ul><button type=button>Add skill</button></form>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
+    worker.close().await.unwrap();
+    let snapshot = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("form snapshot evidence");
+    let described = snapshot.forms[0]
+        .controls
+        .iter()
+        .map(|control| (control.accessible_name.clone(), control.description.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        described,
+        [
+            (None, Some("Rust".to_owned())),
+            (None, Some("Go".to_owned())),
+            (Some("Add skill".to_owned()), None),
+        ]
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() {

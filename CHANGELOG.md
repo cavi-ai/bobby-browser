@@ -6,6 +6,7 @@
 
 - A `schemaViolation` repair carries `example`, a complete argument object the tool's advertised schema accepts.
 - Snapshots nested in compact MCP results keep the first 10 options of each list inside a combobox and count the rest in `optionsOmitted`.
+- Chromium `form_snapshot` describes an unnamed button by the text of the nearest container that holds no other button.
 
 ### Fixed
 
