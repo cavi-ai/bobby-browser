@@ -1337,6 +1337,15 @@
             "null"
           ]
         },
+        "ordinal": {
+          "description": "Zero-based index among candidates with the same role and name, when\nseveral share them; with `role` and `name` it targets this candidate.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
         "score": {
           "type": "integer",
           "format": "int32"
