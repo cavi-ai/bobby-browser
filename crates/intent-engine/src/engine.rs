@@ -3346,9 +3346,9 @@ async fn dismiss_target(
     {
         Ok(located) => located,
         Err(outcome) => {
-            // A purpose that names no control on the page leaves the controls
-            // named as dismissals.
-            let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if error.code == ErrorCode::TargetNotFound);
+            // A purpose that names no control on the page, or that vision could
+            // not place, leaves the controls named as dismissals.
+            let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if matches!(error.code, ErrorCode::TargetNotFound | ErrorCode::VisionAssistFailed));
             if !hinted && missed {
                 if let Some(dismissed) =
                     dismiss_by_control_name(intent, page_id, browser, vision, timeout_ms).await

@@ -581,3 +581,55 @@ async fn unhinted_vision_dismiss_fails_while_the_dialog_stays_open() {
     assert_eq!(error.code, ErrorCode::ObstructionSuspected);
     assert_eq!(record.verification, "obstructionPersisted");
 }
+
+#[tokio::test]
+async fn unhinted_dismiss_clicks_a_named_close_control_when_vision_fails() {
+    let close_modal = Candidate {
+        id: "close-modal".into(),
+        css: Some("#close-modal".into()),
+        name: Some("Close modal".into()),
+        text: String::new(),
+        ..overlay_close_button()
+    };
+    let editor = Candidate {
+        id: "editor".into(),
+        css: None,
+        role: Some("dialog".into()),
+        name: Some("Edit profile".into()),
+        text: "Edit profile".into(),
+        ..overlay_close_button()
+    };
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![editor, close_modal]]))),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let unsure = VisionContext {
+        assist: Some(Arc::new(FakeVision {
+            proposal: VisionProposal {
+                confidence: 0.0,
+                action: VisionAction::Click { x: 5.0, y: 6.0 },
+            },
+        })),
+        ..vision_clicking()
+    };
+    IntentEngine::execute(
+        &dismiss("dismiss the profile editor", None, 60),
+        &PageId::new(),
+        &browser,
+        &unsure,
+    )
+    .await;
+    let clicks = browser.calls.lock().expect("call log").clicks.clone();
+    assert!(
+        clicks.iter().any(|click| {
+            click
+                .target
+                .as_ref()
+                .and_then(|target| target.accessible_name.as_deref())
+                == Some("Close modal")
+        }),
+        "{clicks:?}"
+    );
+    assert_eq!(browser.click_xy_calls.load(Ordering::SeqCst), 0);
+}
