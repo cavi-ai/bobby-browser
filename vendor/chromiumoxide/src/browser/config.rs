@@ -55,6 +55,10 @@ pub struct BrowserConfig {
     /// See https://bugs.chromium.org/p/chromium/issues/detail?id=706008#c5
     pub(crate) extensions: Vec<String>,
 
+    /// Use the operating system's keychain and password store instead of the
+    /// mock keychain and basic store in the default arguments.
+    pub(crate) system_keychain: bool,
+
     /// Run the extensions installed in the profile instead of disabling them.
     pub(crate) installed_extensions: bool,
 
@@ -112,6 +116,7 @@ pub struct BrowserConfigBuilder {
     executation_detection: DetectionOptions,
     extensions: Vec<String>,
     installed_extensions: bool,
+    system_keychain: bool,
     process_envs: Option<HashMap<String, String>>,
     user_data_dir: Option<PathBuf>,
     incognito: bool,
@@ -149,6 +154,7 @@ impl Default for BrowserConfigBuilder {
             executation_detection: DetectionOptions::default(),
             extensions: Vec::new(),
             installed_extensions: false,
+            system_keychain: false,
             process_envs: None,
             user_data_dir: None,
             incognito: false,
@@ -272,6 +278,12 @@ impl BrowserConfigBuilder {
         self
     }
 
+    /// Launches without `--use-mock-keychain` and `--password-store=basic`.
+    pub fn system_keychain(mut self) -> Self {
+        self.system_keychain = true;
+        self
+    }
+
     pub fn env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.process_envs
             .get_or_insert(HashMap::new())
@@ -360,6 +372,7 @@ impl BrowserConfigBuilder {
             executable,
             extensions: self.extensions,
             installed_extensions: self.installed_extensions,
+            system_keychain: self.system_keychain,
             process_envs: self.process_envs,
             user_data_dir: self.user_data_dir,
             incognito: self.incognito,
@@ -402,6 +415,11 @@ impl BrowserConfig {
             builder.args(self.args.clone());
         } else {
             builder.args(DEFAULT_ARGS.clone()).args(self.args.clone());
+        }
+
+        if self.system_keychain {
+            builder.remove("use-mock-keychain");
+            builder.remove("password-store");
         }
 
         if !builder.has("remote-debugging-port") {
