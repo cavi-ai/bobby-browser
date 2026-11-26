@@ -499,6 +499,24 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Presses Escape when another focused control reports an open popup
+    /// (`aria-expanded="true"`), such as a picker that would take the keys.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<(), CommandError> {
+        let open = self
+            .eval::<bool>(
+                page,
+                "let a=(el.ownerDocument||document).activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return Boolean(a&&a!==el&&!el.contains(a)&&!a.contains(el)&&a.getAttribute('aria-expanded')==='true')",
+            )
+            .await?;
+        if open {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+        }
+        Ok(())
+    }
+
     /// The element read as one form control (JSON text), or `None` when it is
     /// detached or not a form control.
     pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {

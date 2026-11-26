@@ -49,7 +49,7 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 
 | Kind | Shape | Effect |
 |---|---|---|
-| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text. A replace whose read-back differs, from a lost keystroke or a field the page re-rendered, is retyped once into the control the target names |
+| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text. A replace whose read-back differs, from a lost keystroke or a field the page re-rendered, is retyped once into the control the target names. On Chromium, a popup another focused control holds open (`aria-expanded="true"`), such as a picker, is closed with Escape before typing |
 | `setChecked` | `{kind, checked}` | Set a checkbox or radio |
 | `selectOne` | `{kind, value}` | Select an option by value or visible label; a text box takes the suggestion that reads the value |
 | `selectMany` | `{kind, values}` | Select several options, or check a menu button's items |

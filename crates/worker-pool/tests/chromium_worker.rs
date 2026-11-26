@@ -1571,6 +1571,39 @@ async fn control_action_set_text_retypes_into_a_field_the_page_re_rendered() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_closes_a_picker_the_previous_field_left_open() {
+    let root = tempfile::tempdir().unwrap();
+    // The first field's picker opens on focus, takes focus back while it is
+    // open, and closes on Escape.
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        "<input id=start aria-label=Start aria-expanded=false><div id=picker hidden>calendar</div><input aria-label=Count><script>const open=()=>start.getAttribute('aria-expanded')==='true';start.addEventListener('focus',()=>{picker.hidden=false;start.setAttribute('aria-expanded','true')});start.addEventListener('keydown',e=>{if(e.key==='Escape'){picker.hidden=true;start.setAttribute('aria-expanded','false')}});start.addEventListener('blur',()=>{if(open())setTimeout(()=>start.focus())})</script>",
+    )
+    .await;
+    let start = set_text_by_name(worker.as_ref(), &page_id, "Start", "soon").await;
+    assert_eq!(start.as_deref(), Ok("soon"));
+    let count = set_text_by_name(worker.as_ref(), &page_id, "Count", "42").await;
+    assert_eq!(count.as_deref(), Ok("42"));
+    let start = worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "start.value".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        format!("{start:?}").contains("soon"),
+        "the first field kept its value: {start:?}"
+    );
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_clear_empties_a_text_input() {
     let profiles = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

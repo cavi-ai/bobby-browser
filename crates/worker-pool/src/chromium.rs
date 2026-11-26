@@ -3753,6 +3753,10 @@ impl crate::control_action_fill::ControlActionAdapter for ChromiumWorker {
         value: &str,
         clear_first: bool,
     ) -> Result<(), CommandError> {
+        prepared
+            .resolved
+            .close_foreign_popup(&prepared.page)
+            .await?;
         refuse_dialog_covered_field(&prepared.page, &prepared.resolved).await?;
         if crate::SessionSettings::humanization_enabled(self) {
             self.humanized_type_text(&prepared.page, &prepared.resolved, value, clear_first)

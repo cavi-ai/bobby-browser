@@ -9,6 +9,7 @@
 - `recovery_status` accepts `workflowHandle` and reads the workflow the handle is bound to.
 - Chromium page `inspect` text lists filled form-field values under `Form field values:`, leaving out passwords, one-time codes, card data and fields named as secrets.
 - A replacing `setText` whose read-back differs, from a lost keystroke or a re-rendered field, is retyped once into the control the target names.
+- Chromium `setText` closes a popup another focused control holds open, such as a picker, before typing, so the keys reach the target.
 - `intent_complete_form` scales its deadline with the text it types and, at the deadline, fails `deadlineExceeded` naming the field it reached with the filled fields' evidence.
 
 ## 0.28.0 - 2026-11-23
