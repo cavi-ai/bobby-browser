@@ -11,11 +11,14 @@
 - The TypeScript SDK accepts the `turnstile` challenge type and the `verificationLinkRequired` and `confirmedOutsideExpectedState` error codes.
 - A listed Chromium profile with `"systemKeychain": true` launches its Chrome with the system keychain and password store instead of the mock keychain.
 - `runtime_info.lostSessions` names the sessions and pages the previous runtime held when it stopped.
+- Chromium `upload_files` on a button that opens the file chooser, with no file input in the page, sets the files on the input the chooser opens.
+- Chromium `form_snapshot` lists forms inside frames from another site and sandboxed frames, with targets that act in those frames.
 
 ### Fixed
 
 - Chromium `selectOne` on a framed button listbox commits the named option, not the highlighted one, and no longer reports a choice the control does not show beside hidden option text.
 - Chromium `selectOne` can pick a result from a search field’s open popup and verifies that the choice was committed.
+- Chromium `upload_files` resolves an unlabeled file input's accessibility snapshot target, named after the browser's own button text.
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - `passwordManagerFill` reports `passwordManagerSubmitted` when the password manager submits and the page moves on while the password field stays or can no longer be read: a new URL, other form fields, or a newly opened dialog, which the result lists as a candidate.
 - A `passwordManagerFill` intent whose manager prompt cannot be pressed completes when the field already holds the manager's value.

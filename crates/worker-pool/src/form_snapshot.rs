@@ -268,14 +268,55 @@ pub fn decode_form_snapshot(
     encoded: &str,
     max_controls: usize,
 ) -> Result<FormSnapshot, CommandError> {
-    let raw: RawFormSnapshot = serde_json::from_str(encoded).map_err(|error| {
+    normalize_form_snapshot(page_id, decode_raw_form_snapshot(encoded)?, max_controls)
+}
+
+pub(crate) fn decode_raw_form_snapshot(encoded: &str) -> Result<RawFormSnapshot, CommandError> {
+    serde_json::from_str(encoded).map_err(|error| {
         snapshot_error(
             ErrorCode::BrowserCommandFailed,
             format!("invalid raw form snapshot: {error}"),
         )
-    })?;
-    normalize_form_snapshot(page_id, raw, max_controls)
+    })
 }
+
+/// Adds a frame's snapshot to `raw` under keys of its own, with `frame_path`,
+/// the hops into that frame, before each form's and control's own path.
+pub(crate) fn append_frame_form_snapshot(
+    raw: &mut RawFormSnapshot,
+    framed: RawFormSnapshot,
+    frame_path: &[SemanticTargetSegment],
+    frame: usize,
+) {
+    let rekey = |key: &str| format!("frame-{frame}-{key}");
+    let within = |path: &[SemanticTargetSegment]| [frame_path, path].concat();
+    raw.truncated |= framed.truncated;
+    raw.forms.extend(framed.forms.into_iter().map(|mut form| {
+        form.key = rekey(&form.key);
+        form.frame_path = within(&form.frame_path);
+        form
+    }));
+    raw.groups
+        .extend(framed.groups.into_iter().map(|mut group| {
+            group.key = rekey(&group.key);
+            group.form_key = rekey(&group.form_key);
+            group
+        }));
+    raw.controls
+        .extend(framed.controls.into_iter().map(|mut control| {
+            control.key = rekey(&control.key);
+            control.form_key = control.form_key.as_deref().map(rekey);
+            control.group_key = control.group_key.as_deref().map(rekey);
+            control.frame_path = within(&control.frame_path);
+            control
+        }));
+    if raw.forms.len() > MAX_FORM_SNAPSHOT_FORMS {
+        raw.forms.truncate(MAX_FORM_SNAPSHOT_FORMS);
+        raw.truncated = true;
+    }
+}
+
+const MAX_FORM_SNAPSHOT_FORMS: usize = 64;
 
 /// A control target's ordinal counts the controls with its role and name in
 /// the frame and shadow root its target resolves in.
@@ -853,15 +894,29 @@ pub fn form_snapshot_expression(page_id: &PageId) -> String {
 }
 
 pub fn form_snapshot_expression_with_limit(_page_id: &PageId, max_controls: usize) -> String {
-    form_projection_expression(max_controls, true)
+    form_projection_expression(max_controls, true, None)
+}
+
+/// The snapshot of a frame and its readable descendants. New stamps come
+/// from a range already reserved in the top document.
+pub(crate) fn frame_form_snapshot_expression(max_controls: usize, first_stamp: u32) -> String {
+    form_projection_expression(max_controls, true, Some(first_stamp))
 }
 
 pub(crate) fn inspection_form_expression(max_controls: usize) -> String {
-    form_projection_expression(max_controls, false)
+    form_projection_expression(max_controls, false, None)
 }
 
-fn form_projection_expression(max_controls: usize, stamp_controls: bool) -> String {
+fn form_projection_expression(
+    max_controls: usize,
+    stamp_controls: bool,
+    first_reserved_stamp: Option<u32>,
+) -> String {
+    let first_reserved_stamp = first_reserved_stamp
+        .map(|stamp| stamp.to_string())
+        .unwrap_or_else(|| "null".into());
     RAW_FORM_SNAPSHOT_SCRIPT
+        .replace("__FIRST_RESERVED_STAMP__", &first_reserved_stamp)
         .replace(
             "__STAMP_CONTROLS__",
             if stamp_controls { "true" } else { "false" },
@@ -880,8 +935,18 @@ fn form_projection_expression(max_controls: usize, stamp_controls: bool) -> Stri
 /// Returns a function body that reads `el` as one raw form control, as JSON
 /// text, or null when `el` is detached or not a form control.
 pub fn form_control_script() -> String {
+    form_control_projection_script(&format!(
+        "!el.isConnected||!el.matches('{CONTROL_SELECTOR}')"
+    ))
+}
+
+pub(crate) fn file_input_control_script() -> String {
+    form_control_projection_script("el.localName!=='input'||el.type!=='file'")
+}
+
+fn form_control_projection_script(skip: &str) -> String {
     format!(
-        "{RAW_CONTROL_FUNCTIONS}if(!el.isConnected||!el.matches('{CONTROL_SELECTOR}'))return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
+        "{RAW_CONTROL_FUNCTIONS}if({skip})return null;return JSON.stringify(rawControl(el,[],[],0,new Map(),new Map()));"
     )
     .replace("__SHOWN_VALUE_FUNCTION__", SHOWN_VALUE_FUNCTION)
     .replace("__CONTROL_LABEL_FUNCTION__", dom_engine::control_label_function())
@@ -962,21 +1027,30 @@ if(!STAMP_CONTROLS){
 }
 const stampKey='__CONTROL_STAMP__',nextKey=stampKey+'-next',docEl=document.documentElement;
 const isStamp=v=>/^[1-9][0-9]{0,8}$/.test(v||'');
-let next=isStamp(docEl?.getAttribute(nextKey))?Number(docEl.getAttribute(nextKey)):1;
-for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
-  const v=el.getAttribute(stampKey);
-  if(isStamp(v))next=Math.max(next,Number(v)+1);
+const firstReservedStamp=__FIRST_RESERVED_STAMP__;
+let next=firstReservedStamp;
+if(firstReservedStamp===null){
+  const cursor=docEl?.getAttribute(nextKey);
+  next=isStamp(cursor)?Number(cursor):1;
+  for(const {root} of roots)for(const el of root.querySelectorAll(`[${stampKey}]`)){
+    const v=el.getAttribute(stampKey);
+    if(isStamp(v))next=Math.max(next,Number(v)+1);
+  }
 }
 const used=new Set();
 const controls=controlElements.map((control,index)=>{
   const e=control.element;
   const own=e.getAttribute(stampKey);
   let stamp=isStamp(own)&&!used.has(Number(own))?Number(own):0;
-  if(!stamp){stamp=next++;e.setAttribute(stampKey,String(stamp))}
+  if(!stamp){
+    while(used.has(next))next++;
+    stamp=next++;
+    e.setAttribute(stampKey,String(stamp));
+  }
   used.add(stamp);
   return{...readControl(control,index),stamp};
 });
-if(docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
+if(firstReservedStamp===null&&docEl&&docEl.getAttribute(nextKey)!==String(next))docEl.setAttribute(nextKey,String(next));
 return{forms,groups,controls,truncated};})())"#;
 
 const _LEGACY_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{

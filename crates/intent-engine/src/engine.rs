@@ -184,6 +184,15 @@ pub trait IntentBrowser: Send + Sync {
         target.clone()
     }
 
+    /// A target that pins the dialog associated with a dismissal control.
+    async fn enclosing_dialog(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Option<TargetSpec>, CommandError> {
+        Ok(None)
+    }
+
     /// The value of `attribute` on the element `target` resolves to. Defaults
     /// to `None`, for runtimes that cannot read the live element.
     async fn read_attribute(
@@ -3358,6 +3367,13 @@ const DISMISS_POLL_INTERVAL_MS: u64 = 25;
 /// named none.
 const MAX_DISMISS_CONTROLS: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DismissalMode {
+    Hinted,
+    Unhinted,
+    NamedFallback,
+}
+
 async fn execute_dismiss_obstruction(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -3402,8 +3418,12 @@ async fn execute_dismiss_obstruction(
             Err(error) => Some(error),
         }
     };
-    let outcome =
-        dismiss_target(intent, page_id, browser, vision, target, timeout_ms, hinted).await;
+    let mode = if hinted {
+        DismissalMode::Hinted
+    } else {
+        DismissalMode::Unhinted
+    };
+    let outcome = dismiss_target(intent, page_id, browser, vision, target, timeout_ms, mode).await;
     match (outcome, frame_error) {
         (IntentOutcome::Failed { mut evidence, .. }, Some(error)) => {
             evidence.push(record_frame_overlay("obstructionPersisted"));
@@ -3497,7 +3517,13 @@ async fn dismiss_by_control_name(
 ) -> Option<IntentOutcome> {
     for control in dismissal_controls(page_id, browser).await {
         let outcome = Box::pin(dismiss_target(
-            intent, page_id, browser, vision, control, timeout_ms, true,
+            intent,
+            page_id,
+            browser,
+            vision,
+            control,
+            timeout_ms,
+            DismissalMode::NamedFallback,
         ))
         .await;
         if !matches!(&outcome, IntentOutcome::Failed { error, .. } if error.code == ErrorCode::TargetObscured)
@@ -3515,7 +3541,7 @@ async fn dismiss_target(
     vision: &VisionContext,
     target: TargetSpec,
     timeout_ms: u64,
-    hinted: bool,
+    mode: DismissalMode,
 ) -> IntentOutcome {
     let purpose = match intent {
         IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
@@ -3524,7 +3550,7 @@ async fn dismiss_target(
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
     // Without hints the purpose names the control, and the dialogs open now
     // are the obstruction a fallback or a failure is judged against.
-    let dialogs_before = if hinted {
+    let dialogs_before = if mode != DismissalMode::Unhinted {
         Vec::new()
     } else {
         open_dialogs_now(page_id, browser, &target)
@@ -3551,31 +3577,15 @@ async fn dismiss_target(
     .await
     {
         Ok(located) => located,
-        Err(mut outcome) => {
-            // A purpose that names no control on the page, or that vision could
-            // not place, leaves the controls named as dismissals.
+        Err(outcome) => {
+            // If the purpose and vision cannot place the dismissal, try
+            // named controls and verify the obstruction each belongs to.
             let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if matches!(error.code, ErrorCode::TargetNotFound | ErrorCode::VisionAssistFailed));
-            if !hinted && missed {
+            if mode == DismissalMode::Unhinted && missed {
                 if let Some(dismissed) =
                     dismiss_by_control_name(intent, page_id, browser, vision, timeout_ms).await
                 {
-                    outcome = match dismissed {
-                        IntentOutcome::Failed {
-                            error,
-                            mut evidence,
-                        } if !dialogs_before.is_empty() => {
-                            evidence.push(intent_evidence(execution_record(
-                                "dismissObstruction",
-                                purpose,
-                                plan_summary,
-                                dialogs_before,
-                                None,
-                                "obstructionPersisted",
-                            )));
-                            return IntentOutcome::Failed { error, evidence };
-                        }
-                        other => other,
-                    };
+                    return dismissed;
                 }
             }
             if dialogs_before.is_empty() {
@@ -3616,9 +3626,36 @@ async fn dismiss_target(
     };
 
     let (selector, clicked) = action_target(&candidate, &target);
-    // Polled after the click: a control with the same role and name may
-    // surface once the obstruction closes.
-    let pinned = browser.pin_target(page_id, &clicked).await;
+    let associated_dialog = if mode == DismissalMode::NamedFallback {
+        match browser.enclosing_dialog(page_id, &clicked).await {
+            Ok(dialog) => dialog,
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error,
+                    evidence: vec![
+                        resolution,
+                        intent_evidence(execution_record(
+                            "dismissObstruction",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "dialogProbeFailed",
+                        )),
+                    ],
+                };
+            }
+        }
+    } else {
+        None
+    };
+    // Poll the associated dialog or pin the control itself, which can be
+    // replaced by a different control with the same role and name.
+    let verifying_dialog = associated_dialog.is_some();
+    let pinned = match associated_dialog {
+        Some(dialog) => dialog,
+        None => browser.pin_target(page_id, &clicked).await,
+    };
     let click = ClickCommand {
         selector,
         target: Some(clicked),
@@ -3653,6 +3690,34 @@ async fn dismiss_target(
     if !gone {
         let mut prior_evidence = vec![resolution];
         prior_evidence.append(&mut click_evidence);
+        if verifying_dialog {
+            let mut candidates = vec![candidate_evidence];
+            if let Ok(locate::Decision {
+                resolution: Ok(ResolutionDecision::Resolved { candidate, .. }),
+                ..
+            }) = locate::decide(page_id, browser, &pinned, None).await
+            {
+                candidates.extend(locate::open_dialogs(std::slice::from_ref(&*candidate)));
+            }
+            prior_evidence.push(intent_evidence(execution_record(
+                "dismissObstruction",
+                purpose,
+                plan_summary,
+                candidates,
+                None,
+                "obstructionPersisted",
+            )));
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::ObstructionSuspected,
+                    message: "obstructionPersisted; the dismissal control's dialog was not verified closed"
+                        .into(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: prior_evidence,
+            };
+        }
         let outcome = stuck_outcome_with_prior_evidence(
             StuckReport {
                 intent_kind: "dismissObstruction",
