@@ -23,7 +23,8 @@ use tokio::{
 };
 
 use crate::catalog::{
-    required_capabilities, required_operation, tool_annotations, tool_description, tool_title,
+    descriptor, required_capabilities, required_operation, tool_annotations, tool_description,
+    tool_title,
 };
 use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
@@ -1608,20 +1609,30 @@ impl Server {
         Ok(value)
     }
 
-    /// The closed-page rule: when `handle` names a workflow binding and this
-    /// envelope's command fails because its page is no longer open (a popup
-    /// the handle followed, since closed), fall back to the recorded opener.
-    /// A read-only `tool` replays there once and reports `popupClosed`
-    /// evidence on the (now successful) retry; anything else fails with the
-    /// same evidence attached, naming the opener, rather than risk a second
-    /// mutating effect. `handle` is `None` for a raw-id call, which this
-    /// rule never touches.
     async fn submit_envelope(
         &self,
         context: types::RequestContext,
         envelope: types::CommandEnvelope,
         handle: Option<&str>,
         tool: &str,
+    ) -> interface_core::InterfaceResult<Value> {
+        let retry_on_opener = descriptor(tool).is_some_and(|tool| tool.read_only);
+        self.submit_envelope_with_popup_retry(context, envelope, handle, retry_on_opener)
+            .await
+    }
+
+    /// The closed-page rule: when `handle` names a workflow binding and this
+    /// envelope's command fails because its page is no longer open (a popup
+    /// the handle followed, since closed), fall back to the recorded opener.
+    /// Read-only invocations replay there once and report `popupClosed`
+    /// evidence on the retry. Mutating invocations fail with the same evidence
+    /// to avoid applying an effect to the opener. Raw-id calls bypass this rule.
+    async fn submit_envelope_with_popup_retry(
+        &self,
+        context: types::RequestContext,
+        envelope: types::CommandEnvelope,
+        handle: Option<&str>,
+        retry_on_opener: bool,
     ) -> interface_core::InterfaceResult<Value> {
         // Only a handle-resolved call can ever need the retry below, which
         // is the only reason to keep a second copy of either argument
@@ -1643,7 +1654,7 @@ impl Server {
             return Ok(value);
         };
         let evidence = popup_closed_evidence(popup_page_id, opener_page_id.clone());
-        if tool_annotations(tool)["readOnlyHint"] == json!(true) {
+        if retry_on_opener {
             let mut retry_envelope = envelope;
             retry_envelope.page_id = Some(opener_page_id);
             retry_envelope.command_id = types::CommandId::new();
