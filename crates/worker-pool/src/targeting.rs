@@ -499,13 +499,27 @@ impl ResolvedTarget {
         Ok(())
     }
 
-    /// Presses Escape when another focused control reports an open popup
-    /// (`aria-expanded="true"`), such as a picker that would take the keys.
-    pub async fn close_foreign_popup(&self, page: &Page) -> Result<(), CommandError> {
+    /// Presses Escape on another focused, expanded control outside a dialog.
+    /// Returns whether Escape was sent so the caller can check the new state.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<bool, CommandError> {
         let open = self
             .eval::<bool>(
                 page,
-                "let a=(el.ownerDocument||document).activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return Boolean(a&&a!==el&&!el.contains(a)&&!a.contains(el)&&a.getAttribute('aria-expanded')==='true')",
+                r#"
+                const doc = el.ownerDocument;
+                if (!doc.hasFocus()) return false;
+                let active = doc.activeElement;
+                while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+                if (!active || active === el || el.contains(active) || active.contains(el) ||
+                    active.getAttribute('aria-expanded') !== 'true') return false;
+
+                // A trusted Escape can cancel the dialog even if it targets a child.
+                const dialog = 'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]';
+                for (let node = active; node; node = node.parentNode || node.host) {
+                    if (node.matches?.(dialog)) return false;
+                }
+                return !doc.querySelector('dialog:modal');
+                "#,
             )
             .await?;
         if open {
@@ -514,7 +528,7 @@ impl ResolvedTarget {
                 .await
                 .map_err(cdp_error)?;
         }
-        Ok(())
+        Ok(open)
     }
 
     /// The element read as one form control (JSON text), or `None` when it is

@@ -1513,6 +1513,7 @@ async fn fill_rejects_activate_and_names_control_action_as_the_right_tool() {
 /// (email + password submitted, then an MFA code field appears).
 struct SubmitRevealingFormBrowser {
     submitted: AtomicBool,
+    reveals_field: bool,
     calls: Arc<Mutex<CallLog>>,
 }
 
@@ -1527,7 +1528,7 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
             textbox("Work email"),
             candidate("continue", Some("button"), "Continue", BTreeMap::new()),
         ];
-        if self.submitted.load(Ordering::SeqCst) {
+        if self.reveals_field && self.submitted.load(Ordering::SeqCst) {
             candidates.push(textbox("Authentication code"));
         }
         Ok(candidates)
@@ -1545,7 +1546,10 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
             == Some("Continue");
         assert!(is_continue, "expected a click on Continue, got {command:?}");
         self.submitted.store(true, Ordering::SeqCst);
-        Ok(Vec::new())
+        Ok(vec![Evidence::Element {
+            selector: "#continue".into(),
+            text: Some("Continue".into()),
+        }])
     }
 
     async fn click_xy(
@@ -1642,50 +1646,55 @@ impl IntentBrowser for SubmitRevealingFormBrowser {
     }
 }
 
+fn revealed_form() -> IntentCommand {
+    IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "sign in".into(),
+        fields: vec![
+            CompleteFormField {
+                name: "email".into(),
+                purpose: "work email".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Work email".into()),
+                    ..IntentHints::default()
+                },
+                value: ControlAction::SetText {
+                    value: "maya@northstar.example".into(),
+                    clear_first: true,
+                },
+                revealed_by: None,
+            },
+            CompleteFormField {
+                name: "code".into(),
+                purpose: "authentication code".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Authentication code".into()),
+                    ..IntentHints::default()
+                },
+                value: ControlAction::SetText {
+                    value: "246813".into(),
+                    clear_first: true,
+                },
+                revealed_by: Some(IntentHints {
+                    accessible_name: Some("Continue".into()),
+                    ..IntentHints::default()
+                }),
+            },
+        ],
+    })
+}
+
 #[tokio::test]
 async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = SubmitRevealingFormBrowser {
         submitted: AtomicBool::new(false),
+        reveals_field: true,
         calls: Arc::clone(&calls),
     };
     let outcome = IntentEngine::execute(
-        &IntentCommand::CompleteForm(CompleteFormIntent {
-            purpose: "sign in".into(),
-            fields: vec![
-                CompleteFormField {
-                    name: "email".into(),
-                    purpose: "work email".into(),
-                    hints: IntentHints {
-                        role: Some("textbox".into()),
-                        accessible_name: Some("Work email".into()),
-                        ..IntentHints::default()
-                    },
-                    value: ControlAction::SetText {
-                        value: "maya@northstar.example".into(),
-                        clear_first: true,
-                    },
-                    revealed_by: None,
-                },
-                CompleteFormField {
-                    name: "code".into(),
-                    purpose: "authentication code".into(),
-                    hints: IntentHints {
-                        role: Some("textbox".into()),
-                        accessible_name: Some("Authentication code".into()),
-                        ..IntentHints::default()
-                    },
-                    value: ControlAction::SetText {
-                        value: "246813".into(),
-                        clear_first: true,
-                    },
-                    revealed_by: Some(IntentHints {
-                        accessible_name: Some("Continue".into()),
-                        ..IntentHints::default()
-                    }),
-                },
-            ],
-        }),
+        &revealed_form(),
         &PageId::new(),
         &browser,
         &VisionContext::default(),
@@ -1698,4 +1707,49 @@ async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
     );
     let log = calls.lock().expect("call log");
     assert_eq!(log.control_action.len(), 2, "{:?}", log.control_action);
+}
+
+#[tokio::test]
+async fn complete_form_deadline_keeps_completed_reveal_click_and_fill_evidence() {
+    let browser = SubmitRevealingFormBrowser {
+        submitted: AtomicBool::new(false),
+        reveals_field: false,
+        calls: Arc::new(Mutex::new(CallLog::default())),
+    };
+    let now = tokio::time::Instant::now();
+    let deadline = now + std::time::Duration::from_millis(500);
+    let outcome = tokio::time::timeout_at(
+        deadline,
+        IntentEngine::execute_with_deadlines(
+            &revealed_form(),
+            &PageId::new(),
+            &browser,
+            &VisionContext::default(),
+            now,
+            deadline,
+        ),
+    )
+    .await
+    .expect("form should return before the envelope drops its evidence");
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected a deadline failure, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    assert!(
+        !error.retryable,
+        "the reveal click could have submitted the form"
+    );
+    assert!(error
+        .message
+        .contains(r#"completeForm field "code", 2 of 2"#));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action } if action.target.accessible_name == "Work email"
+    )));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Element { selector, .. } if selector == "#continue"
+    )));
+    assert_eq!(browser.calls.lock().unwrap().control_action.len(), 1);
 }

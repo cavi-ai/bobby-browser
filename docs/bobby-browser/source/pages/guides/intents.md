@@ -127,7 +127,7 @@ A fill succeeds only with postcondition evidence. It also reads the browser's co
 
 - `fields` has 1 to 128 entries. Each `name` is unique and labels the evidence. If `name` is a `controlId` from `form_snapshot` and a field has no hints, or a field's only hint is `accessibleName` holding a `controlId`, bobby uses that control.
 - Execution stops at the first failed field. The evidence keeps the fields already filled, so retry only the rest.
-- The command deadline grows by 150 ms for each character `setText` types, up to five minutes. A field still running near the deadline stops the form with `deadlineExceeded` naming that field; the evidence keeps the fields already filled.
+- The command deadline grows by 150 ms for each character `setText` types, up to five minutes. A fill or reveal near the deadline stops the form with `deadlineExceeded` and names the current field. The response keeps evidence from earlier fills and completed reveal clicks. If the deadline interrupted a reveal click or visibility wait, inspect the page before activating the reveal control again.
 - Success evidence is compact by default and lists `revealedControls` with usable targets. Pass `evidenceDetail: "full"` to debug.
 - `screenshot: true` adds `screenshot` evidence on success: the viewport, at most 1280 px on its longest side. `intent_submit_and_verify` takes it too. Unset follows [`success_screenshots`](configuration.md#mcp). The evidence names the `sessionId`, `workflowId`, `pageId`, `url` and `capturedAt` of the shot.
 - The MCP tool accepts top-level `hints` only when `fields` has exactly one entry without its own hints. Otherwise it fails with `hintsPerField`.

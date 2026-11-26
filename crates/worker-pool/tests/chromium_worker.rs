@@ -1604,6 +1604,107 @@ async fn control_action_set_text_closes_a_picker_the_previous_field_left_open() 
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_does_not_resubmit_on_readback_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        r#"<form id=entry><input id=answer aria-label=Answer><button>Submit</button></form>
+        <script>
+          window.submissions = 0;
+          entry.addEventListener('submit', event => {
+            event.preventDefault();
+            window.submissions++;
+            answer.value = '';
+          });
+        </script>"#,
+    )
+    .await;
+    for value in ["Line\n", "Line\r"] {
+        let error = set_text_by_name(worker.as_ref(), &page_id, "Answer", value)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::VerificationFailed);
+    }
+    let result = set_text_fixture_read(worker.as_ref(), &page_id, "window.submissions").await;
+    worker.close().await.unwrap();
+    assert_eq!(result, serde_json::json!(2));
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_preserves_an_open_modal() {
+    let root = tempfile::tempdir().unwrap();
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        r#"<input id=background aria-label=Background>
+        <dialog id=modal><input aria-label=Expanded aria-expanded=true autofocus>
+        <input id=details aria-label=Details></dialog>
+        <script>modal.showModal()</script>"#,
+    )
+    .await;
+    let background = set_text_by_name(worker.as_ref(), &page_id, "Background", "outside").await;
+    let details = set_text_by_name(worker.as_ref(), &page_id, "Details", "inside").await;
+    let state = set_text_fixture_read(
+        worker.as_ref(),
+        &page_id,
+        "[modal.open, background.value, details.value]",
+    )
+    .await;
+    worker.close().await.unwrap();
+    assert_eq!(state, serde_json::json!([true, "", "inside"]));
+    assert_eq!(background.unwrap_err().code, ErrorCode::TargetObscured);
+    assert_eq!(details.as_deref(), Ok("inside"));
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_preserves_partial_text_when_field_becomes_read_only() {
+    let root = tempfile::tempdir().unwrap();
+    let (worker, page_id) = text_fixture(
+        root.path(),
+        r#"<input id=answer aria-label=Answer>
+        <script>
+          answer.addEventListener('input', () => {
+            if (answer.value) answer.readOnly = true;
+          });
+        </script>"#,
+    )
+    .await;
+    let typed = set_text_by_name(worker.as_ref(), &page_id, "Answer", "Hello").await;
+    let state =
+        set_text_fixture_read(worker.as_ref(), &page_id, "[answer.readOnly, answer.value]").await;
+    worker.close().await.unwrap();
+    assert_eq!(state, serde_json::json!([true, "H"]));
+    assert_eq!(typed.unwrap_err().code, ErrorCode::IntentActionMismatch);
+}
+
+async fn set_text_fixture_read(
+    worker: &dyn worker_pool::BrowserWorker,
+    page_id: &PageId,
+    expression: &str,
+) -> serde_json::Value {
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            page_id,
+            &EvaluateJavaScriptCommand {
+                expression: expression.into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    match evidence.as_slice() {
+        [Evidence::JavaScriptResult {
+            value,
+            truncated: false,
+        }] => value.clone(),
+        _ => panic!("expected JavaScript result, got {evidence:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_clear_empties_a_text_input() {
     let profiles = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

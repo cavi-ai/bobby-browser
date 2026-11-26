@@ -375,9 +375,29 @@ impl IntentEngine {
 /// to become visible after its reveal control is clicked.
 const REVEAL_WAIT_TIMEOUT_MS: u64 = 10_000;
 
-/// The most of the command time a form keeps back so its partial result
+/// The maximum time a form keeps back so its partial result
 /// returns before the command deadline.
 const COMPLETE_FORM_RETURN_RESERVE: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn until_complete_form_stop<T>(
+    stop_at: Option<tokio::time::Instant>,
+    step: impl std::future::Future<Output = T>,
+) -> Result<T, CommandError> {
+    let result = match stop_at {
+        // Do not start a new step when the budget has already expired.
+        Some(stop_at) if tokio::time::Instant::now() < stop_at => {
+            tokio::time::timeout_at(stop_at, step).await.ok()
+        }
+        Some(_) => None,
+        None => return Ok(step.await),
+    };
+    result.ok_or_else(|| CommandError {
+        code: ErrorCode::DeadlineExceeded,
+        message: "completeForm reached its deadline".into(),
+        layer: ErrorLayer::Workflow,
+        retryable: true,
+    })
+}
 
 async fn execute_complete_form(
     page_id: &PageId,
@@ -408,17 +428,7 @@ async fn execute_complete_form(
             error
         };
         if let Some(reveal_target) = &field.revealed_by {
-            match reveal_field(
-                page_id,
-                browser,
-                vision,
-                &field.purpose,
-                reveal_target,
-                &field.target,
-                &field.value,
-            )
-            .await
-            {
+            match reveal_field(page_id, browser, vision, field, reveal_target, stop_at).await {
                 IntentOutcome::Completed {
                     evidence: mut reveal_evidence,
                 } => evidence.append(&mut reveal_evidence),
@@ -451,22 +461,14 @@ async fn execute_complete_form(
             field.target.clone(),
             field.value.clone(),
         );
-        let outcome = match stop_at {
-            Some(stop_at) => match tokio::time::timeout_at(stop_at, fill).await {
-                Ok(outcome) => outcome,
-                Err(_) => {
-                    return IntentOutcome::Failed {
-                        error: failed(CommandError {
-                            code: ErrorCode::DeadlineExceeded,
-                            message: "completeForm reached its deadline".into(),
-                            layer: ErrorLayer::Workflow,
-                            retryable: true,
-                        }),
-                        evidence,
-                    };
-                }
-            },
-            None => fill.await,
+        let outcome = match until_complete_form_stop(stop_at, fill).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error: failed(error),
+                    evidence,
+                };
+            }
         };
         match outcome {
             IntentOutcome::Completed {
@@ -492,24 +494,19 @@ async fn execute_complete_form(
 /// example an MFA code field shown only after email and password are
 /// submitted). Resolves `reveal_target` and clicks it the same way
 /// `SubmitAndVerify` resolves and clicks its button, then waits for
-/// `revealed_field_target` to become visible so the caller can fill it
+/// the field to become visible so the caller can fill it
 /// deterministically instead of racing the page.
 async fn reveal_field(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
-    purpose: &str,
+    field: &CompleteFormFieldPlan,
     reveal_target: &TargetSpec,
-    revealed_field_target: &TargetSpec,
-    revealed_field_value: &ControlAction,
+    stop_at: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
+    let purpose = field.purpose.as_str();
     let plan_summary = format!("reveal {}", summarize_target(reveal_target));
-    let LocatedTarget {
-        candidate,
-        evidence: candidate_evidence,
-        best_match_authorized,
-        ..
-    } = match locate(
+    let locate_reveal = locate(
         page_id,
         browser,
         vision,
@@ -520,11 +517,30 @@ async fn reveal_field(
             target: reveal_target,
             mode: LocateMode::Reveal,
         },
-    )
-    .await
-    {
-        Ok(located) => located,
-        Err(outcome) => return outcome,
+    );
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+        ..
+    } = match until_complete_form_stop(stop_at, locate_reveal).await {
+        Ok(Ok(located)) => located,
+        Ok(Err(outcome)) => return outcome,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: Vec::new(),
+            };
+        }
+    };
+    // A reveal click can submit the form. A timeout during or after that
+    // click leaves a possible effect the caller should inspect before retrying.
+    let reveal_timed_out = |mut error: CommandError| {
+        error.message.push_str(
+            " during the reveal step; inspect the current state before activating the reveal control again",
+        );
+        error.retryable = false;
+        Err(error)
     };
     let mut click_evidence = {
         let resolution = Evidence::Resolution {
@@ -541,7 +557,10 @@ async fn reveal_field(
             expected_url: None,
             modifiers: Vec::new(),
         };
-        match browser.click(page_id, &click).await {
+        let outcome = until_complete_form_stop(stop_at, browser.click(page_id, &click))
+            .await
+            .unwrap_or_else(reveal_timed_out);
+        match outcome {
             Ok(mut evidence) => {
                 let mut all = vec![resolution];
                 all.append(&mut evidence);
@@ -566,14 +585,11 @@ async fn reveal_field(
         }
     };
 
-    match wait_for_revealed_field(
-        page_id,
-        browser,
-        revealed_field_target,
-        revealed_field_value,
-    )
-    .await
-    {
+    let wait = wait_for_revealed_field(page_id, browser, &field.target, &field.value);
+    let outcome = until_complete_form_stop(stop_at, wait)
+        .await
+        .unwrap_or_else(reveal_timed_out);
+    match outcome {
         Ok(mut wait_evidence) => {
             click_evidence.append(&mut wait_evidence);
             click_evidence.push(intent_evidence(execution_record(

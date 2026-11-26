@@ -265,31 +265,38 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
         activated,
     )
     .await?;
-    if let ControlAction::SetText {
-        value,
-        clear_first: true,
-    } = &command.action
-    {
-        // A lost keystroke or a field the page re-rendered while typing:
-        // retype once into the control the target names now.
-        let landed = after_control.as_ref().is_some_and(|control| {
-            let matched = evidence_action(&command.action, control);
-            control_action_evidence(control, matched.as_ref(), false, None).is_ok()
-        });
-        if !landed {
-            if let Ok(prepared) = adapter
-                .resolve(page_id, &command.target, require_visible)
-                .await
-            {
-                adapter.before_primitive(&prepared).await?;
-                adapter
-                    .type_text(page_id, &prepared, &command.target, value, true)
-                    .await?;
-                (after, after_control) =
-                    read_after(adapter, page_id, command, &prepared, require_visible, false)
+    match &command.action {
+        ControlAction::SetText {
+            value,
+            clear_first: true,
+        } if !value.contains(['\n', '\r']) => {
+            // Retype once after a dropped keystroke or re-render. Line breaks
+            // can dispatch Enter and submit a form, which must not be replayed.
+            let landed = after_control.as_ref().is_some_and(|control| {
+                let matched = evidence_action(&command.action, control);
+                control_action_evidence(control, matched.as_ref(), false, None).is_ok()
+            });
+            if !landed {
+                if let Ok(prepared) = adapter
+                    .resolve(page_id, &command.target, require_visible)
+                    .await
+                {
+                    let control = adapter
+                        .describe(&prepared, &command.target)
+                        .await?
+                        .ok_or_else(|| adapter.missing_control())?;
+                    validate_control_action(&control, &command.action)?;
+                    adapter.before_primitive(&prepared).await?;
+                    adapter
+                        .type_text(page_id, &prepared, &command.target, value, true)
                         .await?;
+                    (after, after_control) =
+                        read_after(adapter, page_id, command, &prepared, require_visible, false)
+                            .await?;
+                }
             }
         }
+        _ => {}
     }
     let node_replaced = after_control.is_none();
     let after_control = match after_control {
