@@ -103,7 +103,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | Tool | Parameters |
 |---|---|
 | `session_create`, `workflow_start` | `profile` (required), `proxy`, `executionPolicy`, `zigzagzig`; `workflow_start` also takes `url` |
-| `page_open` | `sessionId` (required), `url`. With `url` the result includes `navigationOutcome` |
+| `page_open` | `sessionId` (required), `url`. With `url` the result includes `navigationOutcome`. A load that runs out of time keeps the page open; any other failed load closes it and sets `pageClosed` |
 | `page_list`, `page_close`, `page_activate` | `sessionId`, `pageId` or `workflowHandle` |
 | `toolset_select` | `toolset`: `explore`, `act`, `intent`, `verify` or `full` |
 
