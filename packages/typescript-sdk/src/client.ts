@@ -309,6 +309,7 @@ export class BrowserRuntimeClient {
           "x-interface-version": INTERFACE_VERSION,
           "x-correlation-id": options?.correlationId ?? crypto.randomUUID(),
           "x-deadline": scope.deadline.toISOString(),
+          ...(method === "GET" && path.split("?", 1)[0] === "/v1/runtime" ? { "x-bobby-include-lost-sessions": "true" } : {}),
           ...(options?.idempotencyKey ? { "idempotency-key": options.idempotencyKey } : {}),
           ...(body === undefined ? {} : { "content-type": "application/json" }),
         },

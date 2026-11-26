@@ -123,7 +123,7 @@ async fn run() -> anyhow::Result<()> {
     );
     let operational_metrics = runtime.operational_metrics();
     let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
-        runtime,
+        runtime.clone(),
         handle.clone(),
         recorder,
     ));
@@ -162,6 +162,7 @@ async fn run() -> anyhow::Result<()> {
             }
         })
     });
+    runtime.sessions.activate_ledger().await;
     let served = server.serve(tokio::io::stdin(), tokio::io::stdout()).await;
     write_metrics_snapshot_if_configured(&operational_metrics);
     // Firefox's RemoteAgent allows one active WebDriver session per browser
