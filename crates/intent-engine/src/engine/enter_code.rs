@@ -245,10 +245,7 @@ impl Run<'_> {
         let Ok(Some(snapshot)) = self.browser.form_snapshot(self.page_id).await else {
             return false;
         };
-        code_entry::find_control(&snapshot, &field.id)
-            .filter(|control| control.target == field.target)
-            .and_then(|control| code_entry::holds(control, expected))
-            == Some(true)
+        field_readback(&snapshot, field, expected) == Some(true)
     }
 
     /// Reads every field back once all are filled and types again into any
@@ -386,13 +383,18 @@ fn wrong_fields<'a, 'b>(
 ) -> Vec<&'a (&'b CodeField, String)> {
     fields
         .iter()
-        .filter(|(field, expected)| {
-            code_entry::find_control(snapshot, &field.id)
-                .filter(|control| control.target == field.target)
-                .and_then(|control| code_entry::holds(control, expected))
-                == Some(false)
-        })
+        .filter(|(field, expected)| field_readback(snapshot, field, expected) == Some(false))
         .collect()
+}
+
+fn field_readback(
+    snapshot: &types::FormSnapshot,
+    field: &CodeField,
+    expected: &str,
+) -> Option<bool> {
+    code_entry::find_control(snapshot, &field.id)
+        .filter(|control| control.target == field.target)
+        .and_then(|control| code_entry::holds(control, expected))
 }
 
 pub(super) async fn execute_enter_code(
@@ -494,6 +496,31 @@ pub(super) async fn execute_enter_code(
         }
         if let Err(outcome) = run.verify_filled(&chunks, split).await {
             return outcome;
+        }
+    }
+
+    // A submit can be verified by the page that follows. A fill-only run
+    // needs the current page to confirm every field kept its value.
+    if !request.submit {
+        let confirmed = browser
+            .form_snapshot(page_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                chunks.iter().all(|(field, expected)| {
+                    field_readback(&snapshot, field, expected) == Some(true)
+                })
+            });
+        if !confirmed {
+            return run.failed(
+                Run::error(
+                    ErrorCode::VerificationFailed,
+                    "the page did not keep the entered code in every code field",
+                ),
+                Vec::new(),
+                "verifyFailed",
+            );
         }
     }
 

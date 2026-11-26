@@ -3529,10 +3529,19 @@ async fn css_only_targets_resolve_elements_that_are_not_action_candidates() {
         .open_page(page_id.clone())
         .await
         .unwrap();
-    worker_pool::navigation_or_default(worker.navigation()).navigate(
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<main><h1>Posting</h1><div role=dialog class='sheet open'><p>Dialog body</p></div><div class='conv-list'><p>Ada Lovelace</p></div></main>".into(),
+                url: concat!(
+                    "data:text/html,<main><h1>Posting</h1>",
+                    "<div role=dialog class='sheet open'><p>Dialog body</p></div>",
+                    "<div class=conv-list><p>Ada Lovelace</p></div>",
+                    "<button class=pick-action onclick='this.hidden=true'>First choice</button>",
+                    "<button class=pick-action onclick='this.hidden=true'>Second choice</button>",
+                    "</main>",
+                )
+                .into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -3592,6 +3601,48 @@ async fn css_only_targets_resolve_elements_that_are_not_action_candidates() {
         matches!(&shot[0], Evidence::Screenshot { width, height, .. } if *width > 0 && *height > 0),
         "{shot:?}"
     );
+    let input = worker_pool::input_or_default(worker.input());
+    let mut click = ClickCommand {
+        selector: String::new(),
+        target: Some(css("main > .pick-action")),
+        boundary: false,
+        expected_url: None,
+        modifiers: Vec::new(),
+    };
+    let error = input
+        .click(&page_id, &click)
+        .await
+        .expect_err("ambiguous CSS click");
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous, "{error:?}");
+
+    click.target.as_mut().unwrap().allow_best_match = true;
+    let matched = input.click(&page_id, &click).await.unwrap();
+    assert!(
+        matched.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution {
+                best_match_authorized: true,
+                ..
+            }
+        )),
+        "{matched:?}"
+    );
+
+    click.target.as_mut().unwrap().allow_best_match = false;
+    let matched = input.click(&page_id, &click).await.unwrap();
+    assert!(
+        matched.iter().any(|item| matches!(
+            item,
+            Evidence::Resolution {
+                best_match_authorized: false,
+                ..
+            }
+        )),
+        "{matched:?}"
+    );
+    let missed = input.click(&page_id, &click).await.unwrap_err();
+    assert_eq!(missed.code, ErrorCode::TargetNotFound, "{missed:?}");
+
     worker.close().await.unwrap();
 }
 

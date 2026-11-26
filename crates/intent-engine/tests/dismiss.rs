@@ -31,6 +31,7 @@ struct FakeBrowser {
     click_xy_calls: Arc<AtomicUsize>,
     /// The candidates once a vision click has landed, when it changes them.
     candidates_after_vision_click: Option<Vec<Candidate>>,
+    candidates_after_click: Option<Vec<Candidate>>,
 }
 
 #[async_trait]
@@ -58,6 +59,9 @@ impl IntentBrowser for FakeBrowser {
             .expect("call log")
             .clicks
             .push(command.clone());
+        if let Some(after) = &self.candidates_after_click {
+            *self.candidate_sequence.lock().expect("sequence") = VecDeque::from([after.clone()]);
+        }
         Ok(self.click_evidence.clone())
     }
 
@@ -401,6 +405,7 @@ async fn dismiss_still_present_after_click_escalates_to_vision_and_preserves_pri
         screenshot_png: b"png".to_vec(),
         click_xy_calls: click_xy_calls.clone(),
         candidates_after_vision_click: Some(Vec::new()),
+        ..FakeBrowser::default()
     };
     let assist = Arc::new(FakeVision {
         proposal: VisionProposal {
@@ -599,11 +604,6 @@ async fn unhinted_dismiss_clicks_a_named_close_control_when_vision_fails() {
         text: "Edit profile".into(),
         ..overlay_close_button()
     };
-    let browser = FakeBrowser {
-        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![editor, close_modal]]))),
-        screenshot_png: b"png".to_vec(),
-        ..FakeBrowser::default()
-    };
     let unsure = VisionContext {
         assist: Some(Arc::new(FakeVision {
             proposal: VisionProposal {
@@ -613,23 +613,46 @@ async fn unhinted_dismiss_clicks_a_named_close_control_when_vision_fails() {
         })),
         ..vision_clicking()
     };
-    IntentEngine::execute(
-        &dismiss("dismiss the profile editor", None, 60),
-        &PageId::new(),
-        &browser,
-        &unsure,
-    )
-    .await;
-    let clicks = browser.calls.lock().expect("call log").clicks.clone();
-    assert!(
-        clicks.iter().any(|click| {
-            click
+    for dialog_stays_open in [false, true] {
+        let browser = FakeBrowser {
+            candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![
+                editor.clone(),
+                close_modal.clone(),
+            ]]))),
+            screenshot_png: b"png".to_vec(),
+            candidates_after_click: Some(if dialog_stays_open {
+                vec![editor.clone()]
+            } else {
+                Vec::new()
+            }),
+            ..FakeBrowser::default()
+        };
+        let outcome = IntentEngine::execute(
+            &dismiss("dismiss the profile editor", None, 60),
+            &PageId::new(),
+            &browser,
+            &unsure,
+        )
+        .await;
+        let clicks = browser.calls.lock().expect("call log").clicks.clone();
+        assert_eq!(clicks.len(), 1, "{clicks:?}");
+        assert_eq!(
+            clicks[0]
                 .target
                 .as_ref()
-                .and_then(|target| target.accessible_name.as_deref())
-                == Some("Close modal")
-        }),
-        "{clicks:?}"
-    );
-    assert_eq!(browser.click_xy_calls.load(Ordering::SeqCst), 0);
+                .and_then(|target| target.accessible_name.as_deref()),
+            Some("Close modal")
+        );
+        assert_eq!(browser.click_xy_calls.load(Ordering::SeqCst), 0);
+        if dialog_stays_open {
+            let (error, record) = failure(outcome);
+            assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+            assert_eq!(record.verification, "obstructionPersisted");
+        } else {
+            assert!(
+                matches!(outcome, IntentOutcome::Completed { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
 }
