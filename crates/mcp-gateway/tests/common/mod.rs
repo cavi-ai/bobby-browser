@@ -39,6 +39,8 @@ use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan,
 pub struct LiveWorker {
     id: WorkerId,
     profile: PathBuf,
+    session_id: SessionId,
+    artifacts: Option<artifact_store::ArtifactStore>,
     probe: Arc<LiveProbe>,
     open_mode: LiveOpenMode,
     block_delete: bool,
@@ -82,7 +84,7 @@ pub struct LiveProbe {
     /// page (the opener, after its popup closed) and must pass the
     /// executor's post-type verification there.
     pub last_typed_text: std::sync::Mutex<Option<String>>,
-    /// When set, `a11y_snapshot`/`type_text`/`form_snapshot` fail this one
+    /// When set, supported popup-recovery commands fail on this
     /// page id with the same `CommandError` the real worker returns for a
     /// popup closed from inside (`worker_pool::chromium::page_missing`):
     /// `NotFound`, message `"browser page is not open"`. Simulates that
@@ -195,6 +197,11 @@ impl BrowserWorker for LiveWorker {
     }
 
     fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn worker_pool::CaptureEngine> {
+        self.artifacts.as_ref()?;
         Some(self)
     }
 
@@ -510,6 +517,46 @@ impl worker_pool::InputEngine for LiveWorker {
 }
 
 #[async_trait::async_trait]
+impl worker_pool::CaptureEngine for LiveWorker {
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        _: &types::CaptureScreenshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.reject_if_closed(page_id)?;
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[31, 63, 127])
+            .unwrap();
+        let record = self
+            .artifacts
+            .as_ref()
+            .expect("capture is configured")
+            .put_png(&self.session_id, page_id, &png)
+            .await
+            .expect("fixture screenshot is stored");
+        Ok(vec![Evidence::Screenshot {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            width: record.width,
+            height: record.height,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            origin: types::ScreenshotOrigin {
+                session_id: Some(self.session_id.clone()),
+                page_id: Some(page_id.clone()),
+                ..Default::default()
+            },
+        }])
+    }
+}
+
+#[async_trait::async_trait]
 impl worker_pool::EventsEngine for LiveWorker {
     async fn click_and_wait_for_popup(
         &self,
@@ -617,6 +664,7 @@ impl worker_pool::wait::WaitObserver for LiveWorkerWaitObserver<'_> {
 }
 
 pub struct LiveFactory {
+    artifacts: Option<artifact_store::ArtifactStore>,
     probe: Arc<LiveProbe>,
     open_mode: LiveOpenMode,
     block_delete: bool,
@@ -813,6 +861,8 @@ impl WorkerFactory for LiveFactory {
         Ok(Arc::new(LiveWorker {
             id: WorkerId::new(),
             profile: PathBuf::from(format!("/profiles/{}", session_id.0)),
+            session_id: session_id.clone(),
+            artifacts: self.artifacts.clone(),
             probe: Arc::clone(&self.probe),
             open_mode: self.open_mode,
             block_delete: self.block_delete,
@@ -946,9 +996,22 @@ async fn live_server_with_modes(
     probe
         .navigation_interface_failures_remaining
         .store(usize::from(fail_navigation_interface), Ordering::SeqCst);
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let max_download_bytes = network.max_download_bytes;
+    let artifact_store = adaptive_http.then(|| {
+        artifact_store::ArtifactStore::new(
+            root.path().join("artifacts"),
+            max_download_bytes,
+            16_384,
+        )
+    });
     let workers = Arc::new(WorkerPool::new(
         4,
         Arc::new(LiveFactory {
+            artifacts: artifact_store.clone(),
             probe: Arc::clone(&probe),
             open_mode,
             block_delete,
@@ -958,17 +1021,7 @@ async fn live_server_with_modes(
         .await
         .expect("harness checkpoint store opens");
     let downloads_dir = root.path().join("downloads");
-    let (pages, resources) = if adaptive_http {
-        let network = network_engine::NetworkPolicy {
-            allow_loopback: true,
-            ..Default::default()
-        };
-        let max_download_bytes = network.max_download_bytes;
-        let artifact_store = artifact_store::ArtifactStore::new(
-            root.path().join("artifacts"),
-            max_download_bytes,
-            16_384,
-        );
+    let (pages, resources, ownership_recorder) = if let Some(artifact_store) = artifact_store {
         let adaptive = page_runtime::AdaptivePageEngine::new(
             network_engine::EligibilityPolicy::new(network.clone()),
             network_engine::DirectHttpExecutor::new(network.clone()),
@@ -976,7 +1029,7 @@ async fn live_server_with_modes(
             network,
         )
         .with_downloads_root(&downloads_dir);
-        let (ownership, _) = SessionOwnershipRegistry::bounded(4);
+        let (ownership, recorder) = SessionOwnershipRegistry::bounded(4);
         let reader = ArtifactReader::new(
             artifact_store.clone(),
             ownership,
@@ -997,11 +1050,13 @@ async fn live_server_with_modes(
                 max_download_bytes,
                 128,
             ),
+            Some(recorder),
         )
     } else {
         (
             PageRuntime::new(journal.clone(), workers.clone()),
             ArtifactResources::default(),
+            None,
         )
     };
     let runtime = RuntimeService::with_recovery(
@@ -1009,7 +1064,12 @@ async fn live_server_with_modes(
         pages,
         RecoveryCoordinator::new(checkpoints),
     );
-    let authenticated = Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle.clone()));
+    let authenticated = Arc::new(match ownership_recorder {
+        Some(recorder) => {
+            AuthenticatedRuntime::with_session_ownership(runtime.clone(), handle.clone(), recorder)
+        }
+        None => AuthenticatedRuntime::new(runtime.clone(), handle.clone()),
+    });
     let interface: Arc<dyn RuntimeInterface> = if restart_accessibility || fail_navigation_interface
     {
         probe

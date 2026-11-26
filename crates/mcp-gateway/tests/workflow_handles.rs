@@ -2635,7 +2635,18 @@ async fn live_with_a_followed_popup_reported_closed() -> (
     types::PageId,
     types::PageId,
 ) {
-    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    follow_popup_and_close(live_with_capabilities(Capability::ALL.to_vec()).await).await
+}
+
+async fn follow_popup_and_close(
+    live: common::LiveServer,
+) -> (
+    common::LiveServer,
+    String,
+    types::SessionId,
+    types::PageId,
+    types::PageId,
+) {
     let started = start(&live.server, 1, json!({"profile": "popup-follow-fake"})).await;
     let result = &started["result"]["structuredContent"];
     assert_eq!(result["status"], "completed", "{started}");
@@ -2735,6 +2746,56 @@ async fn handle_resolved_read_only_call_replays_on_the_opener_once_the_popup_clo
             .all(|item| item["kind"] != "popupClosed"),
         "the handle already resolves to the opener, so a second call needs no fallback: {again}"
     );
+}
+
+#[tokio::test]
+async fn screenshot_popup_fallback_only_replays_without_save_as() {
+    for save_as in [Some("capture.png"), None] {
+        let live = live_adaptive_server(verified_handle(Capability::ALL.to_vec()).await).await;
+        initialize(&live.server).await;
+        let (live, workflow_handle, _, opener_page_id, popup_page_id) =
+            follow_popup_and_close(live).await;
+        let mut arguments = json!({"workflowHandle": workflow_handle});
+        if let Some(path) = save_as {
+            arguments["saveAs"] = json!(path);
+        }
+
+        let response = call_tool(&live.server, 3, "screenshot", arguments).await;
+        let content = &response["result"]["structuredContent"];
+        let evidence = content["evidence"].as_array().expect("screenshot evidence");
+        let popup_closed = evidence
+            .iter()
+            .find(|item| item["kind"] == "popupClosed")
+            .unwrap_or_else(|| panic!("missing popupClosed evidence: {response}"));
+        assert_eq!(
+            popup_closed["popupPageId"],
+            json!(popup_page_id),
+            "{response}"
+        );
+        assert_eq!(
+            popup_closed["openerPageId"],
+            json!(opener_page_id),
+            "{response}"
+        );
+        let screenshot = evidence.iter().find(|item| item["kind"] == "screenshot");
+        if let Some(path) = save_as {
+            assert_eq!(content["status"], "failed", "{response}");
+            assert!(screenshot.is_none(), "{response}");
+            assert!(!live.downloads_dir.join(path).exists());
+        } else {
+            assert_eq!(content["status"], "completed", "{response}");
+            let screenshot = screenshot.expect("capture returned screenshot evidence");
+            assert_eq!(screenshot["pageId"], json!(opener_page_id), "{response}");
+            assert!(
+                response["result"]["content"]
+                    .as_array()
+                    .expect("screenshot content")
+                    .iter()
+                    .any(|item| item["type"] == "image"),
+                "{response}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

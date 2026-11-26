@@ -246,7 +246,8 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                if input.save_as.is_some() {
+                let export_requested = input.save_as.is_some();
+                if export_requested {
                     if let Err(error) = self
                         .authorization
                         .require_capability(&context, types::Capability::FileDownload)
@@ -264,8 +265,10 @@ impl Server {
                         max_edge: input.max_edge,
                     }),
                 );
+                // The catalog describes the write-capable tool. A capture
+                // without an export can safely retry on a closed popup's opener.
                 let mut response = self
-                    .submit_envelope(context, envelope, handle, call.name.as_str())
+                    .submit_envelope_with_popup_retry(context, envelope, handle, !export_requested)
                     .await;
                 if let (Ok(outcome), Some(save_as)) = (&mut response, input.save_as.as_deref()) {
                     self.save_screenshot_as(outcome, save_as).await;
