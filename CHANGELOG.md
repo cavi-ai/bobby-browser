@@ -7,6 +7,7 @@
 - `intent_detect_challenge` classifies a Turnstile widget as its own `turnstile` challenge type.
 - `[http].allow_file_urls` lets `navigate` and `workflow_start` open `file://` URLs for local previews; it is off by default.
 - `intent_submit_and_verify` fails `verificationLinkRequired` on a page that asks to confirm an email address through a link, and `confirmedOutsideExpectedState` when the page reads as a confirmation but `expectedState` missed.
+- The TypeScript SDK accepts the `turnstile` challenge type and the `verificationLinkRequired` and `confirmedOutsideExpectedState` error codes.
 
 ### Fixed
 

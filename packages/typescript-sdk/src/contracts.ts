@@ -77,7 +77,7 @@ export interface InterfaceError {
   requiredCapability: Capability | null;
 }
 
-export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted" | "verificationCodeRequired";
+export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted" | "verificationCodeRequired" | "verificationLinkRequired" | "confirmedOutsideExpectedState";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
 
 /** Maximum UTF-8 byte length for intent `purpose` strings. */
@@ -269,7 +269,7 @@ export interface RevealedControl { controlKind: FormControlKind; accessibleName?
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }
 export interface ViewportSize { width: number; height: number; }
 export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy?: number | null; }
-export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry";
+export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry" | "turnstile";
 /** What the page showed after a submit, as read by the vision provider. */
 export type PageOutcome = "confirmed" | "rejected" | "noMessage";
 export interface ChallengeDetectionRegion { x: number; y: number; width: number; height: number; }

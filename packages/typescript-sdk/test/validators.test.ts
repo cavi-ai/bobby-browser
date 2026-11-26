@@ -110,6 +110,7 @@ function evidenceFixtures(): Evidence[] {
     { kind: "controlAction", action: { operation: "setChecked", target: { role: "checkbox", accessibleName: "Business" }, state: { kind: "checked", checked: true }, validity: { willValidate: true, valid: true }, nodeReplaced: false, revealedControls: [{ controlKind: "text", accessibleName: "Company", target: { role: "textbox", accessibleName: "Company" } }] } },
     { kind: "structuredExtraction", pageId: ID, value: { title: "Example" }, truncated: false, pageDerived: true },
     { kind: "challengeDetection", confidence: 0.9, detection: { challenge_type: "recaptchaV2Checkbox", confidence: 0.8, region: { x: 1, y: 2, width: 3, height: 4 }, blocking: true, hints: { target_field_purpose: "Verify", instruction_text: "Check the box" } }, priorKind: "recaptchaV2Checkbox" },
+    { kind: "challengeDetection", confidence: 0.9, detection: { challenge_type: "turnstile", confidence: 0.8, blocking: true } },
     { kind: "outcomeReading", outcome: "rejected", message: "Email is already registered", confidence: 0.9, pageDerived: true },
     { kind: "cookieState", pageId: ID, cookies: [{ name: "session", value: "value", domain: "example.test", path: "/", secure: true, httpOnly: true, sameSite: "Lax", expiresUnix: 1 }] },
     { kind: "pdfArtifact", artifactId: "artifact-pdf", mediaType: "application/pdf", bytes: 4, sha256: SHA },
@@ -221,6 +222,8 @@ test("deep validators accept every exact public response variant", () => {
     { status: "resourceExhausted", commandId: ID, error: { ...commandError, code: "resourceExhausted" }, retryAfterMs: 0 },
     { status: "restarted", commandId: ID, priorAttemptId: ID, attemptId: ID_2, reason: "retry", evidence: [] },
     { status: "failed", commandId: ID, error: commandError },
+    { status: "failed", commandId: ID, error: { ...commandError, code: "verificationLinkRequired" } },
+    { status: "failed", commandId: ID, error: { ...commandError, code: "confirmedOutsideExpectedState" } },
     {
       status: "failed",
       commandId: ID,
