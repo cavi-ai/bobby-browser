@@ -35,7 +35,9 @@ pub trait ControlActionAdapter: Send + Sync {
     fn missing_control(&self) -> CommandError {
         CommandError {
             code: ErrorCode::TargetNotFound,
-            message: "form control target was not found".into(),
+            message:
+                "target is not a form control from form_snapshot; use click for other elements"
+                    .into(),
             layer: ErrorLayer::Driver,
             retryable: false,
         }
@@ -292,19 +294,48 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
     }
 
     let activated = matches!(command.action, ControlAction::Activate);
-    let after = match adapter.read_snapshot(page_id, true).await {
-        Ok(after) => Some(after),
-        Err(_) if activated => None,
-        Err(error) => return Err(error),
-    };
-    let after_control = match adapter.describe(&prepared, &command.target).await {
-        Ok(Some(control)) => Some(control),
-        _ => {
-            adapter
-                .recover(page_id, &command.target, require_visible, activated)
-                .await?
+    let (mut after, mut after_control) = read_after(
+        adapter,
+        page_id,
+        command,
+        &prepared,
+        require_visible,
+        activated,
+    )
+    .await?;
+    match &command.action {
+        ControlAction::SetText {
+            value,
+            clear_first: true,
+        } if !value.contains(['\n', '\r']) => {
+            // Retype once after a dropped keystroke or re-render. Line breaks
+            // can dispatch Enter and submit a form, which must not be replayed.
+            let landed = after_control.as_ref().is_some_and(|control| {
+                let matched = evidence_action(&command.action, control);
+                control_action_evidence(control, matched.as_ref(), false, None).is_ok()
+            });
+            if !landed {
+                if let Ok(prepared) = adapter
+                    .resolve(page_id, &command.target, require_visible)
+                    .await
+                {
+                    let control = adapter
+                        .describe(&prepared, &command.target)
+                        .await?
+                        .ok_or_else(|| adapter.missing_control())?;
+                    validate_control_action(&control, &command.action)?;
+                    adapter.before_primitive(&prepared).await?;
+                    adapter
+                        .type_text(page_id, &prepared, &command.target, value, true)
+                        .await?;
+                    (after, after_control) =
+                        read_after(adapter, page_id, command, &prepared, require_visible, false)
+                            .await?;
+                }
+            }
         }
-    };
+        _ => {}
+    }
     let node_replaced = after_control.is_none();
     let after_control = match after_control {
         Some(control) => control,
@@ -323,6 +354,32 @@ pub async fn run<A: ControlActionAdapter + ?Sized>(
     // selection, and redaction stay on the evidence for the caller to read.
     verify_evidence(&command.action, &action)?;
     Ok(adapter.decorate(vec![Evidence::ControlAction { action }]))
+}
+
+/// The page and the control after a primitive; the control is `None` when its
+/// node left the page and nothing else answers the target.
+async fn read_after<A: ControlActionAdapter + ?Sized>(
+    adapter: &A,
+    page_id: &PageId,
+    command: &ControlActionCommand,
+    prepared: &A::Prepared,
+    require_visible: bool,
+    activated: bool,
+) -> Result<(Option<FormSnapshot>, Option<FormControl>), CommandError> {
+    let after = match adapter.read_snapshot(page_id, true).await {
+        Ok(after) => Some(after),
+        Err(_) if activated => None,
+        Err(error) => return Err(error),
+    };
+    let after_control = match adapter.describe(prepared, &command.target).await {
+        Ok(Some(control)) => Some(control),
+        _ => {
+            adapter
+                .recover(page_id, &command.target, require_visible, activated)
+                .await?
+        }
+    };
+    Ok((after, after_control))
 }
 
 /// User-visible postconditions on the one evidence record: the value landed

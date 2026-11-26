@@ -19,8 +19,8 @@ use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, GetLayoutMetricsParams, Viewport,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
-    RemoteObjectId,
+    CallFunctionOnParams, EvaluateParams, ExecutionContextId, GetPropertiesParams,
+    ReleaseObjectGroupParams, RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
@@ -497,6 +497,38 @@ impl ResolvedTarget {
             .await
             .map_err(cdp_error)?;
         Ok(())
+    }
+
+    /// Presses Escape on another focused, expanded control outside a dialog.
+    /// Returns whether Escape was sent so the caller can check the new state.
+    pub async fn close_foreign_popup(&self, page: &Page) -> Result<bool, CommandError> {
+        let open = self
+            .eval::<bool>(
+                page,
+                r#"
+                const doc = el.ownerDocument;
+                if (!doc.hasFocus()) return false;
+                let active = doc.activeElement;
+                while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+                if (!active || active === el || el.contains(active) || active.contains(el) ||
+                    active.getAttribute('aria-expanded') !== 'true') return false;
+
+                // A trusted Escape can cancel the dialog even if it targets a child.
+                const dialog = 'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]';
+                for (let node = active; node; node = node.parentNode || node.host) {
+                    if (node.matches?.(dialog)) return false;
+                }
+                return !doc.querySelector('dialog:modal');
+                "#,
+            )
+            .await?;
+        if open {
+            self.execution_page(page)
+                .press_key("Escape")
+                .await
+                .map_err(cdp_error)?;
+        }
+        Ok(open)
     }
 
     /// The element read as one form control (JSON text), or `None` when it is
@@ -1177,7 +1209,28 @@ const COMBOBOX_OPTIONS: &str = "const norm=s=>String(s||'').replace(/\\s+/g,' ')
 
 /// After [`COMBOBOX_OPTIONS`], when no option has a role: the rows shown
 /// since [`COMBOBOX_MARK_SCRIPT`], each the innermost element holding its text.
-const COMBOBOX_ROLELESS: &str = "if(!options.length){ const before=el[Symbol.for('bobby.shownBeforeOptions')]; const row=n=>{const own=norm(n.textContent); if(!own||own.length>200) return false; const kids=[...n.children].filter(c=>norm(c.textContent)); return kids.length===0||(kids.length===1&&norm(kids[0].textContent)!==own)}; if(before) options=[...(doc.body?.querySelectorAll('*')||[])].filter(n=>!before.has(n)&&n!==el&&!n.contains(el)&&visible(n)&&row(n)); }";
+/// Live regions and visually hidden text are announcements, not rows.
+const COMBOBOX_ROLELESS: &str = r#"
+if (!options.length) {
+    const before = el[Symbol.for('bobby.shownBeforeOptions')];
+    const row = n => {
+        const own = norm(n.textContent);
+        if (!own || own.length > 200) return false;
+        const kids = [...n.children].filter(c => norm(c.textContent));
+        return kids.length === 0 || (kids.length === 1 && norm(kids[0].textContent) !== own);
+    };
+    const spoken = n => {
+        const r = n.getBoundingClientRect();
+        const live = n.closest('[aria-live]')?.getAttribute('aria-live').trim().toLowerCase();
+        return r.width <= 1 || r.height <= 1 || live === 'polite' || live === 'assertive'
+            || Boolean(n.closest('[role="status"],[role="alert"],[role="log"]'));
+    };
+    if (before) {
+        options = [...(doc.body?.querySelectorAll('*') || [])].filter(n =>
+            !before.has(n) && n !== el && !n.contains(el) && visible(n) && !spoken(n) && row(n));
+    }
+}
+"#;
 
 /// With `wanted` bound, after the option lists: the option whose text is
 /// `wanted`, exactly, else ignoring case.
@@ -1736,6 +1789,54 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     }
 }
 
+/// The CSS selector of a target that carries `css` and nothing else.
+pub(crate) fn css_only_selector(target: &TargetSpec) -> Option<&str> {
+    target.css.as_deref().filter(|_| {
+        target.test_id.is_none()
+            && target.role.is_none()
+            && target.accessible_name.is_none()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.attributes.is_empty()
+            && target.frame_path.is_empty()
+            && target.shadow_path.is_empty()
+            && target.ordinal.is_none()
+    })
+}
+
+fn selector_target(
+    page_id: &PageId,
+    element: Element,
+    target: TargetSpec,
+    best_match_authorized: bool,
+) -> ResolvedTarget {
+    ResolvedTarget {
+        native: Some(element),
+        locator: JsLocator {
+            scope: LocatorScope::Context(None),
+            shadow_hosts: Vec::new(),
+            id: String::new(),
+        },
+        execution_page: None,
+        frame_id: None,
+        iframe_hop: None,
+        frame_path: Vec::new(),
+        frame_owners: Vec::new(),
+        evidence: Evidence::Resolution {
+            target: Box::new(target),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: page_id.clone(),
+                frame: None,
+                role: None,
+                name: None,
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized,
+        },
+    }
+}
+
 pub async fn resolve_target_with_visibility(
     page_id: &PageId,
     page: &Page,
@@ -1751,20 +1852,11 @@ pub async fn resolve_target_with_visibility(
                 format!("no element matches selector `{selector}`"),
             )
         })?;
-        return Ok(ResolvedTarget {
-            native: Some(element),
-            locator: JsLocator {
-                scope: LocatorScope::Context(None),
-                shadow_hosts: Vec::new(),
-                id: String::new(),
-            },
-            execution_page: None,
-            frame_id: None,
-            iframe_hop: None,
-            frame_path: Vec::new(),
-            frame_owners: Vec::new(),
-            evidence: selector_evidence(page_id, selector),
-        });
+        let target = TargetSpec {
+            css: Some(selector.into()),
+            ..TargetSpec::default()
+        };
+        return Ok(selector_target(page_id, element, target, false));
     };
     validate_target_spec(target)?;
 
@@ -1782,7 +1874,28 @@ pub async fn resolve_target_with_visibility(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) = match choose(target, &raw, require_visible) {
+        Ok(chosen) => chosen,
+        // A css-only target on an element no candidate covers (a container,
+        // a landmark, a class or combinator selector) resolves as a selector.
+        Err(error) if error.code == ErrorCode::TargetNotFound => {
+            let Some(css) = css_only_selector(target) else {
+                return Err(error);
+            };
+            return match query_css_target(page, css, require_visible, target.allow_best_match).await
+            {
+                Ok(Some((element, best_match_authorized))) => Ok(selector_target(
+                    page_id,
+                    element,
+                    target.clone(),
+                    best_match_authorized,
+                )),
+                Err(ambiguous) if ambiguous.code == ErrorCode::TargetAmbiguous => Err(ambiguous),
+                _ => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let iframe_hop = (candidate.role.as_deref() == Some("iframe"))
         .then(|| semantic_iframe_hop(&candidate, &raw));
     let owner = owners.get(&candidate.id).cloned();
@@ -2307,6 +2420,64 @@ async fn element_from_remote_object(
     page.element_from_backend_node_id(backend_node_id)
         .await
         .map_err(cdp_error)
+}
+
+/// Resolve CSS matches outside the action candidate census, keeping the
+/// selected node and its uniqueness check in the same DOM read.
+async fn query_css_target(
+    page: &Page,
+    selector: &str,
+    require_visible: bool,
+    allow_best_match: bool,
+) -> Result<Option<(Element, bool)>, CommandError> {
+    let css = serde_json::to_string(selector)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let visibility = dom_engine::ELEMENT_VISIBILITY_SCRIPT;
+    let group = format!(
+        "bobby-css-resolve-{}",
+        TARGET_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut params = EvaluateParams::new(format!(
+        r#"(() => {{
+            const matches = [];
+            for (const el of document.querySelectorAll({css})) {{
+                if ({require_visible} && !(() => {{ {visibility} }})()) continue;
+                matches.push(el);
+                if (matches.length === 2) break;
+            }}
+            return matches;
+        }})()"#
+    ));
+    params.return_by_value = Some(false);
+    params.object_group = Some(group.clone());
+    let matched = async {
+        let result = page.evaluate(params).await.map_err(cdp_error)?;
+        let Some(array_id) = result.object().object_id.clone() else {
+            return Ok(None);
+        };
+        let mut params = GetPropertiesParams::new(array_id);
+        params.own_properties = Some(true);
+        let properties = page.execute(params).await.map_err(cdp_error)?.result.result;
+        let multiple = properties.iter().any(|property| property.name == "1");
+        if multiple && !allow_best_match {
+            return Err(target_error(
+                ErrorCode::TargetAmbiguous,
+                "CSS selector matched multiple eligible elements. Narrow the selector or set allowBestMatch",
+            ));
+        }
+        let first = properties
+            .into_iter()
+            .find(|property| property.name == "0")
+            .and_then(|property| property.value)
+            .and_then(|object| object.object_id);
+        match first {
+            Some(id) => Ok(Some((element_from_remote_object(page, id).await?, multiple))),
+            None => Ok(None),
+        }
+    }
+    .await;
+    let _ = page.execute(ReleaseObjectGroupParams::new(group)).await;
+    matched
 }
 
 /// The first element `selector` matches under `owner`, or in the page's
@@ -2886,29 +3057,10 @@ async fn evaluate_in_context<T: DeserializeOwned>(
     let mut params = EvaluateParams::new(expression);
     params.context_id = context_id;
     params.return_by_value = Some(true);
-    page.evaluate(params)
-        .await
-        .map_err(cdp_error)?
-        .into_value()
+    let result = page.evaluate(params).await.map_err(cdp_error)?;
+    // A script that returns `null` or `undefined` decodes as JSON null.
+    serde_json::from_value(result.value().cloned().unwrap_or(serde_json::Value::Null))
         .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))
-}
-
-fn selector_evidence(page_id: &PageId, selector: &str) -> Evidence {
-    Evidence::Resolution {
-        target: Box::new(TargetSpec {
-            css: Some(selector.into()),
-            ..TargetSpec::default()
-        }),
-        fingerprint: Box::new(TargetFingerprint {
-            page_id: page_id.clone(),
-            frame: None,
-            role: None,
-            name: None,
-            stable_attributes: BTreeMap::new(),
-        }),
-        candidates: Vec::new(),
-        best_match_authorized: false,
-    }
 }
 
 /// A dead browser target rewritten to this message must still be recognized

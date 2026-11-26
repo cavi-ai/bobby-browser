@@ -55,6 +55,8 @@ Every session on a durable profile shares one Chrome. A Chrome already running o
 
 Start that Chrome with `--remote-debugging-port=0` to share it while it runs.
 
+Chrome launched by bobby uses a mock keychain and a basic password store by default. Set `"systemKeychain": true` on a listed profile to launch its Chrome with the system keychain and password store, so passwords and cookies the profile encrypted with them stay readable. The setting applies only to a Chrome bobby launches; disposable profiles always use the mock keychain.
+
 With `headless = true`, shared-profile attachment requires the browser process's first switch to be `--headless` or `--headless=new`, following an unambiguous executable path. Bobby places that switch first when launching a headless profile, including through a shell launcher. A headed browser, unavailable mode information or an ambiguous legacy/manual command line is refused before a page opens. The existing browser is left running. If no DevTools endpoint answers, Bobby launches Chrome only without ownership markers or after proving the local singleton owner is dead. Live, foreign-host and unverified owners are left untouched. Release the existing browser before starting the same profile headlessly; restarting Bobby alone does not change a shared browser's mode. A headed and headless browser cannot concurrently own the same profile directory.
 
 For headless Chromium work, check `runtime_info.capabilities` for `headless-chromium` before `workflow_start`. It is present only when the running default worker selection enforces headless Chromium for every candidate; headed, unknown or mixed-engine fallbacks do not advertise it. This reflects the running factory, not a later edit to `config.toml`. Completed workflow startup then proves the attachment check passed. The normal browser-selection precedence still applies, including `AUTOMATION_RUNTIME_BROWSER_SELECTION` overrides.
@@ -72,6 +74,8 @@ Before starting that Firefox workflow, require `firefox-background-attachment` i
 | `checkpoints_dir` | `./data/storage/checkpoints` | Checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority records |
 | `journal_key_path` | `journal.key` beside the loaded config file | Key that seals command journal records; created owner-only on first use. Records written before a key was set stay readable. |
+
+The runtime records live session and page IDs in a file next to `journal_path` with `.sessions.json` appended to the full journal filename. After a restart, `runtime_info.lostSessions` reports the previous runtime’s sessions to their owning principal. A failed startup leaves that snapshot available for the next attempt.
 
 ## `[context]`
 
