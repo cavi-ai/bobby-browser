@@ -1,9 +1,15 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
+use types::{
+    CreateSessionRequest, ExecutionPolicy, LostSession, PageId, RuntimeError, SessionId,
+    SessionState,
+};
 use worker_pool::{choose_session_engine, WorkerPool};
 
 /// Longest a session close waits on browser-side teardown before it unregisters
@@ -15,6 +21,62 @@ pub struct SessionManager {
     inner: Arc<RwLock<HashMap<SessionId, SessionState>>>,
     workers: Option<Arc<WorkerPool>>,
     release_timeout: Duration,
+    ledger: Option<Arc<Ledger>>,
+}
+
+/// The live sessions on disk, rewritten on every change, so the next runtime
+/// can name the sessions this one held when it stopped.
+struct Ledger {
+    path: PathBuf,
+    owners: std::sync::Mutex<HashMap<SessionId, String>>,
+    lost: Vec<LedgerEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerEntry {
+    session_id: SessionId,
+    #[serde(default)]
+    page_ids: Vec<PageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+}
+
+impl Ledger {
+    fn write(&self, sessions: &HashMap<SessionId, SessionState>) {
+        let owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let entries: Vec<LedgerEntry> = sessions
+            .values()
+            .map(|session| LedgerEntry {
+                session_id: session.id.clone(),
+                page_ids: session.page_ids.clone(),
+                owner: owners.get(&session.id).cloned(),
+            })
+            .collect();
+        // Owner updates can share the sessions read lock. Keep the ownership
+        // snapshot locked through replacement so older writes cannot land last.
+        let written = serde_json::to_vec(&entries)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| {
+                let parent = self
+                    .path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                std::fs::create_dir_all(parent)?;
+                let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+                staged.write_all(&bytes)?;
+                staged.persist(&self.path).map_err(|error| error.error)?;
+                Ok(())
+            });
+        drop(owners);
+        if let Err(error) = written {
+            tracing::warn!(%error, path = %self.path.display(), "session.ledger_write_failed");
+        }
+    }
 }
 
 impl Default for SessionManager {
@@ -23,6 +85,7 @@ impl Default for SessionManager {
             inner: Arc::default(),
             workers: None,
             release_timeout: DEFAULT_RELEASE_TIMEOUT,
+            ledger: None,
         }
     }
 }
@@ -38,6 +101,81 @@ impl SessionManager {
     pub fn with_release_timeout(mut self, release_timeout: Duration) -> Self {
         self.release_timeout = release_timeout;
         self
+    }
+
+    /// Reads the previous runtime's sessions for [`Self::lost_sessions`].
+    /// The snapshot stays on disk until startup succeeds or live sessions change.
+    pub fn with_ledger(mut self, path: PathBuf) -> Self {
+        let lost: Vec<LedgerEntry> = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                tracing::warn!(%error, path = %path.display(), "session.ledger_unreadable");
+                Vec::new()
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "session.ledger_unreadable");
+                Vec::new()
+            }
+        };
+        for entry in &lost {
+            tracing::warn!(
+                session_id = %entry.session_id.0,
+                pages = entry.page_ids.len(),
+                "session.lost_on_restart"
+            );
+        }
+        self.ledger = Some(Arc::new(Ledger {
+            path,
+            owners: Default::default(),
+            lost,
+        }));
+        self
+    }
+
+    /// Starts recording this runtime after its listeners and adapters are ready.
+    /// The previous snapshot remains available in memory for this runtime.
+    pub async fn activate_ledger(&self) {
+        if let Some(ledger) = &self.ledger {
+            let sessions = self.inner.read().await;
+            ledger.write(&sessions);
+        }
+    }
+
+    /// Sessions the previous runtime held when it stopped, with their pages.
+    /// `owner` keeps only the sessions recorded for that owner.
+    pub fn lost_sessions(&self, owner: Option<&str>) -> Vec<LostSession> {
+        self.ledger
+            .iter()
+            .flat_map(|ledger| ledger.lost.iter())
+            .filter(|entry| owner.is_none() || entry.owner.as_deref() == owner)
+            .map(|entry| LostSession {
+                session_id: entry.session_id.clone(),
+                page_ids: entry.page_ids.clone(),
+            })
+            .collect()
+    }
+
+    /// Records who owns `id`, so a later runtime reports it only to that owner.
+    pub async fn record_owner(&self, id: &SessionId, owner: String) {
+        let Some(ledger) = &self.ledger else {
+            return;
+        };
+        let sessions = self.inner.read().await;
+        if !sessions.contains_key(id) {
+            return;
+        }
+        ledger
+            .owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.clone(), owner);
+        ledger.write(&sessions);
+    }
+
+    fn persist(&self, sessions: &HashMap<SessionId, SessionState>) {
+        if let Some(ledger) = &self.ledger {
+            ledger.write(sessions);
+        }
     }
 
     pub async fn create(&self, req: CreateSessionRequest) -> Result<SessionState, RuntimeError> {
@@ -101,10 +239,10 @@ impl SessionManager {
                 );
             }
         }
-        self.inner
-            .write()
-            .await
-            .insert(session.id.clone(), session.clone());
+        let mut sessions = self.inner.write().await;
+        sessions.insert(session.id.clone(), session.clone());
+        self.persist(&sessions);
+        drop(sessions);
         tracing::info!(session_id = %session.id.0, "session.created");
         Ok(session)
     }
@@ -127,7 +265,17 @@ impl SessionManager {
             }
             workers.forget_session_engine(id).await;
         }
-        self.inner.write().await.remove(id);
+        let mut sessions = self.inner.write().await;
+        sessions.remove(id);
+        if let Some(ledger) = &self.ledger {
+            ledger
+                .owners
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(id);
+        }
+        self.persist(&sessions);
+        drop(sessions);
         tracing::info!(session_id = %id.0, "session.deleted");
         Ok(())
     }
@@ -161,10 +309,14 @@ impl SessionManager {
         let session = guard
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
-        if !session.page_ids.contains(&page_id) {
+        let added = !session.page_ids.contains(&page_id);
+        if added {
             session.page_ids.push(page_id);
         }
         session.last_used_at = types::WireTimestamp::now();
+        if added {
+            self.persist(&guard);
+        }
         Ok(())
     }
 
@@ -180,6 +332,7 @@ impl SessionManager {
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".into()))?;
         let closed: HashSet<_> = closed.iter().collect();
+        let before = session.page_ids.clone();
         session.page_ids.retain(|page| !closed.contains(page));
         let mut known: HashSet<_> = session.page_ids.iter().cloned().collect();
         for page in live {
@@ -188,6 +341,9 @@ impl SessionManager {
             }
         }
         session.last_used_at = types::WireTimestamp::now();
+        if session.page_ids != before {
+            self.persist(&guard);
+        }
         Ok(())
     }
 
@@ -196,8 +352,12 @@ impl SessionManager {
         let session = guard
             .get_mut(id)
             .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
+        let before = session.page_ids.len();
         session.page_ids.retain(|candidate| candidate != page_id);
         session.last_used_at = types::WireTimestamp::now();
+        if session.page_ids.len() != before {
+            self.persist(&guard);
+        }
         Ok(())
     }
 }

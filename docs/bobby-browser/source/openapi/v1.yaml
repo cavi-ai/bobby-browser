@@ -145,6 +145,10 @@ paths:
         - name: engine
           in: query
           schema: { type: string, enum: [chromium, firefox, webKit] }
+        - name: x-bobby-include-lost-sessions
+          in: header
+          description: Pass `true` to include the caller's lost sessions when available.
+          schema: { type: string, const: "true" }
         - $ref: "#/components/parameters/Authorization"
         - $ref: "#/components/parameters/InterfaceVersion"
         - $ref: "#/components/parameters/CorrelationId"
@@ -1438,6 +1442,16 @@ components:
           type: string
           enum: [chromium, firefox, webKit]
           description: Present when the request specifies an engine.
+        lostSessions:
+          type: array
+          description: Sessions the previous runtime held when it stopped, with their pages. They no longer exist.
+          items:
+            type: object
+            additionalProperties: false
+            required: [sessionId, pageIds]
+            properties:
+              sessionId: { type: string }
+              pageIds: { type: array, items: { type: string } }
         storageIntegrity:
           type: array
           maxItems: 4

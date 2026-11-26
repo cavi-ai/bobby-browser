@@ -30,6 +30,14 @@ pub struct RuntimeInfo {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub storage_integrity: Vec<StorageIntegrityIssue>,
+    /// Sessions the previous runtime held when it stopped. They and their
+    /// pages no longer exist; open a new session.
+    #[serde(
+        default,
+        rename = "lostSessions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub lost_sessions: Vec<LostSession>,
     pub version: String,
     pub capabilities: Vec<String>,
     pub active_sessions: usize,
@@ -67,6 +75,15 @@ pub struct RuntimeInfo {
 pub struct StorageIntegrityIssue {
     pub store: String,
     pub reason: String,
+}
+
+/// A session that ended when its runtime stopped, with the pages it held.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LostSession {
+    pub session_id: SessionId,
+    pub page_ids: Vec<PageId>,
 }
 
 /// Health classification of one vision provider boundary. `degraded` means

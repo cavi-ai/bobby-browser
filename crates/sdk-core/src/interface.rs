@@ -215,6 +215,10 @@ impl AuthenticatedRuntime {
                     "session ownership finalization failed",
                 ));
             }
+            self.inner
+                .sessions
+                .record_owner(&session.id, ctx.principal_id.as_uuid().to_string())
+                .await;
         }
         Ok(session)
     }
@@ -494,6 +498,13 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::RuntimeInfo)?;
         let mut info = self.inner.runtime_info().await;
+        // With per-principal sessions, each principal sees only the lost sessions it owned.
+        if self.session_ownership.is_some() {
+            info.lost_sessions = self
+                .inner
+                .sessions
+                .lost_sessions(Some(&ctx.principal_id.as_uuid().to_string()));
+        }
         info.storage_integrity.retain(|issue| {
             issue.store != "commandIdempotency" && issue.store != "lifecycleIdempotency"
         });

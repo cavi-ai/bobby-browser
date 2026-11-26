@@ -318,10 +318,11 @@ impl PageInner {
                     .unwrap(),
             )
             .await?;
-        resp.result
-            .result
-            .value
-            .ok_or_else(|| CdpError::msg("call_js_fn_by_value returned no value"))
+        if let Some(exception) = resp.result.exception_details {
+            return Err(CdpError::JavascriptException(Box::new(exception)));
+        }
+        // CDP leaves `value` out for `undefined` and sends `null` for `null`.
+        Ok(resp.result.result.value.unwrap_or(serde_json::Value::Null))
     }
 
     pub async fn evaluate_expression(

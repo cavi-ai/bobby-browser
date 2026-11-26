@@ -1766,7 +1766,9 @@ fn compose_worker_factory_inner(
             .iter()
             .find(|profile| profile.profile_id == profile_id)
         {
-            Some(profile) => chromium_factory.with_durable_profile_dir(profile.profile_dir.clone()),
+            Some(profile) => chromium_factory
+                .with_durable_profile_dir(profile.profile_dir.clone())
+                .with_system_keychain(profile.system_keychain),
             None => chromium_factory.with_durable_profile(profile_id),
         };
     }

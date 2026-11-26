@@ -189,6 +189,72 @@ async fn runtime_info_engine_scope_is_dispatched_without_a_session() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn runtime_info_only_exposes_lost_sessions_to_compatible_clients() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger = root.path().join("sessions.json");
+    let principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010"));
+    let session = types::SessionId::default();
+    tokio::fs::write(
+        &ledger,
+        serde_json::to_vec(&serde_json::json!([{
+            "sessionId": session,
+            "owner": principal.as_uuid().to_string()
+        }]))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            principal,
+            [Capability::SessionRead],
+            types::WireTimestamp::now() + Duration::from_mins(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let mut runtime = RuntimeService::default();
+    runtime.sessions = runtime.sessions.with_ledger(ledger);
+    let (_, recorder) = interface_core::SessionOwnershipRegistry::bounded(1);
+    let app = router(AppState::new(
+        Arc::new(authority),
+        move |handle| {
+            Arc::new(AuthenticatedRuntime::with_session_ownership(
+                runtime.clone(),
+                handle,
+                recorder.clone(),
+            )) as Arc<dyn RuntimeInterface>
+        },
+        InterfaceConfig::default(),
+    ));
+
+    for path in ["/v1/runtime", "/v1/runtime?engine=firefox"] {
+        for opt_in in [false, true] {
+            let mut request = authorized("GET", path, &token, Body::empty());
+            if opt_in {
+                request.headers_mut().insert(
+                    "x-bobby-include-lost-sessions",
+                    axum::http::HeaderValue::from_static("true"),
+                );
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 65536).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if opt_in {
+                assert_eq!(
+                    json["lostSessions"][0]["sessionId"],
+                    serde_json::json!(session)
+                );
+            } else {
+                assert!(json.get("lostSessions").is_none(), "{json}");
+            }
+        }
+    }
+}
+
 async fn counted_app(
     capabilities: impl IntoIterator<Item = Capability>,
     interface: InterfaceConfig,

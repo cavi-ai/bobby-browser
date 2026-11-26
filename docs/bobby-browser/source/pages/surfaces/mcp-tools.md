@@ -81,7 +81,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `page_open` | `page:write` (+ `browser:mutate` with `url`) | Open a page, optionally navigating |
 | `pdf` | `browser:mutate` | Print a page to a PDF artifact |
 | `recovery_status` | `recovery:read` | Read a workflow's checkpoint and receipts |
-| `runtime_info` | `session:read` | Runtime version, active sessions, credential expiry |
+| `runtime_info` | `session:read` | Runtime version, active sessions, sessions lost when the previous runtime stopped (`lostSessions`), credential expiry |
 | `screenshot` | `browser:mutate` | Screenshot artifact |
 | `session_capabilities` | `session:read` | Observe an owned session's engine-option support, grants, policy, and connection state |
 | `session_close` | `session:write` | Close a session and release its browser |
@@ -135,7 +135,7 @@ On Chromium, `inspect` and `form_snapshot` wait up to 2 seconds while a rendered
 | `document` | `ready` |
 | `networkQuiet` | `idleMs`, `maxInFlight`, optional `ignoreUrlSubstrings`, `ignoreResourceTypes`, `ignoreLongLived` |
 
-`matcher` is `{"kind": "exact" | "contains" | "regex", "value": "..."}`.
+`matcher` is `{"kind": "exact" | "contains" | "regex", "value": "..."}`. `regex` uses Rust `regex` syntax, which has no look-around or backreferences.
 
 ### Acting on a page
 
@@ -159,7 +159,7 @@ On Chromium, `inspect` and `form_snapshot` wait up to 2 seconds while a rendered
 
 On Chromium, `navigate` with `waitUntil: "commit"` returns the committed URL with an empty title. Use `domContentLoaded` when the title matters. `interactive` adds a document settling check after `DOMContentLoaded`, and `networkIdle` waits for network idle before settling. See [Firefox navigation](../guides/firefox-companion.md#navigation) for its readiness behavior.
 
-`download_url` saves under the configured downloads directory. `saveAs` is relative to it or an absolute path inside it. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
+`download_url` saves under the configured downloads directory. `saveAs` names a file directly in it, as a file name or an absolute path; subdirectories are refused. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
 
 `selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu, and `selectOne` on a text box types the value and clicks the suggestion that reads it. A value no option reads fails with the options offered.
 
