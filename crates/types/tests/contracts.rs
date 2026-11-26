@@ -323,6 +323,7 @@ fn resolution_wait_and_screenshot_evidence_are_typed() {
     let candidate = types::CandidateEvidence {
         role: Some("button".into()),
         name: Some("Continue".into()),
+        ordinal: None,
         score: 100,
         reasons: vec!["exactAccessibleName".into()],
     };

@@ -24,6 +24,7 @@ fn record(kind: &str, path: IntentResolutionPath) -> ExecutionRecord {
         candidates: vec![CandidateEvidence {
             role: Some("textbox".to_string()),
             name: Some("Email address".to_string()),
+            ordinal: None,
             score: 92,
             reasons: vec!["accessible name match".to_string()],
         }],
