@@ -157,7 +157,9 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 
 On Chromium, `navigate` with `waitUntil: "commit"` returns the committed URL with an empty title. Use `domContentLoaded` when the title matters. `interactive` adds a document settling check after `DOMContentLoaded`, and `networkIdle` waits for network idle before settling. See [Firefox navigation](../guides/firefox-companion.md#navigation) for its readiness behavior.
 
-`download_url` saves under the configured downloads directory. `saveAs` is relative to it or an absolute path inside it. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
+`download_url` saves under the configured downloads directory, which the advertised `saveAs` description names. `saveAs` is relative to it or an absolute path inside it. The result echoes `savedTo` and a `sha256`, which is the proof of the saved bytes. When the direct HTTP path cannot prove the page's cookie state equivalent, the download is fetched inside the page's own browser session under the same limits, and the result reports `browserFallback` as its execution path.
+
+On Chromium, `click_and_wait_for_download` also watches the session's downloads folder, so a download whose browser events never arrive, such as one a new tab starts, still returns `savedTo` and `sha256` once the file is finished. `maxBytes` must be between 1 and the advertised maximum (`[http].max_download_bytes`). Text-like downloads also return `downloadPreviews` of up to 4 KiB.
 
 `selectOne` and `selectMany` match an option's value first, then its visible label. On Chromium they also drive a button that opens a menu, and `selectOne` on a text box types the value and clicks the suggestion that reads it. A value no option reads fails with the options offered.
 

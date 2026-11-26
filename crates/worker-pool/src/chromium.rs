@@ -4207,71 +4207,95 @@ impl crate::EventsEngine for ChromiumWorker {
         // Download events reach every connection to a shared browser: only
         // this page's frames start this session's download.
         let frames = self.shared_browser.then_some(frame_ids);
+        let before = download_entries(&self.download_dir).await;
         press(&page, &resolved).await?;
-        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let begin = begins.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download event stream closed",
-                    )
-                })?;
-                if frames
-                    .as_ref()
-                    .is_none_or(|frames| frames.contains(&begin.frame_id))
-                {
-                    return Ok::<_, CommandError>(begin);
-                }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let completed = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
-            loop {
-                let event = progress.next().await.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "download progress stream closed",
-                    )
-                })?;
-                if event.guid == begin.guid {
-                    match event.state {
-                        DownloadProgressState::Completed => return Ok::<_, CommandError>(event),
-                        DownloadProgressState::Canceled => {
-                            return Err(driver_error(
-                                ErrorCode::BrowserCommandFailed,
-                                "download was canceled",
-                            ))
-                        }
-                        DownloadProgressState::InProgress => {}
+        let events = async {
+            let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+                loop {
+                    let begin = begins.next().await.ok_or_else(|| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            "download event stream closed",
+                        )
+                    })?;
+                    if frames
+                        .as_ref()
+                        .is_none_or(|frames| frames.contains(&begin.frame_id))
+                    {
+                        return Ok::<_, CommandError>(begin);
                     }
                 }
-            }
-        })
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))??;
-        let mut path = completed
-            .file_path
-            .clone()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
-        // The download directory is browser-wide, so on a shared browser
-        // another session may have redirected it: bring the file home.
-        if self.shared_browser && !path.starts_with(&self.download_dir) {
-            let home = self
-                .download_dir
-                .join(format!("{}-{}", begin.guid, begin.suggested_filename));
-            tokio::fs::rename(&path, &home)
+            })
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))??;
+            let completed =
+                tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+                    loop {
+                        let event = progress.next().await.ok_or_else(|| {
+                            driver_error(
+                                ErrorCode::BrowserCommandFailed,
+                                "download progress stream closed",
+                            )
+                        })?;
+                        if event.guid == begin.guid {
+                            match event.state {
+                                DownloadProgressState::Completed => {
+                                    return Ok::<_, CommandError>(event)
+                                }
+                                DownloadProgressState::Canceled => {
+                                    return Err(driver_error(
+                                        ErrorCode::BrowserCommandFailed,
+                                        "download was canceled",
+                                    ))
+                                }
+                                DownloadProgressState::InProgress => {}
+                            }
+                        }
+                    }
+                })
                 .await
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            path = home;
-        }
+                .map_err(|_| timeout_error(command.timeout_ms))??;
+            let mut path = completed
+                .file_path
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
+            // The download directory is browser-wide, so on a shared browser
+            // another session may have redirected it: bring the file home.
+            if self.shared_browser && !path.starts_with(&self.download_dir) {
+                let home = self
+                    .download_dir
+                    .join(format!("{}-{}", begin.guid, begin.suggested_filename));
+                tokio::fs::rename(&path, &home)
+                    .await
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                path = home;
+            }
+            Ok::<_, CommandError>((begin.suggested_filename.clone(), path))
+        };
+        // A download the page's events miss, such as one a new tab starts, still
+        // lands in this session's folder. A shared browser's folder is not private.
+        let (filename, path) = if self.shared_browser {
+            events.await?
+        } else {
+            let arrived = tokio::select! {
+                arrived = events => arrived,
+                path = settled_download(&self.download_dir, &before) => Ok(named_download(path)),
+            };
+            match arrived {
+                Ok(arrived) => arrived,
+                Err(error) => match finished_download(&self.download_dir, &before).await {
+                    Some((path, _)) => named_download(path),
+                    None => return Err(error),
+                },
+            }
+        };
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         Ok(vec![
             Evidence::Download {
-                filename: begin.suggested_filename.clone(),
+                filename,
                 path: path.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
                 sha256: hex::encode(Sha256::digest(&bytes)),
@@ -5261,6 +5285,63 @@ fn reattach_failed(reason: impl std::fmt::Display) -> CommandError {
 /// worker lease open indefinitely.
 fn clamp_js_timeout_ms(requested_ms: u64, max_ms: u64) -> u64 {
     requested_ms.min(max_ms)
+}
+
+const DOWNLOAD_SCAN_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Entry names in a downloads folder; a missing folder has none.
+async fn download_entries(dir: &Path) -> HashSet<std::ffi::OsString> {
+    let mut names = HashSet::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            names.insert(entry.file_name());
+        }
+    }
+    names
+}
+
+/// A file new since `before` that the browser finished: never a `.crdownload` part.
+async fn finished_download(
+    dir: &Path,
+    before: &HashSet<std::ffi::OsString>,
+) -> Option<(PathBuf, u64)> {
+    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if before.contains(&entry.file_name())
+            || path
+                .extension()
+                .is_some_and(|extension| extension == "crdownload")
+        {
+            continue;
+        }
+        match entry.metadata().await {
+            Ok(metadata) if metadata.is_file() => return Some((path, metadata.len())),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Resolves once a new finished file keeps the same size across two scans.
+async fn settled_download(dir: &Path, before: &HashSet<std::ffi::OsString>) -> PathBuf {
+    let mut last = None;
+    loop {
+        tokio::time::sleep(DOWNLOAD_SCAN_INTERVAL).await;
+        let current = finished_download(dir, before).await;
+        if let Some((path, _)) = current.as_ref().filter(|_| current == last) {
+            return path.clone();
+        }
+        last = current;
+    }
+}
+
+fn named_download(path: PathBuf) -> (String, PathBuf) {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (filename, path)
 }
 
 fn timeout_error(timeout_ms: u64) -> CommandError {

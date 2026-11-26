@@ -4,13 +4,15 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chromiumoxide::cdp::browser_protocol::io::{CloseParams, ReadParams, StreamHandle};
 use chromiumoxide::cdp::browser_protocol::network::{
     Cookie, CookieParam, CookiePartitionKey, CookiePriority, CookieSameSite, CookieSourceScheme,
-    SetCookiesParams, TimeSinceEpoch,
+    LoadNetworkResourceOptions, LoadNetworkResourceParams, SetCookiesParams, TimeSinceEpoch,
 };
 use network_engine::state::{
     HttpCookie, HttpCookiePartitionKey, HttpStateSnapshot, ResponseStateDelta,
 };
+use network_engine::PageFetch;
 use types::{CommandError, ErrorCode, ErrorLayer, Evidence, PageId};
 
 use super::{bounded_cdp, command_failed, driver_error, ChromiumWorker};
@@ -175,6 +177,57 @@ impl crate::WebStateEngine for ChromiumWorker {
 
     fn supports_http_state(&self) -> bool {
         true
+    }
+
+    async fn fetch_in_page(
+        &self,
+        page_id: &PageId,
+        url: &str,
+        max_bytes: u64,
+    ) -> Result<PageFetch, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let frame_id = bounded_cdp(page.mainframe(), command_failed)
+            .await?
+            .ok_or_else(|| driver_error(ErrorCode::BrowserCommandFailed, "page has no frame"))?;
+        // The page's own network context: its cookie jar, partitions and redirects.
+        let mut params =
+            LoadNetworkResourceParams::new(url, LoadNetworkResourceOptions::new(true, true));
+        params.frame_id = Some(frame_id);
+        let resource = bounded_cdp(page.execute(params), command_failed)
+            .await?
+            .result
+            .resource;
+        let status = resource.http_status_code.unwrap_or_default() as u16;
+        let stream = match resource.stream {
+            Some(stream) if resource.success && (200..300).contains(&status) => stream,
+            _ => {
+                return Err(driver_error(
+                    ErrorCode::HttpTransferFailed,
+                    format!(
+                        "page fetch failed: HTTP {status} {}",
+                        resource.net_error_name.unwrap_or_default()
+                    ),
+                ))
+            }
+        };
+        let read = read_stream(&page, &stream, max_bytes).await;
+        let _ = bounded_cdp(page.execute(CloseParams::new(stream)), command_failed).await;
+        let headers = resource
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.inner().as_object())
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(PageFetch {
+            url: url.to_owned(),
+            headers,
+            body: read?,
+        })
     }
 
     async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
@@ -459,6 +512,41 @@ async fn apply_state_commit<E>(
     application.await?;
     finish_state_commit(state, next_version, validators);
     Ok(())
+}
+
+/// Reads a CDP stream to its end, failing once it passes `max_bytes`.
+async fn read_stream(
+    page: &chromiumoxide::Page,
+    stream: &StreamHandle,
+    max_bytes: u64,
+) -> Result<Vec<u8>, CommandError> {
+    use base64::Engine as _;
+    let mut body = Vec::new();
+    loop {
+        let chunk = bounded_cdp(
+            page.execute(ReadParams::new(stream.clone())),
+            command_failed,
+        )
+        .await?
+        .result;
+        if chunk.base64_encoded == Some(true) {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(chunk.data.as_bytes())
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            body.extend_from_slice(&bytes);
+        } else {
+            body.extend_from_slice(chunk.data.as_bytes());
+        }
+        if body.len() as u64 > max_bytes {
+            return Err(driver_error(
+                ErrorCode::HttpResponseTooLarge,
+                format!("page fetch exceeded the {max_bytes}-byte limit"),
+            ));
+        }
+        if chunk.eof {
+            return Ok(body);
+        }
+    }
 }
 
 fn http_state_conflict(expected: u64, actual: u64) -> CommandError {

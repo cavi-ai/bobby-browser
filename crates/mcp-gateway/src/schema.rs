@@ -1107,7 +1107,12 @@ pub(crate) fn advertised_tool_schema_for_capabilities(
     schema
 }
 
-pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_download_bytes: usize) {
+pub(crate) fn apply_runtime_tool_limits(
+    name: &str,
+    schema: &mut Value,
+    max_download_bytes: usize,
+    downloads_root: Option<&std::path::Path>,
+) {
     if name != "download_url" {
         return;
     }
@@ -1116,6 +1121,12 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
     // applies regardless of which branch an instance matches, so patching it
     // alone is enough.
     schema["properties"]["maxBytes"]["maximum"] = json!(max_download_bytes);
+    if let Some(root) = downloads_root {
+        schema["properties"]["saveAs"]["description"] = json!(format!(
+            "Path relative to the downloads root {}, or an absolute path inside it",
+            root.display()
+        ));
+    }
 }
 
 /// Adds the handle alternative only to the advertised schema. The dispatcher

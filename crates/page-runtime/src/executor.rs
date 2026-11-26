@@ -365,10 +365,15 @@ impl PageRuntime {
                     .web_state(),
             );
             let state_page = envelope.page_id.as_ref().expect("validated page id");
-            let retried_state = reads_only.then(|| prepared.state.clone());
-            let mut commit = web_state
-                .commit_http_state(state_page, prepared.state_version, prepared.state)
-                .await;
+            let retried_state = prepared.state.clone().filter(|_| reads_only);
+            let mut commit = match prepared.state {
+                Some(state) => {
+                    web_state
+                        .commit_http_state(state_page, prepared.state_version, state)
+                        .await
+                }
+                None => Ok(()),
+            };
             // Parallel reads race for the version; a read's state applies at the current one.
             if let Some(state) = retried_state.filter(|_| {
                 matches!(&commit, Err(error) if error.code == types::ErrorCode::HttpStateConflict)

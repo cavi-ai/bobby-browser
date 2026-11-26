@@ -563,6 +563,26 @@ impl worker_pool::WebStateEngine for FakeWorker {
         !matches!(self.mode, DriverMode::CookieOnly)
     }
 
+    async fn fetch_in_page(
+        &self,
+        _: &PageId,
+        url: &str,
+        _: u64,
+    ) -> Result<network_engine::PageFetch, CommandError> {
+        self.events.lock().await.push("browser:fetch".into());
+        Ok(network_engine::PageFetch {
+            url: url.to_owned(),
+            headers: vec![
+                ("Content-Type".into(), "text/csv".into()),
+                (
+                    "Content-Disposition".into(),
+                    "attachment; filename=\"session-report.csv\"".into(),
+                ),
+            ],
+            body: b"fetched,in,session\n".to_vec(),
+        })
+    }
+
     async fn http_state(
         &self,
         _: &PageId,
@@ -2733,6 +2753,60 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
     let events = events.lock().await;
     assert!(!events.iter().any(|event| event.starts_with("browser:")));
     assert!(!events.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn download_url_falls_back_to_the_page_session_when_cookie_state_is_unproven() {
+    use sha2::Digest;
+    for (case, set_cookie) in [
+        ("domain", "Set-Cookie: sid=1; Domain=127.0.0.1; Path=/"),
+        (
+            "partitioned",
+            "Set-Cookie: sid=1; Secure; Partitioned; Path=/",
+        ),
+    ] {
+        let url = http_fixture_with_header("direct-bytes", "text/csv", Some(set_cookie)).await;
+        let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::Succeed).await;
+        events.lock().await.push(format!("url:{url}"));
+        let destination = root.path().join(format!("downloads/{case}.csv"));
+        let evidence = completed_evidence(
+            runtime
+                .execute(envelope(
+                    session,
+                    page,
+                    PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                        url,
+                        expected_content_type: Some("text/csv".into()),
+                        max_bytes: 1024,
+                        save_as: Some(format!("{case}.csv")),
+                    }),
+                ))
+                .await,
+        );
+        let saved = std::fs::read(&destination).unwrap();
+        assert_eq!(
+            saved, b"fetched,in,session\n",
+            "{case}: saveAs holds the session bytes"
+        );
+        let sha = hex::encode(sha2::Sha256::digest(&saved));
+        assert!(
+            evidence.iter().any(|item| matches!(item, Evidence::Download { filename, sha256, saved_to: Some(saved_to), .. } if filename == "session-report.csv" && *sha256 == sha && saved_to.ends_with(&format!("{case}.csv")))),
+            "{case}: download evidence proves the saved bytes: {evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|item| matches!(
+                item,
+                Evidence::ExecutionPath {
+                    path: ExecutionPath::BrowserFallback,
+                    ..
+                }
+            )),
+            "{case}: the result names the browser fallback: {evidence:?}"
+        );
+        let events = events.lock().await;
+        assert!(events.contains(&"browser:fetch".to_string()), "{case}");
+        assert!(!events.contains(&"http:commit".to_string()), "{case}");
+    }
 }
 
 #[tokio::test]

@@ -549,7 +549,8 @@ impl From<CommandError> for AdaptiveFailure {
 #[derive(Debug)]
 pub struct PreparedHttpResult {
     pub state_version: u64,
-    pub state: network_engine::ResponseStateDelta,
+    /// `None` when the browser session already holds the response state.
+    pub state: Option<network_engine::ResponseStateDelta>,
     pub artifact: Option<PendingArtifact>,
     pub download: Option<PendingDownload>,
 }
@@ -1411,9 +1412,27 @@ impl AdaptivePageEngine {
                     _ => None,
                 };
                 let page_id = envelope.page_id.as_ref().expect("validated page id");
-                let snapshot = worker_pool::web_state_or_default(lease.worker().web_state())
+                let snapshot = match worker_pool::web_state_or_default(lease.worker().web_state())
                     .http_state(page_id)
-                    .await?;
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) if error.code == ErrorCode::HttpEquivalenceUnproven => {
+                        let PrimitiveCommand::DownloadUrl(command) = command else {
+                            return Err(error.into());
+                        };
+                        return download_in_page(
+                            envelope,
+                            lease,
+                            direct,
+                            command,
+                            download_destination,
+                            0,
+                        )
+                        .await;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let version = snapshot.version;
                 let candidate = match command {
                     PrimitiveCommand::Inspect(command) => {
@@ -1449,7 +1468,20 @@ impl AdaptivePageEngine {
                         }
                     }
                     PrimitiveCommand::DownloadUrl(command) => {
-                        direct.executor.download(&snapshot, command).await?
+                        match direct.executor.download(&snapshot, command).await {
+                            Err(error) if error.code == ErrorCode::HttpEquivalenceUnproven => {
+                                return download_in_page(
+                                    envelope,
+                                    lease,
+                                    direct,
+                                    command,
+                                    download_destination,
+                                    version,
+                                )
+                                .await;
+                            }
+                            candidate => candidate?,
+                        }
                     }
                     _ => unreachable!("eligibility only selects supported HTTP commands"),
                 };
@@ -1485,7 +1517,7 @@ impl AdaptivePageEngine {
                         used_browser: false,
                         prepared_http: Some(PreparedHttpResult {
                             state_version: version,
-                            state,
+                            state: Some(state),
                             artifact: None,
                             download: None,
                         }),
@@ -1538,7 +1570,7 @@ impl AdaptivePageEngine {
                             used_browser: false,
                             prepared_http: Some(PreparedHttpResult {
                                 state_version: version,
-                                state,
+                                state: Some(state),
                                 artifact: Some(pending),
                                 download,
                             }),
@@ -1622,6 +1654,74 @@ fn side_band_of_the_dom(command: &RuntimeCommand) -> bool {
         command,
         RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
     )
+}
+
+/// Cookie state the HTTP mirror cannot prove equivalent is fetched inside the
+/// page's own browser session, under the same byte cap, content type and saveAs rules.
+async fn download_in_page(
+    envelope: &CommandEnvelope,
+    lease: &WorkerLease,
+    direct: &DirectComponents,
+    command: &types::DownloadUrlCommand,
+    destination: Option<DownloadDestination>,
+    version: u64,
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
+    let page_id = envelope.page_id.as_ref().expect("validated page id");
+    let fetched = worker_pool::web_state_or_default(lease.worker().web_state())
+        .fetch_in_page(page_id, &command.url, command.max_bytes)
+        .await?;
+    let (filename, media_type) = fetched.download_metadata();
+    if command
+        .expected_content_type
+        .as_deref()
+        .is_some_and(|expected| expected != media_type)
+    {
+        return Err(equivalence_unproven(ExecutionReason::UnsupportedContentType).into());
+    }
+    let pending = direct
+        .artifacts
+        .put_pending(
+            &envelope.session_id,
+            page_id,
+            &media_type,
+            safe_extension(&filename),
+            &fetched.body,
+            direct.network.max_download_bytes,
+        )
+        .await
+        .map_err(artifact_error)?;
+    let saved_to = destination
+        .as_ref()
+        .map(|destination| destination.reported_path.clone());
+    let download = match destination {
+        Some(destination) => Some(destination.stage(&fetched.body).await?),
+        None => None,
+    };
+    let record = pending.record().clone();
+    Ok(AdaptiveExecution {
+        evidence: vec![
+            Evidence::Download {
+                filename,
+                path: record.artifact_id,
+                bytes: record.bytes,
+                sha256: record.sha256.clone(),
+                saved_to,
+            },
+            execution_evidence(
+                ExecutionPath::BrowserFallback,
+                ExecutionReason::StateConflict,
+                version,
+                ExecutionMetrics::browser(Some(record.bytes), Some(record.sha256)),
+            ),
+        ],
+        used_browser: true,
+        prepared_http: Some(PreparedHttpResult {
+            state_version: version,
+            state: None,
+            artifact: Some(pending),
+            download,
+        }),
+    })
 }
 
 fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
